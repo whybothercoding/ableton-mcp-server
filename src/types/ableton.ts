@@ -27,6 +27,21 @@ export interface ClipInfo {
   is_recording: boolean;
 }
 
+export interface AudioClipSourceInfo {
+  track_index: number;
+  track_name: string;
+  clip_index: number;
+  clip_source: 'session' | 'arrangement';
+  clip_name: string;
+  file_path: string;
+  sample_length?: number | null;
+  sample_rate?: number | null;
+  gain?: number | null;
+  pitch_coarse?: number | null;
+  pitch_fine?: number | null;
+  warping?: boolean | null;
+}
+
 export interface ClipSlotInfo {
   index: number;
   has_clip: boolean;

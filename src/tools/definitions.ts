@@ -62,6 +62,34 @@ export const TOOLS: ToolDefinition[] = [
     requiredCapability: 'get_clip_notes'
   },
   {
+    name: 'get_audio_clip_path',
+    description: 'Get the source audio file path and Live clip metadata for an audio clip in Session or Arrangement view.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        track_index: { type: 'number', description: '0-indexed track position' },
+        clip_index: { type: 'number', description: '0-indexed clip slot (Session) or arrangement clip position' },
+        source: { type: 'string', enum: ['session', 'arrangement'], description: 'Clip collection to inspect; defaults to session' }
+      },
+      required: ['track_index', 'clip_index']
+    },
+    requiredCapability: 'get_audio_clip_path'
+  },
+  {
+    name: 'analyze_audio_clip',
+    description: 'Analyze a clip source file locally for format metadata, integrated loudness, peak/RMS levels, and an approximate frequency-band profile. Requires ffmpeg and ffprobe on the MCP host.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        track_index: { type: 'number', description: '0-indexed track position' },
+        clip_index: { type: 'number', description: '0-indexed clip slot (Session) or arrangement clip position' },
+        source: { type: 'string', enum: ['session', 'arrangement'], description: 'Clip collection to inspect; defaults to session' }
+      },
+      required: ['track_index', 'clip_index']
+    },
+    requiredCapability: 'get_audio_clip_path'
+  },
+  {
     name: 'get_device_parameters',
     description: 'Get parameter list for a specific device on a track, including index, name, current value, min, max.',
     inputSchema: {

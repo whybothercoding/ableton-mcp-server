@@ -1,5 +1,6 @@
 import { CallToolResult } from '@modelcontextprotocol/sdk/types.js';
 import { AbletonClient, AbletonClientError } from '../client/AbletonClient.js';
+import { analyzeAudioFile } from '../audio/analyzer.js';
 
 export class ToolHandler {
   constructor(private readonly client: AbletonClient) {}
@@ -71,6 +72,28 @@ export class ToolHandler {
             track_index: Number(args.track_index),
             clip_index: Number(args.clip_index)
           });
+          break;
+        }
+
+        case 'get_audio_clip_path': {
+          this.client.ensureCapability('get_audio_clip_path');
+          resultData = await this.client.sendCommand('get_audio_clip_path', {
+            track_index: Number(args.track_index),
+            clip_index: Number(args.clip_index),
+            source: args.source || 'session'
+          });
+          break;
+        }
+
+        case 'analyze_audio_clip': {
+          this.client.ensureCapability('get_audio_clip_path');
+          const clipInfo = await this.client.sendCommand<Record<string, any>>('get_audio_clip_path', {
+            track_index: Number(args.track_index),
+            clip_index: Number(args.clip_index),
+            source: args.source || 'session'
+          });
+          const analysis = await analyzeAudioFile(clipInfo.file_path);
+          resultData = { clip: clipInfo, analysis };
           break;
         }
 

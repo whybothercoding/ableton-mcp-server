@@ -223,6 +223,11 @@ class AbletonMCP(ControlSurface):
             # Route the command to the appropriate handler
             if command_type == "get_session_info":
                 response["result"] = self._get_session_info()
+            elif command_type == "get_audio_clip_path":
+                track_index = params.get("track_index", 0)
+                clip_index = params.get("clip_index", 0)
+                source = params.get("source", "session")
+                response["result"] = self._get_audio_clip_path(track_index, clip_index, source)
             elif command_type == "get_track_info":
                 track_index = params.get("track_index", 0)
                 response["result"] = self._get_track_info(track_index)
@@ -669,6 +674,7 @@ class AbletonMCP(ControlSurface):
         """Report script version and capabilities (handshake)."""
         capabilities = [
             "get_session_info",
+            "get_audio_clip_path",
             "get_track_info",
             "get_bulk_session_structure",
             "get_script_info",
@@ -706,6 +712,48 @@ class AbletonMCP(ControlSurface):
         return {
             "script_version": "1.8.0",
             "capabilities": capabilities
+        }
+
+    def _get_audio_clip_path(self, track_index, clip_index, source="session"):
+        """Return the source path and useful metadata for an audio clip."""
+        if source not in ("session", "arrangement"):
+            raise ValueError("source must be 'session' or 'arrangement'")
+        if track_index < 0 or track_index >= len(self._song.tracks):
+            raise IndexError("Track index out of range")
+
+        track = self._song.tracks[track_index]
+        clips = track.clip_slots if source == "session" else getattr(track, "arrangement_clips", [])
+        if clip_index < 0 or clip_index >= len(clips):
+            raise IndexError("Clip index out of range")
+
+        if source == "session":
+            slot = clips[clip_index]
+            if not slot.has_clip:
+                raise ValueError("The selected Session clip slot is empty")
+            clip = slot.clip
+        else:
+            clip = clips[clip_index]
+
+        if not getattr(clip, "is_audio_clip", False):
+            raise ValueError("The selected clip is not an audio clip")
+
+        path = getattr(clip, "file_path", "")
+        if not path:
+            raise ValueError("The selected audio clip has no accessible source file path")
+
+        return {
+            "track_index": track_index,
+            "track_name": track.name,
+            "clip_index": clip_index,
+            "clip_source": source,
+            "clip_name": clip.name,
+            "file_path": path,
+            "sample_length": getattr(clip, "sample_length", None),
+            "sample_rate": getattr(clip, "sample_rate", None),
+            "gain": getattr(clip, "gain", None),
+            "pitch_coarse": getattr(clip, "pitch_coarse", None),
+            "pitch_fine": getattr(clip, "pitch_fine", None),
+            "warping": getattr(clip, "warping", None)
         }
 
     def _get_clip_notes(self, track_index, clip_index):
