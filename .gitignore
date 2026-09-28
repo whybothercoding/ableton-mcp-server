@@ -5,3 +5,5 @@ dist/
 .agents/
 .gemini/
 .codex/
+__pycache__/
+*.pyc
