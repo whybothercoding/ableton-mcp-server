@@ -39,28 +39,24 @@ npm run build
 
 ### 2. Install the Remote Script into Live
 
-Live loads Remote Scripts from a `Remote Scripts` folder inside your **User Library**. The User Library location is configurable, so look up yours first:
+Live loads Remote Scripts from a `Remote Scripts` folder inside your **User Library**, and the User Library location is configurable. The script is a package (a folder of Python files), so the whole folder has to be copied.
 
-1. In Live, open **Preferences → Library**.
-2. Note the **User Library** location shown there. (It can be the default location or a custom one, e.g. on an external drive.)
-3. Inside that folder, create `Remote Scripts/AbletonMCP/` if it doesn't exist.
-4. Copy `remote-script/__init__.py` from this repo into it.
+**Easiest: `npm run deploy`.** It finds your User Library from Live's own preferences (or from `ABLETON_USER_LIBRARY`), refuses to write anywhere that doesn't look like a User Library, mirrors `remote-script/AbletonMCP/` into `Remote Scripts/AbletonMCP/` (removing stale files) and prints the build id. `npm run deploy -- --dry-run` shows what would change without touching anything, and `npm run deploy -- --check` compares the build running inside Live with your source.
 
-The result must look like this. The file has to be named `__init__.py` and sit directly inside `AbletonMCP/`:
+**By hand:** in Live open **Preferences → Library**, note the **User Library** location, then copy the *folder* `remote-script/AbletonMCP` to `<User Library>/Remote Scripts/AbletonMCP`:
 
 ```
 <your User Library>/
 └── Remote Scripts/
     └── AbletonMCP/
-        └── __init__.py
+        ├── __init__.py      (entry point: create_instance, the AbletonMCP class, build id)
+        ├── config.py  clock.py  registry.py  helpers.py  curves.py
+        └── server.py  session.py  tracks.py  clips.py  devices.py  automation.py  browser.py
 ```
 
-Shell equivalent, with `USER_LIBRARY` set to the path from step 2:
+A partial copy makes the script fail to import; AbletonMCP then silently disappears from the Control Surface list (the error is in Live's `Log.txt`). The handshake reports a `build_id` (a hash of the sources) so a stale or partial deploy is visible: `get_health`/`get_script_info` show it.
 
-```bash
-mkdir -p "$USER_LIBRARY/Remote Scripts/AbletonMCP"
-cp remote-script/__init__.py "$USER_LIBRARY/Remote Scripts/AbletonMCP/"
-```
+While developing, `npm run hotswap` reloads the deployed package inside the running Live without a restart (dev only: only a real restart proves a clean load).
 
 > **Note:** Live scans for Remote Scripts only at launch. Restart Live after installing or updating the script. If the User Library is on an external drive, make sure it is mounted before launching Live. On macOS, the terminal you copy from may need permission to access removable volumes (System Settings → Privacy & Security → Files and Folders).
 
@@ -192,7 +188,7 @@ Not covered: device properties Live keeps outside `parameters` (Wavetable's osci
 - Not decodable by ffmpeg, so these return an "unsupported source" error: Ableton-compressed `.aif` files (Live pack samples, AIFF-C codec `able`) and REX files (`.rx2`). Analyze a WAV or uncompressed AIFF instead.
 - Audio analysis is local DSP and file metadata only. It does not provide AI instrument recognition, transcription, key detection, or tempo estimation.
 
-0. **Slow responses (hundreds of milliseconds per call)**: the timer-pumped server answers in about 10 ms. If calls are much slower, the Remote Script in your User Library is probably an older version (the log line `Server started on port 9877 (timer pump, 10 ms)` confirms the new one) or Live lacks `Live.Base.Timer` and is using the threaded fallback. Copy the current `remote-script/__init__.py` and restart Live.
+0. **Slow responses (hundreds of milliseconds per call)**: the timer-pumped server answers in about 10 ms. If calls are much slower, the Remote Script in your User Library is probably an older version (the log line `Server started on port 9877 (timer pump, 10 ms)` confirms the new one) or your Live is older than Live 12 (`Live.Base.Timer` is required; the log then says "AbletonMCP requires Live 12 or later"). Run `npm run deploy -- --check`, then `npm run deploy` and restart Live.
 
 1. **AbletonMCP is not listed under Control Surface**:
    - Live only reads the User Library configured in **Preferences → Library**. Confirm the script is in *that* library's `Remote Scripts/AbletonMCP/__init__.py`, not a different one.
@@ -204,7 +200,7 @@ Not covered: device properties Live keeps outside `parameters` (Wavetable's osci
    - Check if port 9877 is blocked by firewall or in use by another application.
 
 3. **Unsupported Capability Errors**:
-   - The MCP server queries `get_script_info` on startup. If a tool requires a Remote Script command that is missing, it returns a clear unsupported-capability error. Copy the current `remote-script/__init__.py` into your User Library's `Remote Scripts/AbletonMCP/` and restart Live.
+   - The MCP server queries `get_script_info` on startup. If a tool requires a Remote Script command that is missing, it returns a clear unsupported-capability error. Run `npm run deploy` (it copies the whole `remote-script/AbletonMCP` package into your User Library) and restart Live.
 
 4. **Group Track Errors**:
    - Group tracks and Master/Return tracks do not have arm buttons. The `AbletonMCP` script handles arm state safely via `can_be_armed` checks.
@@ -225,32 +221,17 @@ The live suites use a scratch clip on a MIDI track with a device, restore every 
 
 ## How to Add a New Live-Side Command
 
-To add a new capability to the server:
-
-1. **Add Python Handler in `remote-script/__init__.py`**:
+1. **Implement it in the matching module** under `remote-script/AbletonMCP/` (`session.py`, `tracks.py`, `clips.py`, `devices.py`, `automation.py`, `browser.py`; each is a mixin class on `AbletonMCP`). Write the implementation as a method that raises on failure (`ValueError`, `IndexError`, ...; the dispatcher turns them into coded error responses).
+2. **Register a thin adapter with `@command`** in the same class:
    ```python
-   def _my_new_feature(self, param1):
-       # Perform Live API call
-       return {"result": ...}
+   @command("my_new_feature", writes=True)          # writes=True: runs in its own undo step; destructive=True flags deletes
+   def _cmd_my_new_feature(self, params):
+       return self._my_new_feature(params.get("track_index", 0))
    ```
-
-2. **Route Command in `_process_command`**:
-   - Everything runs on Live's main thread when the timer pump is active (`_process_command(command, direct=True)`). State-changing commands go in the `main_thread_task` chain so the threaded fallback still schedules them safely; keep handlers quick, since a slow one blocks Live's main thread.
-
-3. **Register Capability in `_get_script_info`**:
-   Add `"my_new_feature"` string to the `capabilities` list in `_get_script_info()`.
-
-4. **Define Types & Schema**:
-   - Add TypeScript type definitions in `src/types/ableton.ts`.
-   - Add tool definition in `src/tools/definitions.ts` specifying `requiredCapability: 'my_new_feature'`.
-
-5. **Implement Handler**:
-   - Add a case branch in `src/tools/handlers.ts` calling `this.client.sendCommand('my_new_feature', { ... })`.
-
-6. **Rebuild**:
-   ```bash
-   npm run build
-   ```
+   The registry drives dispatch, undo wrapping and the capability list (no other list to update). Everything runs on Live's main thread, so keep handlers quick: a slow one blocks Live.
+3. **Add the MCP tool**: a definition in `src/tools/definitions.ts` (with `requiredCapability: 'my_new_feature'`), a case in `src/tools/handlers.ts` that calls `this.client.sendCommand('my_new_feature', {...})`, and types in `src/types/ableton.ts` if needed.
+4. **Test it**: offline (`test/remote_script_test.py`, extend the fakes), live (`test/live-integration.mjs`, with cleanup) and MCP (`test/mcp-tools.mjs`).
+5. **Build and deploy**: `npm run build && npm run deploy`, restart Live (or `npm run hotswap` while iterating).
 
 ---
 

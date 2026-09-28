@@ -246,10 +246,8 @@ def load_module():
     control_surface = types.ModuleType("_Framework.ControlSurface")
     control_surface.ControlSurface = FakeControlSurface
     sys.modules.update({"Live": live, "_Framework": framework, "_Framework.ControlSurface": control_surface})
-    spec = importlib.util.spec_from_file_location("AbletonMCP_under_test", os.path.join(ROOT, "remote-script", "__init__.py"))
-    module = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(module)
-    return module
+    sys.path.insert(0, os.path.join(ROOT, "remote-script"))
+    return importlib.import_module("AbletonMCP")
 
 
 mod = load_module()
@@ -267,7 +265,7 @@ class FakeClock(object):
 
 
 def make_script(port=None):
-    mod.DEFAULT_PORT = port or free_port()
+    mod.config.DEFAULT_PORT = port or free_port()
     FakeTimer.instances = []
     c_instance = types.SimpleNamespace(song=make_song(), app=types.SimpleNamespace())
     return mod.AbletonMCP(c_instance)
@@ -474,9 +472,9 @@ class RampTests(unittest.TestCase):
         self.script = make_script()
         self.addCleanup(self.script._stop_server)
         self.clock = FakeClock()
-        self.original_time = mod.time
-        mod.time = self.clock
-        self.addCleanup(setattr, mod, "time", self.original_time)
+        self.original_now = mod.clock.now
+        mod.clock.now = self.clock.time
+        self.addCleanup(setattr, mod.clock, "now", self.original_now)
         self.freq = self.script._song.tracks[0].devices[0].parameters[1]
 
     def ramp(self, **overrides):
@@ -572,6 +570,64 @@ class RampTests(unittest.TestCase):
         self.advance(100.0)
         self.assertEqual(self.freq.value, 1.0)
         self.assertTrue(all(0.0 <= w <= 1.0 for w in self.freq.writes))
+
+
+# ---------------------------------------------------------------- package hygiene
+
+class PackageTests(unittest.TestCase):
+    PACKAGE = os.path.join(ROOT, "remote-script", "AbletonMCP")
+
+    def test_no_module_uses_a_name_it_never_imported_or_defined(self):
+        """A verbatim split can lose an import; this catches it without needing Live."""
+        import ast
+        import builtins
+        problems = []
+        for filename in sorted(n for n in os.listdir(self.PACKAGE) if n.endswith(".py")):
+            with open(os.path.join(self.PACKAGE, filename)) as handle:
+                tree = ast.parse(handle.read())
+            defined = set(dir(builtins)) | {"__file__", "__name__"}
+            for node in ast.walk(tree):
+                if isinstance(node, (ast.Import, ast.ImportFrom)):
+                    defined.update((a.asname or a.name).split(".")[0] for a in node.names)
+                elif isinstance(node, (ast.FunctionDef, ast.ClassDef)):
+                    defined.add(node.name)
+                elif isinstance(node, ast.Name) and isinstance(node.ctx, (ast.Store, ast.Del)):
+                    defined.add(node.id)
+                elif isinstance(node, ast.ExceptHandler) and node.name:
+                    defined.add(node.name)
+                elif isinstance(node, ast.arg):
+                    defined.add(node.arg)
+            for node in ast.walk(tree):
+                if isinstance(node, ast.Name) and isinstance(node.ctx, ast.Load) and node.id not in defined:
+                    problems.append("{0}:{1} {2}".format(filename, node.lineno, node.id))
+        self.assertEqual(problems, [])
+
+    def test_every_command_module_registers_commands_on_import(self):
+        for name in ("session", "tracks", "clips", "devices", "automation", "browser"):
+            self.assertTrue(hasattr(sys.modules["AbletonMCP." + name], name.capitalize() + "Mixin"), name)
+        self.assertGreater(len(mod._COMMANDS), 40)
+
+    def test_settings_are_read_from_config_at_call_time(self):
+        with open(os.path.join(self.PACKAGE, "server.py")) as handle:
+            source = handle.read()
+        for setting in ("MAX_REQUEST_BYTES", "CLIENT_IDLE_SECONDS", "PUMP_INTERVAL_MS", "DEFAULT_PORT"):
+            self.assertNotIn(" " + setting, source.replace("config." + setting, ""), setting)
+
+    def test_handshake_reports_version_and_build_id(self):
+        script = make_script()
+        self.addCleanup(script._stop_server)
+        info = script._get_script_info()
+        self.assertEqual(info["script_version"], mod.config.SCRIPT_VERSION)
+        self.assertRegex(info["build_id"], r"^[0-9a-f]{12}$")
+        self.assertEqual(info["build_id"], mod.BUILD_ID)
+
+    def test_build_id_changes_when_a_source_file_changes(self):
+        import hashlib
+        digest = hashlib.sha1()
+        for name in sorted(n for n in os.listdir(self.PACKAGE) if n.endswith(".py")):
+            with open(os.path.join(self.PACKAGE, name), "rb") as handle:
+                digest.update(name.encode("utf-8") + b"\0" + handle.read() + b"\0")
+        self.assertEqual(digest.hexdigest()[:12], mod.BUILD_ID)  # the algorithm scripts/deploy.mjs mirrors
 
 
 # ---------------------------------------------------------------- dispatcher: registry, errors, undo steps
@@ -894,9 +950,9 @@ class AddressingTests(unittest.TestCase):
 
     def test_ramps_on_return_master_and_nested_devices_are_independent(self):
         clock = FakeClock()
-        original = mod.time
-        mod.time = clock
-        self.addCleanup(setattr, mod, "time", original)
+        original = mod.clock.now
+        mod.clock.now = clock.time
+        self.addCleanup(setattr, mod.clock, "now", original)
         common = {"to": 1.0, "from": 0.0, "seconds": 2.0}
         self.script._ramp_parameter(dict(common, track_index=0, device_index=0, parameter_index=1))
         self.script._ramp_parameter(dict(common, track_index=0, track_type="return", device_index=0, parameter_index=1))
@@ -982,13 +1038,13 @@ class PumpServerTests(unittest.TestCase):
 
     def test_server_uses_the_timer_pump(self):
         self.assertTrue(self.timer.running)
-        self.assertEqual(self.timer.interval, mod.PUMP_INTERVAL_MS)
+        self.assertEqual(self.timer.interval, mod.config.PUMP_INTERVAL_MS)
 
     def test_read_and_write_commands_round_trip_without_deadlock(self):
         info = self.call("get_script_info")
         self.assertEqual(info["status"], "success")
         self.assertIn("draw_automation", info["result"]["capabilities"])
-        self.assertEqual(info["result"]["script_version"], "1.11.0")
+        self.assertEqual(info["result"]["script_version"], mod.config.SCRIPT_VERSION)
         tempo = self.call("set_tempo", {"tempo": 133.0})
         self.assertEqual(tempo["status"], "success")
         self.assertEqual(self.script._song.tempo, 133.0)
@@ -1061,9 +1117,9 @@ class PumpServerTests(unittest.TestCase):
         self.assertEqual(self.call("get_script_info")["status"], "success")
 
     def test_idle_clients_are_closed(self):
-        original = mod.CLIENT_IDLE_SECONDS
-        mod.CLIENT_IDLE_SECONDS = 0.05
-        self.addCleanup(setattr, mod, "CLIENT_IDLE_SECONDS", original)
+        original = mod.config.CLIENT_IDLE_SECONDS
+        mod.config.CLIENT_IDLE_SECONDS = 0.05
+        self.addCleanup(setattr, mod.config, "CLIENT_IDLE_SECONDS", original)
         sock = self.connect()
         real_time.sleep(0.3)
         sock.settimeout(1)
@@ -1071,9 +1127,9 @@ class PumpServerTests(unittest.TestCase):
         sock.close()
 
     def test_oversized_request_gets_an_error(self):
-        original = mod.MAX_REQUEST_BYTES
-        mod.MAX_REQUEST_BYTES = 1000
-        self.addCleanup(setattr, mod, "MAX_REQUEST_BYTES", original)
+        original = mod.config.MAX_REQUEST_BYTES
+        mod.config.MAX_REQUEST_BYTES = 1000
+        self.addCleanup(setattr, mod.config, "MAX_REQUEST_BYTES", original)
         sock = self.connect()
         sock.sendall(b"x" * 5000)
         self.assertIn("too large", self.read_json(sock)["message"])

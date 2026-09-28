@@ -6,7 +6,14 @@
 // restored afterwards: a scratch clip is created and deleted, parameter values are snapshotted and
 // put back, and only envelopes/ramps it created are cleared. Audio may briefly change while it runs.
 import net from 'node:net';
+import path from 'node:path';
+import { fileURLToPath } from 'node:url';
 import { AbletonClient } from '../dist/client/AbletonClient.js';
+import { buildId, scriptVersion } from '../scripts/build-id.mjs';
+
+const PACKAGE_DIR = path.join(path.dirname(path.dirname(fileURLToPath(import.meta.url))), 'remote-script', 'AbletonMCP');
+const EXPECTED_VERSION = scriptVersion(PACKAGE_DIR);
+const EXPECTED_BUILD = buildId(PACKAGE_DIR);
 
 const client = new AbletonClient({ timeoutMs: 15000 });
 const call = (type, params = {}) => client.sendCommand(type, params);
@@ -87,7 +94,8 @@ const sendA = { track_index: T, device_index: D, parameter_index: pA.index };
 try {
   console.log('Bridge');
   await check('script reports the new version and capabilities', async () => {
-    assert(info.script_version === '1.11.0', `version ${info.script_version}`);
+    assert(info.script_version === EXPECTED_VERSION, `version ${info.script_version}, source has ${EXPECTED_VERSION}`);
+    assert(info.build_id === EXPECTED_BUILD, `the script running in Live (build ${info.build_id}) differs from the source (build ${EXPECTED_BUILD}): run \`npm run deploy\` and restart Live`);
     for (const c of ['draw_automation', 'clear_automation', 'ramp_parameter', 'cancel_ramps']) {
       assert(info.capabilities.includes(c), `missing capability ${c}`);
     }
@@ -115,7 +123,7 @@ try {
   });
   await check('200 parallel connections all succeed', async () => {
     const results = await Promise.all(Array.from({ length: 200 }, () => call('get_script_info')));
-    assert(results.every((r) => r.script_version === '1.11.0'), 'a response was wrong');
+    assert(results.every((r) => r.script_version === EXPECTED_VERSION), 'a response was wrong');
   });
   await check('garbage and half-open connections do not disturb the server', async () => {
     for (const junk of ['{"type": "get_scr', '\u0000\u0001\u0002', 'not json at all', '']) {
@@ -128,7 +136,7 @@ try {
         sock.on('error', resolve);
       });
     }
-    assert((await call('get_script_info')).script_version === '1.11.0', 'server stopped answering');
+    assert((await call('get_script_info')).script_version === EXPECTED_VERSION, 'server stopped answering');
   });
   await check('bulk_set_device_parameters reports actual values and skipped items', async () => {
     const out = await call('bulk_set_device_parameters', {

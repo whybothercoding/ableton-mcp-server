@@ -13,7 +13,9 @@
     "dev": "tsx src/index.ts",
     "test": "python3 -m unittest discover -s test -p \"remote_script_test.py\"",
     "test:live": "node test/live-integration.mjs",
-    "test:mcp": "node test/mcp-tools.mjs"
+    "test:mcp": "node test/mcp-tools.mjs",
+    "deploy": "node scripts/deploy.mjs",
+    "hotswap": "node scripts/hotswap.mjs"
   },
   "keywords": [
     "mcp",
