@@ -1,11 +1,9 @@
 import { spawn } from 'node:child_process';
 import { access, constants, stat } from 'node:fs/promises';
-import { promisify } from 'node:util';
 
 const SAMPLE_RATE = 22050;
 const ANALYSIS_SECONDS = 60;
 const FFT_SIZE = 4096;
-const runAccess = promisify(access);
 
 interface FfprobeResult {
   format?: { format_name?: string; duration?: string; size?: string; bit_rate?: string };
@@ -173,7 +171,9 @@ export async function analyzeAudioFile(filePath: string) {
   const resolvedPath = filePath.trim();
   const fileStat = await stat(resolvedPath).catch(() => null);
   if (!fileStat?.isFile()) throw new Error(`Audio source file is unavailable on the MCP host: ${resolvedPath}`);
-  await runAccess(resolvedPath, constants.R_OK);
+  await access(resolvedPath, constants.R_OK).catch((err: NodeJS.ErrnoException) => {
+    throw new Error(`Audio source file is not readable by the MCP host (${err.code}): ${resolvedPath}`);
+  });
 
   const ffprobe = process.env.FFPROBE_PATH || 'ffprobe';
   const ffmpeg = process.env.FFMPEG_PATH || 'ffmpeg';
@@ -190,9 +190,12 @@ export async function analyzeAudioFile(filePath: string) {
   ], 1024);
   const loudnessMatches = Array.from(loudnessRun.stderr.matchAll(/\bI:\s*(-?inf|-?\d+(?:\.\d+)?)\s*LUFS\b/gi));
   const loudnessValue = loudnessMatches.at(-1)?.[1];
+  // Average channels explicitly: `-ac 1` on float output sums stereo (~+3 dB), overstating peak/RMS.
+  const channelCount = Math.max(1, audioStream.channels ?? 1);
+  const monoMix = `pan=mono|c0=${Array.from({ length: channelCount }, (_, i) => `${1 / channelCount}*c${i}`).join('+')}`;
   const pcmRun = await runProcess(ffmpeg, [
     '-hide_banner', '-loglevel', 'error', '-i', resolvedPath, '-t', String(ANALYSIS_SECONDS),
-    '-vn', '-ac', '1', '-ar', String(SAMPLE_RATE), '-f', 'f32le', '-'
+    '-vn', '-af', monoMix, '-ar', String(SAMPLE_RATE), '-f', 'f32le', '-'
   ]);
 
   return {
