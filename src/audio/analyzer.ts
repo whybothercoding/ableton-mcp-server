@@ -1,5 +1,5 @@
 import { spawn } from 'node:child_process';
-import { access, constants, stat } from 'node:fs/promises';
+import { access, constants, open, stat } from 'node:fs/promises';
 
 const SAMPLE_RATE = 22050;
 const ANALYSIS_SECONDS = 60;
@@ -172,6 +172,20 @@ function pcmMetrics(pcm: Buffer, channelCount: number) {
   };
 }
 
+// Ableton's factory-pack .aif files are AIFF-C with the proprietary 'able' compression type, which ffmpeg cannot decode.
+async function isAbletonCompressedAiff(filePath: string): Promise<boolean> {
+  const handle = await open(filePath, 'r').catch(() => null);
+  if (!handle) return false;
+  try {
+    const { buffer, bytesRead } = await handle.read(Buffer.alloc(1024), 0, 1024, 0);
+    const head = buffer.subarray(0, bytesRead);
+    const commAt = head.indexOf('COMM');
+    return head.subarray(8, 12).toString('latin1') === 'AIFC' && commAt >= 0 && head.subarray(commAt + 26, commAt + 30).toString('latin1') === 'able';
+  } finally {
+    await handle.close();
+  }
+}
+
 export async function analyzeAudioFile(filePath: string) {
   if (!filePath || typeof filePath !== 'string') throw new Error('The Live clip did not provide a source audio file path');
   const resolvedPath = filePath.trim();
@@ -186,21 +200,56 @@ export async function analyzeAudioFile(filePath: string) {
   const probe = await runProcess(ffprobe, [
     '-v', 'error', '-show_entries', 'format=format_name,duration,size,bit_rate:stream=codec_type,codec_name,sample_rate,channels,channel_layout,bits_per_sample,bits_per_raw_sample',
     '-of', 'json', resolvedPath
-  ]);
+  ]).catch(async (err: Error) => {
+    if (/\.(rx2|rex|rcy)$/i.test(resolvedPath)) {
+      throw new Error(`Unsupported source: REX slice file cannot be decoded by ffmpeg: ${resolvedPath}. Analyze a rendered WAV/AIFF instead.`);
+    }
+    if (await isAbletonCompressedAiff(resolvedPath)) {
+      throw new Error(`Unsupported source: Ableton-compressed AIFF (codec 'able', used by Live pack samples) cannot be decoded by ffmpeg: ${resolvedPath}. Analyze a WAV/uncompressed copy instead.`);
+    }
+    throw err;
+  });
   const probeData = JSON.parse(probe.stdout.toString('utf8')) as FfprobeResult;
   const audioStream = probeData.streams?.find((stream) => stream.codec_type === 'audio');
   if (!audioStream) throw new Error('The clip source contains no audio stream');
 
   const loudnessRun = await runProcess(ffmpeg, [
-    '-hide_banner', '-nostats', '-i', resolvedPath, '-filter_complex', 'ebur128=framelog=verbose', '-f', 'null', '-'
+    '-hide_banner', '-nostats', '-i', resolvedPath, '-filter_complex', 'ebur128=framelog=verbose:peak=true', '-f', 'null', '-'
   ], 1024);
   const loudnessMatches = Array.from(loudnessRun.stderr.matchAll(/\bI:\s*(-?inf|-?\d+(?:\.\d+)?)\s*LUFS\b/gi));
   const loudnessValue = loudnessMatches.at(-1)?.[1];
+  const truePeakValue = loudnessRun.stderr.match(/True peak:\s*Peak:\s*(-?inf|-?\d+(?:\.\d+)?)\s*dBFS/i)?.[1];
   const channelCount = Math.max(1, audioStream.channels ?? 1);
   const pcmRun = await runProcess(ffmpeg, [
     '-hide_banner', '-loglevel', 'error', '-i', resolvedPath, '-t', String(ANALYSIS_SECONDS),
     '-vn', '-ac', String(channelCount), '-ar', String(SAMPLE_RATE), '-f', 'f32le', '-'
   ]);
+
+  // Sample peak/RMS come from the native-rate signal: the 22.05 kHz resample used for band analysis can overshoot.
+  const statsRun = await runProcess(ffmpeg, [
+    '-hide_banner', '-nostats', '-i', resolvedPath, '-t', String(ANALYSIS_SECONDS), '-vn',
+    '-af', 'astats=measure_perchannel=none:measure_overall=Peak_level+RMS_level', '-f', 'null', '-'
+  ], 1024);
+  const overall = statsRun.stderr.slice(Math.max(0, statsRun.stderr.lastIndexOf('Overall')));
+  const readDb = (label: string) => {
+    const match = overall.match(new RegExp(`${label} level dB:\\s*(-?inf|-?\\d+(?:\\.\\d+)?)`, 'i'));
+    return match && !/inf/i.test(match[1]) ? Number(match[1]) : match ? null : undefined;
+  };
+  const peakDb = readDb('Peak');
+  const rmsDb = readDb('RMS');
+  const signal = pcmMetrics(pcmRun.stdout, channelCount);
+  if (peakDb !== undefined) {
+    signal.peak_dbfs = peakDb;
+    signal.peak_linear = peakDb === null ? 0 : 10 ** (peakDb / 20);
+  }
+  if (rmsDb !== undefined) {
+    signal.rms_dbfs = rmsDb;
+    signal.rms_linear = rmsDb === null ? 0 : 10 ** (rmsDb / 20);
+  }
+
+  // ffmpeg's ebur128 oversampler can read slightly under the sample peak; a true peak is never lower.
+  const measuredTruePeak = truePeakValue && !/inf/i.test(truePeakValue) ? Number(truePeakValue) : null;
+  const truePeakDbtp = measuredTruePeak !== null && typeof signal.peak_dbfs === 'number' ? Math.max(measuredTruePeak, signal.peak_dbfs) : measuredTruePeak;
 
   return {
     file_path: resolvedPath,
@@ -214,7 +263,8 @@ export async function analyzeAudioFile(filePath: string) {
     channel_layout: audioStream.channel_layout || null,
     bit_depth: audioStream.bits_per_raw_sample ? Number(audioStream.bits_per_raw_sample) : (audioStream.bits_per_sample || null),
     integrated_loudness_lufs: loudnessValue && !/inf/i.test(loudnessValue) ? Number(loudnessValue) : null,
-    signal: pcmMetrics(pcmRun.stdout, channelCount),
-    analysis_notes: [`Signal statistics and frequency bands use the first ${ANALYSIS_SECONDS} seconds, resampled to ${SAMPLE_RATE} Hz. Peak and RMS span all channels; bands sum per-channel spectra.`, 'Integrated loudness is measured over the full source file using the EBU R128 filter.']
+    true_peak_dbtp: truePeakDbtp,
+    signal,
+    analysis_notes: [`Signal statistics use the first ${ANALYSIS_SECONDS} seconds. Peak and RMS are measured at the source sample rate across all channels; frequency bands sum per-channel spectra after resampling to ${SAMPLE_RATE} Hz.`, 'Integrated loudness and true peak (dBTP, 4x oversampled) are measured over the full source file using the EBU R128 filter.']
   };
 }
