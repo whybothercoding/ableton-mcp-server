@@ -123,7 +123,9 @@ export const TOOLS: ToolDefinition[] = [
     inputSchema: {
       type: 'object',
       properties: {
-        path: { type: 'string', description: 'Path in browser tree e.g. "instruments/Simpler"' }
+        path: { type: 'string', description: 'Path in browser tree e.g. "instruments/Simpler"' },
+        limit: { type: 'number', description: 'Maximum items to return (default 200)' },
+        offset: { type: 'number', description: 'Number of items to skip, for paging through large folders (default 0)' }
       },
       required: ['path']
     },

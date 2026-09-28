@@ -117,7 +117,9 @@ export class ToolHandler {
         case 'get_browser_items': {
           this.client.ensureCapability('get_browser_items_at_path');
           resultData = await this.client.sendCommand('get_browser_items_at_path', {
-            path: String(args.path)
+            path: String(args.path),
+            limit: args.limit === undefined ? 200 : Number(args.limit),
+            offset: args.offset === undefined ? 0 : Number(args.offset)
           });
           break;
         }

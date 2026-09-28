@@ -403,14 +403,14 @@ class AbletonMCP(ControlSurface):
             elif command_type == "get_browser_items":
                 path = params.get("path", "")
                 item_type = params.get("item_type", "all")
-                response["result"] = self._get_browser_items(path, item_type)
+                response["result"] = self._get_browser_items(path, item_type, params.get("limit", 200), params.get("offset", 0))
             # Add the new browser commands
             elif command_type == "get_browser_tree":
                 category_type = params.get("category_type", "all")
                 response["result"] = self.get_browser_tree(category_type)
             elif command_type == "get_browser_items_at_path":
                 path = params.get("path", "")
-                response["result"] = self.get_browser_items_at_path(path)
+                response["result"] = self.get_browser_items_at_path(path, params.get("limit", 200), params.get("offset", 0))
             else:
                 response["status"] = "error"
                 response["message"] = "Unknown command: " + command_type
@@ -710,7 +710,7 @@ class AbletonMCP(ControlSurface):
             "bulk_set_device_parameters"
         ]
         return {
-            "script_version": "1.8.0",
+            "script_version": "1.8.1",
             "capabilities": capabilities
         }
 
@@ -1352,7 +1352,7 @@ class AbletonMCP(ControlSurface):
                 
                 # Determine the root based on the first part
                 current_item = None
-                if path_parts[0].lower() == "nstruments":
+                if path_parts[0].lower() == "instruments":
                     current_item = app.browser.instruments
                 elif path_parts[0].lower() == "sounds":
                     current_item = app.browser.sounds
@@ -1405,10 +1405,10 @@ class AbletonMCP(ControlSurface):
         """Legacy alias for get_browser_tree -- same top-level category listing."""
         return self.get_browser_tree(category_type)
 
-    def _get_browser_items(self, path, item_type):
+    def _get_browser_items(self, path, item_type, limit=200, offset=0):
         """Legacy alias for get_browser_items_at_path, with an item_type filter
         ('all', 'folder', 'device', or 'loadable') applied to the returned items."""
-        result = self.get_browser_items_at_path(path)
+        result = self.get_browser_items_at_path(path, limit, offset)
 
         if item_type and item_type != "all" and "items" in result:
             key = "is_" + item_type if item_type in ("folder", "device", "loadable") else None
@@ -1452,42 +1452,48 @@ class AbletonMCP(ControlSurface):
             self.log_message(traceback.format_exc())
             raise
     
+    _BROWSER_ROOTS = (
+        'instruments', 'sounds', 'drums', 'audio_effects', 'midi_effects', 'samples', 'user_library',
+        'current_project', 'clips', 'packs', 'plugins', 'max_for_live', 'user_folders'
+    )
+
+    def _browser_roots(self, browser):
+        roots = []
+        for attr in self._BROWSER_ROOTS:
+            try:
+                root = getattr(browser, attr, None)
+            except Exception:
+                root = None
+            if root is not None and hasattr(root, 'children'):
+                roots.append(root)
+        return roots
+
     def _find_browser_item_by_uri(self, browser_or_item, uri, max_depth=10, current_depth=0):
-        """Find a browser item by its URI"""
+        """Find a browser item by its URI across every browser root.
+
+        A URI like 'query:Samples#FileId_1' shares its prefix with its root's URI
+        ('query:Samples'), so only that root is searched when one matches."""
         try:
-            # Check if this is the item we're looking for
             if hasattr(browser_or_item, 'uri') and browser_or_item.uri == uri:
                 return browser_or_item
-            
-            # Stop recursion if we've reached max depth
             if current_depth >= max_depth:
                 return None
-            
-            # Check if this is a browser with root categories
+
             if hasattr(browser_or_item, 'instruments'):
-                # Check all main categories
-                categories = [
-                    browser_or_item.instruments,
-                    browser_or_item.sounds,
-                    browser_or_item.drums,
-                    browser_or_item.audio_effects,
-                    browser_or_item.midi_effects
-                ]
-                
-                for category in categories:
-                    item = self._find_browser_item_by_uri(category, uri, max_depth, current_depth + 1)
+                roots = self._browser_roots(browser_or_item)
+                prefix = uri.split('#', 1)[0]
+                matching = [root for root in roots if getattr(root, 'uri', None) == prefix]
+                for root in (matching or roots):
+                    item = self._find_browser_item_by_uri(root, uri, max_depth, current_depth + 1)
                     if item:
                         return item
-                
                 return None
-            
-            # Check if this item has children
+
             if hasattr(browser_or_item, 'children') and browser_or_item.children:
                 for child in browser_or_item.children:
                     item = self._find_browser_item_by_uri(child, uri, max_depth, current_depth + 1)
                     if item:
                         return item
-            
             return None
         except Exception as e:
             self.log_message("Error finding browser item by URI: {0}".format(str(e)))
@@ -1538,10 +1544,11 @@ class AbletonMCP(ControlSurface):
             browser_attrs = [attr for attr in dir(app.browser) if not attr.startswith('_')]
             self.log_message("Available browser attributes: {0}".format(browser_attrs))
             
+            root_names = [name for name in self._BROWSER_ROOTS if name in browser_attrs]
             result = {
                 "type": category_type,
                 "categories": [],
-                "available_categories": browser_attrs
+                "available_categories": root_names
             }
             
             # Helper function to process a browser item and its children
@@ -1608,7 +1615,7 @@ class AbletonMCP(ControlSurface):
                     self.log_message("Error processing midi_effects: {0}".format(str(e)))
             
             # Try to process other potentially available categories
-            for attr in browser_attrs:
+            for attr in root_names:
                 if attr not in ['instruments', 'sounds', 'drums', 'audio_effects', 'midi_effects'] and \
                    (category_type == "all" or category_type == attr):
                     try:
@@ -1616,7 +1623,7 @@ class AbletonMCP(ControlSurface):
                         if hasattr(item, 'children') or hasattr(item, 'name'):
                             category = process_item(item)
                             if category:
-                                category["name"] = attr.capitalize()
+                                category["name"] = getattr(item, 'name', None) or attr.capitalize()
                                 result["categories"].append(category)
                     except Exception as e:
                         self.log_message("Error processing {0}: {1}".format(attr, str(e)))
@@ -1630,7 +1637,7 @@ class AbletonMCP(ControlSurface):
             self.log_message(traceback.format_exc())
             raise
     
-    def get_browser_items_at_path(self, path):
+    def get_browser_items_at_path(self, path, limit=200, offset=0):
         """
         Get browser items at a specific path.
         
@@ -1693,7 +1700,7 @@ class AbletonMCP(ControlSurface):
                     return {
                         "path": path,
                         "error": "Unknown or unavailable category: {0}".format(root_category),
-                        "available_categories": browser_attrs,
+                        "available_categories": [name for name in self._BROWSER_ROOTS if name in browser_attrs],
                         "items": []
                     }
             
@@ -1726,11 +1733,16 @@ class AbletonMCP(ControlSurface):
             
             # Get items at the current path
             items = []
+            total = 0
             if hasattr(current_item, 'children'):
-                for child in current_item.children:
+                children = list(current_item.children)
+                total = len(children)
+                limit = max(0, int(limit))
+                offset = max(0, int(offset))
+                for child in children[offset:offset + limit]:
                     item_info = {
                         "name": child.name if hasattr(child, 'name') else "Unknown",
-                        "is_folder": hasattr(child, 'children') and bool(child.children),
+                        "is_folder": bool(getattr(child, 'is_folder', False)),
                         "is_device": hasattr(child, 'is_device') and child.is_device,
                         "is_loadable": hasattr(child, 'is_loadable') and child.is_loadable,
                         "uri": child.uri if hasattr(child, 'uri') else None
@@ -1744,6 +1756,9 @@ class AbletonMCP(ControlSurface):
                 "is_folder": hasattr(current_item, 'children') and bool(current_item.children),
                 "is_device": hasattr(current_item, 'is_device') and current_item.is_device,
                 "is_loadable": hasattr(current_item, 'is_loadable') and current_item.is_loadable,
+                "total": total,
+                "offset": offset,
+                "truncated": offset + len(items) < total,
                 "items": items
             }
             
