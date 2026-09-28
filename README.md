@@ -133,10 +133,10 @@ With Live running and the script enabled, call the `get_health` tool. It should 
 - `get_track_detail`: Detailed track breakdown (clip slots, arrangement clips, devices).
 - `get_clip_notes`: Read all MIDI notes from a clip slot.
 - `get_audio_clip_path`: Get an audio clip's source path and Live-side sample/warp metadata from Session or Arrangement view.
-- `analyze_audio_clip`: Analyze the source file for codec/format metadata, integrated LUFS, peak/RMS levels, and an approximate six-band frequency profile.
+- `analyze_audio_clip`: Analyze the source file for codec/format metadata, integrated LUFS, sample peak, true peak (dBTP), RMS, and an approximate six-band frequency profile.
 - `get_device_parameters`: Get parameter list for a device on a track.
 - `get_browser_tree`: Explore top-level categories in Live browser.
-- `get_browser_items`: Retrieve browser items at a category path.
+- `get_browser_items`: Retrieve browser items at a category path. Paged with `limit` (default 200) and `offset`; the result includes `total` and `truncated`.
 - `get_bulk_session_structure`: Retrieve session info, scenes, and all tracks with clip summaries in one single round trip.
 
 #### Mutation / Write Tools
@@ -153,7 +153,7 @@ With Live running and the script enabled, call the `get_health` tool. It should 
 - `fire_scene` / `stop_all_clips`: Session view scene launching.
 - `start_playback` / `stop_playback`: Global playback transport controls.
 - `set_device_parameter`: Update device parameter values.
-- `load_browser_item`: Load instrument/effect by URI onto a track.
+- `load_browser_item`: Load an instrument, effect or sample onto a track by URI (any URI returned by `get_browser_items`). Samples load into the track's selected clip slot, replacing what is there.
 - `bulk_edit_clips`: Batch clip creation and renaming in serial order on Live's main thread.
 - `bulk_set_device_parameters`: Batch update multiple device parameters in a single round trip.
 
@@ -167,6 +167,7 @@ With Live running and the script enabled, call the `get_health` tool. It should 
 ### Audio Analysis Requirements
 - Install `ffmpeg` and `ffprobe` on the machine running the MCP server. Set `FFMPEG_PATH` and `FFPROBE_PATH` if they are not on `PATH`.
 - The MCP host must be able to read the same source-file path reported by Ableton Live. Analysis reads the first 60 seconds for signal statistics and frequency bands; integrated loudness is measured across the full file.
+- Not decodable by ffmpeg, so these return an "unsupported source" error: Ableton-compressed `.aif` files (Live pack samples, AIFF-C codec `able`) and REX files (`.rx2`). Analyze a WAV or uncompressed AIFF instead.
 - Audio analysis is local DSP and file metadata only. It does not provide AI instrument recognition, transcription, key detection, or tempo estimation.
 
 1. **AbletonMCP is not listed under Control Surface**:
