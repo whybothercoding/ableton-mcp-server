@@ -163,7 +163,17 @@ With Live running and the script enabled, call the `get_health` tool. It should 
 - `ramp_parameter`: Sweep a device or mixer parameter to a target over `beats` or `seconds`, driven inside Live at about 100 updates per second (Live's timer resolution is 10 ms). For live gestures; use `draw_automation` for motion that belongs to a looping clip. A new ramp on the same parameter replaces the old one.
 - `cancel_ramps`: Cancel one ramp, or all of them.
 
-Targets are `device_index` + `parameter_index`, or `mixer_parameter` (`"volume"`, `"pan"`, `"send:N"`). Limits from Live's API: automation envelopes exist only on **Session** clips (not arrangement clips), and only for parameters on the clip's own track.
+Targets are `device_index` (or `device_path`) + `parameter_index`, or `mixer_parameter` (`"volume"`, `"pan"`, `"send:N"`), on any `track_type` (see below). Limits from Live's API: automation envelopes exist only on **Session** clips (not arrangement clips), and only for parameters on the clip's own track.
+
+#### Addressing: track types, racks and parameter details
+Every device-facing tool (`get_track_detail`, `get_device_parameters`, `set_device_parameter`, `bulk_set_device_parameters`, `load_browser_item`, `ramp_parameter`, `cancel_ramps`, and the `set_track_*` tools) takes:
+
+- `track_type`: `"track"` (default), `"return"` (`track_index` counts return tracks) or `"master"` (`track_index` is ignored; pass 0). The master and return tracks can hold devices, so they can be read, loaded onto, set, ramped and mixed like any other. Clip automation is not available on them (they have no clips). Live prefixes return track names with their letter (`A-Reverb`), so write the bare name when renaming.
+- `device_path`: reaches devices inside racks. It alternates device and chain selectors and ends on a device index, e.g. `[0, 2, 1]` is device 1 in chain 2 of the rack at device 0. A chain selector is a chain index, `{"pad": 36}` (or `{"pad": 36, "chain": 1}`) for a drum pad, or `{"return": 0}` for a return chain. Use it instead of `device_index`.
+
+`get_device_parameters` lists, for each parameter: `index`, `name`, `value`, `min`, `max`, `is_quantized`, `is_enabled`, the `display` string Live shows (`"14.2 kHz"`), a `default` for continuous parameters and `value_items` labels for quantized ones (Filter Type `0` is `"Low-pass"`). For a rack it also lists its `chains`, `return_chains` and occupied `drum_pads`, so you can see what a `device_path` can reach. `get_bulk_session_structure` now includes the return tracks and the master.
+
+Not covered: device properties Live keeps outside `parameters` (Wavetable's oscillator wavetable selection, Drift's mod matrix, unison and voice modes), and VST/AU plugin parameters beyond the ones Live has configured.
 
 #### Development
 - `eval_python`: Evaluate raw Python on the Remote Script instance. Executes arbitrary code inside Live; intended for development and debugging only.

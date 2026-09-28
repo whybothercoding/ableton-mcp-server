@@ -157,6 +157,67 @@ try {
     const info = await ok('get_session_info');
     assert(typeof info.tempo === 'number', 'no tempo');
   });
+
+  console.log('\nTrack types, device paths and parameter details');
+  await check('schemas expose track_type and device_path where they apply', async () => {
+    for (const name of ['get_track_detail', 'get_device_parameters', 'set_device_parameter', 'load_browser_item', 'set_track_name', 'set_track_color', 'set_track_mute', 'set_track_solo', 'set_track_arm', 'ramp_parameter', 'cancel_ramps', 'draw_automation', 'clear_automation']) {
+      const prop = byName[name].inputSchema.properties.track_type;
+      assert(prop && JSON.stringify(prop.enum) === JSON.stringify(['track', 'return', 'master']), `${name} lacks a track_type enum`);
+    }
+    for (const name of ['get_device_parameters', 'set_device_parameter', 'ramp_parameter', 'cancel_ramps', 'draw_automation', 'clear_automation']) {
+      assert(byName[name].inputSchema.properties.device_path?.type === 'array', `${name} lacks device_path`);
+    }
+    assert(JSON.stringify(byName.get_device_parameters.inputSchema.required) === JSON.stringify(['track_index']), 'get_device_parameters.required');
+    assert(JSON.stringify(byName.set_device_parameter.inputSchema.required) === JSON.stringify(['track_index', 'parameter_index', 'value']), 'set_device_parameter.required');
+    const item = byName.bulk_set_device_parameters.inputSchema.properties.parameters.items.properties;
+    assert(item.track_type && item.device_path, 'bulk items lack track_type/device_path');
+  });
+  await check('get_device_parameters returns quantized labels and display strings', async () => {
+    const out = await ok('get_device_parameters', target);
+    assert(out.class_name && out.device_type && out.track_type === 'track', JSON.stringify(out).slice(0, 200));
+    assert(out.parameters.every((p) => typeof p.is_quantized === 'boolean' && typeof p.display === 'string'), 'missing details');
+    const quantized = out.parameters.find((p) => p.is_quantized && p.value_items);
+    if (quantized) assert(quantized.display === quantized.value_items[quantized.value], `${quantized.name} display/label mismatch`);
+  });
+  const returnCount = (await ok('get_bulk_session_structure')).return_tracks.length;
+  if (returnCount > 0) {
+    await check('return tracks work through the tools: read, set, ramp, bulk, track detail', async () => {
+      const dev = await ok('get_device_parameters', { track_index: 0, track_type: 'return', device_index: 0 });
+      assert(dev.track_type === 'return', JSON.stringify(dev).slice(0, 120));
+      const prm = dev.parameters.find((p) => p.index > 0 && p.max > p.min && !p.is_quantized && p.is_enabled);
+      const rspan = prm.max - prm.min;
+      const rt = { track_index: 0, track_type: 'return', device_index: 0, parameter_index: prm.index };
+      try {
+        const set = await ok('set_device_parameter', { ...rt, value: prm.min + 0.25 * rspan });
+        near(set.value, prm.min + 0.25 * rspan, 1e-4 * rspan, 'set value');
+        await ok('ramp_parameter', { ...rt, to: prm.min + 0.5 * rspan, seconds: 0.2 });
+        await sleep(500);
+        const bulk = await ok('bulk_set_device_parameters', { parameters: [{ ...rt, value: prm.min + 0.75 * rspan }, { ...rt, device_index: 99, value: 0 }] });
+        assert(bulk.count === 1 && bulk.skipped.length === 1 && bulk.updated[0].track_type === 'return', JSON.stringify(bulk));
+        const detail = await ok('get_track_detail', { track_index: 0, track_type: 'return' });
+        assert(detail.track_type === 'return' && detail.devices.length >= 1, JSON.stringify(detail).slice(0, 160));
+      } finally {
+        await tool('set_device_parameter', { ...rt, value: prm.value });
+      }
+    });
+  }
+  await check('master track works through the tools and guards what it cannot do', async () => {
+    const detail = await ok('get_track_detail', { track_index: 0, track_type: 'master' });
+    assert(detail.track_type === 'master' && detail.index === null, JSON.stringify(detail).slice(0, 160));
+    await fails('set_track_mute', { track_index: 0, track_type: 'master', mute: true }, 'master track cannot');
+    await fails('get_track_detail', { track_index: 99, track_type: 'return' }, 'Return track index out of range');
+    const currentVolume = (await ok('get_bulk_session_structure')).master.volume;
+    const volume = await tool('ramp_parameter', { track_index: 0, track_type: 'master', mixer_parameter: 'volume', to: currentVolume, seconds: 0.05 });
+    assert(!volume.isError, volume.text);
+    const cancelled = await ok('cancel_ramps', { track_index: 0, track_type: 'master', mixer_parameter: 'volume' });
+    assert(typeof cancelled.cancelled === 'number', JSON.stringify(cancelled));
+    await ok('cancel_ramps');
+  });
+  await check('device_path errors surface through the tools', async () => {
+    await fails('get_device_parameters', { track_index: T, device_path: [D, 0, 0] }, 'has no chains');
+    await fails('set_device_parameter', { track_index: T, device_path: [99], parameter_index: 1, value: 0 }, 'Device index out of range at device_path[0]');
+    await fails('get_device_parameters', { track_index: T, device_index: D, device_path: [D] }, 'not both');
+  });
 } finally {
   await tool('cancel_ramps');
   await tool('clear_automation', { track_index: T, clip_index: S });

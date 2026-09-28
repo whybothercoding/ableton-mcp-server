@@ -55,10 +55,23 @@ class FakeControlSurface(object):
 
 
 class FakeParam(object):
-    def __init__(self, name, value=0.0, low=0.0, high=1.0, enabled=True):
+    def __init__(self, name, value=0.0, low=0.0, high=1.0, enabled=True, items=None):
         self.name, self.value, self.min, self.max, self.is_enabled = name, value, low, high, enabled
+        self.value_items = tuple(items or ())
+        self.is_quantized = bool(items)
         self.writes = []
         self._valid = True
+
+    @property
+    def default_value(self):
+        if self.is_quantized:
+            raise RuntimeError("There is no default value available for this type of parameter")
+        return self.min
+
+    def str_for_value(self, value):
+        if self.is_quantized:
+            return self.value_items[int(value)]
+        return "{0:g} units".format(value)
 
     def __setattr__(self, key, val):
         if key == "value":
@@ -105,6 +118,7 @@ class FakeEnvelope(object):
 class FakeClip(object):
     def __init__(self, name="clip", length=8.0):
         self.name, self.length, self.envelopes = name, length, {}
+        self.is_playing = self.is_recording = False
 
     @property
     def has_envelopes(self):
@@ -132,19 +146,84 @@ class FakeSlot(object):
         self.has_clip = clip is not None
 
 
-class FakeTrack(object):
-    def __init__(self, name):
-        self.name = name
-        self.devices = [types.SimpleNamespace(name="Dev", parameters=[
+class FakeDevice(object):
+    def __init__(self, name, params=None, dev_type=2, chains=None, return_chains=None, drum_pads=None):
+        self.name, self.class_name, self.type = name, name.replace(" ", ""), dev_type
+        self.parameters = params if params is not None else [
             FakeParam("Device On", 1, 0, 1), FakeParam("Freq", 0.5, 0, 1), FakeParam("Drive", 50, 0, 100),
-            FakeParam("Off", 0, 0, 1, enabled=False)])]
-        self.mixer_device = types.SimpleNamespace(volume=FakeParam("Volume", 0.85, 0, 1), panning=FakeParam("Pan", 0, -1, 1),
-                                                  sends=[FakeParam("Send A", 0, 0, 1), FakeParam("Send B", 0, 0, 1)])
-        self.clip_slots = [FakeSlot(FakeClip("loop", 8.0)), FakeSlot(), FakeSlot(FakeClip("short", 2.0))]
+            FakeParam("Off", 0, 0, 1, enabled=False), FakeParam("Mode", 1, 0, 2, items=["A", "B", "C"])]
+        self.chains = chains
+        self.return_chains = return_chains if return_chains is not None else ([] if chains is not None else None)
+        self.drum_pads = drum_pads
+        self.can_have_chains = chains is not None or drum_pads is not None
+        self.can_have_drum_pads = drum_pads is not None
+        if not self.can_have_chains:
+            del self.chains, self.return_chains, self.drum_pads
+
+
+class FakeChain(object):
+    def __init__(self, name, devices):
+        self.name, self.devices = name, devices
+
+
+class FakePad(object):
+    def __init__(self, note, name, chains):
+        self.note, self.name, self.chains = note, name, chains
+
+
+def make_mixer(sends=True):
+    mixer = types.SimpleNamespace(volume=FakeParam("Volume", 0.85, 0, 1), panning=FakeParam("Pan", 0, -1, 1))
+    mixer.sends = [FakeParam("Send A", 0, 0, 1), FakeParam("Send B", 0, 0, 1)] if sends else []
+    return mixer
+
+
+class FakeTrack(object):
+    def __init__(self, name, with_clips=True):
+        self.name = name
+        self.devices = [FakeDevice("Dev")]
+        self.mixer_device = make_mixer()
+        self.mute = self.solo = False
+        self.color = 0
+        if with_clips:
+            self.clip_slots = [FakeSlot(FakeClip("loop", 8.0)), FakeSlot(), FakeSlot(FakeClip("short", 2.0))]
+
+
+def make_rack_track():
+    """Track 'Rack' with: 0 Audio Effect Rack (chains: 'Wide' [Delay, Rack in Rack], 'Dry' []; return chain 'FX' [Reverb]),
+    1 Drum Rack (pad 36 -> chain with [Snare Synth]), 2 plain effect."""
+    inner = FakeDevice("Inner Rack", chains=[FakeChain("Deep", [FakeDevice("Deep Effect")])])
+    rack = FakeDevice("Audio Effect Rack", chains=[FakeChain("Wide", [FakeDevice("Delay"), inner]), FakeChain("Dry", [])],
+                      return_chains=[FakeChain("FX", [FakeDevice("Reverb")])])
+    kit = FakeDevice("Drum Rack", dev_type=1, chains=[], drum_pads=[FakePad(n, "Pad {0}".format(n), []) for n in range(128)])
+    kit.drum_pads[36] = FakePad(36, "Kick", [FakeChain("Kick", [FakeDevice("Kick Synth", dev_type=1)])])
+    kit.chains = [kit.drum_pads[36].chains[0]]
+    track = FakeTrack("Rack", with_clips=False)
+    track.devices = [rack, kit, FakeDevice("Plain")]
+    return track
+
+
+class FakeReturnTrack(FakeTrack):
+    """Like Live: touching arrangement_clips / clip_slots on return and master tracks raises RuntimeError."""
+
+    @property
+    def arrangement_clips(self):
+        raise RuntimeError("Main, Group and Return Tracks have no arrangement clips")
+
+    @property
+    def clip_slots(self):
+        raise RuntimeError("Main, Group and Return Tracks have no clip slots")
 
 
 def make_song():
-    return types.SimpleNamespace(tempo=120.0, tracks=[FakeTrack("A"), FakeTrack("B")])
+    ret = FakeReturnTrack("Return A", with_clips=False)
+    ret.devices = [FakeDevice("Return Reverb")]
+    master = FakeReturnTrack("Master", with_clips=False)
+    master.devices = [FakeDevice("Limiter")]
+    master.mixer_device = make_mixer(sends=False)
+    del master.mute, master.solo
+    return types.SimpleNamespace(tempo=120.0, signature_numerator=4, signature_denominator=4, scenes=[],
+                                 tracks=[FakeTrack("A"), FakeTrack("B"), make_rack_track()],
+                                 return_tracks=[ret], master_track=master)
 
 
 # ---------------------------------------------------------------- module loading
@@ -492,6 +571,258 @@ class RampTests(unittest.TestCase):
         self.assertTrue(all(0.0 <= w <= 1.0 for w in self.freq.writes))
 
 
+# ---------------------------------------------------------------- addressing: track types, device paths, details
+
+class AddressingTests(unittest.TestCase):
+    def setUp(self):
+        self.script = make_script()
+        self.addCleanup(self.script._stop_server)
+        self.song = self.script._song
+        self.rack_track = 2
+
+    def test_track_by(self):
+        self.assertIs(self.script._track_by("track", 1), self.song.tracks[1])
+        self.assertIs(self.script._track_by(None, 0), self.song.tracks[0])
+        self.assertIs(self.script._track_by("return", 0), self.song.return_tracks[0])
+        self.assertIs(self.script._track_by("master", None), self.song.master_track)
+        self.assertIs(self.script._track_by("master", 99), self.song.master_track)  # index ignored
+        for args, fragment in ((("track", 9), "Track index out of range"), (("return", 1), "Return track index out of range"),
+                               (("return", -1), "Return track index out of range"), (("bus", 0), "track_type must be"),
+                               (("track", None), "integer"), (("track", 1.5), "integer")):
+            with self.assertRaises((ValueError, IndexError), msg=str(args)) as ctx:
+                self.script._track_by(*args)
+            self.assertIn(fragment, str(ctx.exception))
+
+    def path(self, *path):
+        return self.script._device_by(self.song.tracks[self.rack_track], None, list(path)).name
+
+    def test_device_path_through_chains(self):
+        self.assertEqual(self.path(0), "Audio Effect Rack")
+        self.assertEqual(self.path(0, 0, 0), "Delay")
+        self.assertEqual(self.path(0, 0, 1), "Inner Rack")
+        self.assertEqual(self.path(0, 0, 1, 0, 0), "Deep Effect")
+        self.assertEqual(self.path(0, {"return": 0}, 0), "Reverb")
+        self.assertEqual(self.path(1, {"pad": 36}, 0), "Kick Synth")
+        self.assertEqual(self.path(1, 0, 0), "Kick Synth")  # chain index into a drum rack's chains
+        self.assertEqual(self.path(2), "Plain")
+
+    def test_device_path_errors(self):
+        cases = [
+            ([], "alternate device and chain"), ([0, 0], "alternate device and chain"), ("0", "alternate device and chain"),
+            ([9], "Device index out of range at device_path[0]"), ([0, 5, 0], "Chain index out of range at device_path[1]"),
+            ([0, 1, 0], "Device index out of range at device_path[2]"), ([2, 0, 0], "has no chains"),
+            ([0, {"pad": 36}, 0], "has no drum pads"), ([1, {"pad": 40}, 0], "drum pad 40 is empty"),
+            ([1, {"pad": 999}, 0], "note out of range"), ([0, {"return": 4}, 0], "Chain index out of range"),
+            ([0, {"other": 1}, 0], "needs 'pad' or 'return'"), ([0, "x", 0], "integer"), ([0, 0, 1.5], "integer"),
+            ([1, {"pad": 36, "chain": 3}, 0], "Chain index out of range"),
+        ]
+        for path, fragment in cases:
+            with self.assertRaises((ValueError, IndexError), msg=str(path)) as ctx:
+                self.script._device_by(self.song.tracks[self.rack_track], None, path)
+            self.assertIn(fragment, str(ctx.exception))
+
+    def test_device_index_and_path_are_exclusive(self):
+        with self.assertRaises(ValueError):
+            self.script._device_by(self.song.tracks[0], 0, [0])
+        with self.assertRaises(IndexError):
+            self.script._device_by(self.song.tracks[0], 5)
+
+    def test_describe_parameter(self):
+        quantized = self.script._describe_parameter(4, FakeParam("Mode", 1, 0, 2, items=["A", "B", "C"]))
+        self.assertTrue(quantized["is_quantized"])
+        self.assertEqual(quantized["value_items"], ["A", "B", "C"])
+        self.assertEqual(quantized["display"], "B")
+        self.assertNotIn("default", quantized)  # default_value raises for quantized parameters
+        plain = self.script._describe_parameter(1, FakeParam("Freq", 0.5, 0, 1))
+        self.assertFalse(plain["is_quantized"])
+        self.assertEqual((plain["default"], plain["display"], plain["is_enabled"]), (0.0, "0.5 units", True))
+        self.assertNotIn("value_items", plain)
+        self.assertFalse(self.script._describe_parameter(3, FakeParam("Off", enabled=False))["is_enabled"])
+
+    def test_describe_device_structure(self):
+        tree = self.script._describe_device_structure(self.song.tracks[self.rack_track].devices[0])
+        self.assertTrue(tree["can_have_chains"] and not tree["can_have_drum_pads"])
+        self.assertEqual([c["name"] for c in tree["chains"]], ["Wide", "Dry"])
+        self.assertEqual(tree["chains"][0]["devices"], ["Delay", "Inner Rack"])
+        self.assertEqual(tree["return_chains"][0]["devices"], ["Reverb"])
+        drum = self.script._describe_device_structure(self.song.tracks[self.rack_track].devices[1])
+        self.assertEqual(drum["drum_pads"], [{"note": 36, "name": "Kick", "chain_count": 1, "device_count": 1}])
+        self.assertEqual(self.script._describe_device_structure(self.song.tracks[0].devices[0]),
+                         {"can_have_chains": False, "can_have_drum_pads": False})
+
+    def test_device_type_uses_live_enum_and_racks(self):
+        devices = self.song.tracks[self.rack_track].devices
+        self.assertEqual(self.script._get_device_type(devices[0]), "rack")
+        self.assertEqual(self.script._get_device_type(devices[1]), "drum_machine")
+        self.assertEqual(self.script._get_device_type(FakeDevice("Synth", dev_type=1)), "instrument")
+        self.assertEqual(self.script._get_device_type(FakeDevice("Fx", dev_type=2)), "audio_effect")
+        self.assertEqual(self.script._get_device_type(FakeDevice("Arp", dev_type=4)), "midi_effect")
+        self.assertEqual(self.script._get_device_type(FakeDevice("Odd", dev_type=0)), "unknown")
+
+    def test_get_device_parameters_for_every_target(self):
+        base = self.script._get_device_parameters(0, 0)
+        self.assertEqual(base["track_type"], "track")
+        self.assertEqual(base["device_type"], "audio_effect")
+        self.assertEqual([p["name"] for p in base["parameters"]], ["Device On", "Freq", "Drive", "Off", "Mode"])
+        self.assertEqual(base["parameters"][4]["value_items"], ["A", "B", "C"])
+        ret = self.script._get_device_parameters(0, 0, "return")
+        self.assertEqual((ret["device_name"], ret["track_type"]), ("Return Reverb", "return"))
+        master = self.script._get_device_parameters(None, 0, "master")
+        self.assertEqual(master["device_name"], "Limiter")
+        nested = self.script._get_device_parameters(self.rack_track, None, "track", [0, 0, 1, 0, 0])
+        self.assertEqual((nested["device_name"], nested["device_path"]), ("Deep Effect", [0, 0, 1, 0, 0]))
+        rack = self.script._get_device_parameters(self.rack_track, 0)
+        self.assertEqual(rack["device_type"], "rack")
+        self.assertEqual([c["name"] for c in rack["chains"]], ["Wide", "Dry"])
+
+    def test_set_device_parameter_for_every_target(self):
+        out = self.script._set_device_parameter(0, 0, 1, 0.7)
+        self.assertEqual((out["old_value"], out["value"]), (0.5, 0.7))
+        self.assertEqual(out["display"], "0.7 units")
+        self.script._set_device_parameter(0, 0, 1, 0.1, "return")
+        self.assertEqual(self.song.return_tracks[0].devices[0].parameters[1].value, 0.1)
+        self.script._set_device_parameter(None, 0, 1, 0.2, "master")
+        self.assertEqual(self.song.master_track.devices[0].parameters[1].value, 0.2)
+        self.script._set_device_parameter(self.rack_track, None, 1, 0.9, "track", [0, {"return": 0}, 0])
+        self.assertEqual(self.song.tracks[self.rack_track].devices[0].return_chains[0].devices[0].parameters[1].value, 0.9)
+        with self.assertRaises(IndexError):
+            self.script._set_device_parameter(0, 0, 99, 0.1)
+        with self.assertRaises(Exception):
+            self.script._set_device_parameter(0, 0, 3, 0.1)  # disabled
+
+    def test_bulk_set_with_types_and_paths(self):
+        result = self.script._bulk_set_device_parameters([
+            {"track_index": 0, "device_index": 0, "parameter_index": 1, "value": 0.6},
+            {"track_index": 0, "track_type": "return", "device_index": 0, "parameter_index": 1, "value": 0.3},
+            {"track_type": "master", "device_index": 0, "parameter_index": 1, "value": 0.4},
+            {"track_index": self.rack_track, "device_path": [0, 0, 0], "parameter_index": 1, "value": 0.8},
+            {"track_index": 0, "device_path": [0, 0, 0], "parameter_index": 1, "value": 0.8},
+            {"track_index": 0, "track_type": "return", "device_index": 3, "parameter_index": 1, "value": 0.3},
+            {"track_index": 0, "device_index": 0, "device_path": [0], "parameter_index": 1, "value": 0.3},
+            {"track_type": "master", "parameter_index": 1, "value": 0.3},
+        ])
+        self.assertEqual(result["count"], 4)
+        self.assertEqual([s["item"] for s in result["skipped"]], [4, 5, 6, 7])
+        self.assertEqual(result["updated"][1]["track_type"], "return")
+        self.assertEqual(result["updated"][3]["device_path"], [0, 0, 0])
+        self.assertIn("Device index out of range", result["skipped"][1]["reason"])
+        self.assertIn("not both", result["skipped"][2]["reason"])
+
+    def test_get_track_info_for_return_and_master(self):
+        ret = self.script._get_track_info(0, "return")
+        self.assertEqual((ret["track_type"], ret["index"], ret["name"]), ("return", 0, "Return A"))
+        self.assertEqual(ret["clip_slots"], [])
+        self.assertEqual(ret["devices"][0]["name"], "Return Reverb")
+        master = self.script._get_track_info(None, "master")
+        self.assertEqual((master["track_type"], master["index"]), ("master", None))
+        self.assertEqual(master["devices"][0]["type"], "audio_effect")
+        rack = self.script._get_track_info(self.rack_track)
+        self.assertEqual([d["type"] for d in rack["devices"]], ["rack", "drum_machine", "audio_effect"])
+        self.assertTrue(rack["devices"][0]["can_have_chains"])
+        with self.assertRaises(IndexError):
+            self.script._get_track_info(5, "return")
+
+    def test_track_setters_on_return_and_master(self):
+        self.script._set_track_name(0, "Space", "return")
+        self.assertEqual(self.song.return_tracks[0].name, "Space")
+        self.script._set_track_mute(0, True, "return")
+        self.assertTrue(self.song.return_tracks[0].mute)
+        self.script._set_track_solo(0, True, "return")
+        self.assertTrue(self.song.return_tracks[0].solo)
+        self.script._set_track_color(0, 123, "return")
+        self.assertEqual(self.song.return_tracks[0].color, 123)
+        for setter in (self.script._set_track_mute, self.script._set_track_solo):
+            with self.assertRaises(ValueError) as ctx:
+                setter(None, True, "master")
+            self.assertIn("master track cannot", str(ctx.exception))
+        with self.assertRaises(Exception) as ctx:
+            self.script._set_track_arm(0, True, "return")  # returns cannot be armed
+        self.assertIn("cannot be armed", str(ctx.exception))
+
+    def test_bulk_session_structure_lists_returns_and_master(self):
+        structure = self.script._get_bulk_session_structure()
+        self.assertEqual(structure["return_tracks"][0]["name"], "Return A")
+        self.assertEqual(structure["return_tracks"][0]["track_type"], "return")
+        self.assertEqual(structure["master"]["device_count"], 1)
+        self.assertIsNone(structure["master"]["index"])
+        self.assertEqual(structure["session"]["return_track_count"], 1)
+
+    def test_load_browser_item_selects_the_right_track(self):
+        # _load_browser_item needs Live's browser; verify only the track resolution and the error path
+        self.script._song.view = types.SimpleNamespace(selected_track=None)
+        self.script.application = lambda: types.SimpleNamespace(browser=types.SimpleNamespace())
+        with self.assertRaises(Exception):
+            self.script._load_browser_item(0, "nope", "return")
+        self.assertIs(self.script._song.view.selected_track, None)  # failed lookup happens before selecting
+        with self.assertRaises(IndexError):
+            self.script._load_browser_item(9, "nope", "return")
+
+    def test_parameter_resolution_for_ramps_and_automation(self):
+        idx, track, param, target = self.script._resolve_parameter({"track_index": 0, "track_type": "return", "device_index": 0, "parameter_index": 1})
+        self.assertIs(param, self.song.return_tracks[0].devices[0].parameters[1])
+        self.assertEqual(target, {"track_type": "return", "device_index": 0, "parameter_index": 1})
+        idx, track, param, target = self.script._resolve_parameter({"track_type": "master", "mixer_parameter": "volume"})
+        self.assertIs(param, self.song.master_track.mixer_device.volume)
+        self.assertIsNone(idx)
+        self.assertEqual(target, {"track_type": "master", "mixer_parameter": "volume"})
+        idx, track, param, target = self.script._resolve_parameter({"track_index": self.rack_track, "device_path": [0, 0, 0], "parameter_index": 2})
+        self.assertIs(param, self.song.tracks[self.rack_track].devices[0].chains[0].devices[0].parameters[2])
+        self.assertEqual(target, {"device_path": [0, 0, 0], "parameter_index": 2})
+        self.assertEqual(self.script._resolve_parameter({"track_index": 1, "device_index": 0, "parameter_index": 1})[3],
+                         {"device_index": 0, "parameter_index": 1})  # regular tracks keep the compact target
+        for params, fragment in (
+                ({"track_type": "master", "mixer_parameter": "send:0"}, "Send index out of range"),
+                ({"track_index": 0, "track_type": "return", "mixer_parameter": "send:1"}, None),
+                ({"track_index": 0, "device_path": [0], "device_index": 0, "parameter_index": 1}, "not both"),
+                ({"track_index": 0, "mixer_parameter": "volume", "device_path": [0]}, "not both"),
+                ({"track_index": 0, "device_path": [0], "parameter_index": 99}, "Parameter index out of range")):
+            if fragment is None:
+                self.script._resolve_parameter(params)  # returns do have sends
+                continue
+            with self.assertRaises((ValueError, IndexError), msg=str(params)) as ctx:
+                self.script._resolve_parameter(params)
+            self.assertIn(fragment, str(ctx.exception))
+
+    def test_ramps_on_return_master_and_nested_devices_are_independent(self):
+        clock = FakeClock()
+        original = mod.time
+        mod.time = clock
+        self.addCleanup(setattr, mod, "time", original)
+        common = {"to": 1.0, "from": 0.0, "seconds": 2.0}
+        self.script._ramp_parameter(dict(common, track_index=0, device_index=0, parameter_index=1))
+        self.script._ramp_parameter(dict(common, track_index=0, track_type="return", device_index=0, parameter_index=1))
+        self.script._ramp_parameter(dict(common, track_type="master", mixer_parameter="volume"))
+        self.script._ramp_parameter(dict(common, track_index=self.rack_track, device_path=[0, 0, 0], parameter_index=1))
+        self.assertEqual(len(self.script._ramps), 4)
+        clock.now += 1.0
+        self.script._tick_ramps()
+        self.assertAlmostEqual(self.song.tracks[0].devices[0].parameters[1].value, 0.5)
+        self.assertAlmostEqual(self.song.return_tracks[0].devices[0].parameters[1].value, 0.5)
+        self.assertAlmostEqual(self.song.master_track.mixer_device.volume.value, 0.5)
+        self.assertAlmostEqual(self.song.tracks[self.rack_track].devices[0].chains[0].devices[0].parameters[1].value, 0.5)
+        cancelled = self.script._cancel_ramps({"track_index": 0, "track_type": "return", "device_index": 0, "parameter_index": 1})
+        self.assertEqual(cancelled, {"cancelled": 1, "active_ramps": 3})
+        self.assertEqual(self.script._cancel_ramps({"track_type": "master", "mixer_parameter": "volume"})["cancelled"], 1)
+
+    def test_automation_is_for_regular_tracks_only(self):
+        for track_type in ("return", "master"):
+            with self.assertRaises(ValueError) as ctx:
+                self.script._draw_automation({"track_index": 0, "track_type": track_type, "clip_index": 0, "device_index": 0,
+                                              "parameter_index": 1, "points": [{"time": 0, "value": 0.5}]})
+            self.assertIn("Only regular tracks have clips", str(ctx.exception))
+            with self.assertRaises(ValueError):
+                self.script._clear_automation({"track_index": 0, "track_type": track_type, "clip_index": 0})
+
+    def test_draw_automation_on_a_nested_device_parameter(self):
+        self.song.tracks[self.rack_track].clip_slots = [FakeSlot(FakeClip("rack clip", 4.0))]
+        result = self.script._draw_automation({"track_index": self.rack_track, "clip_index": 0, "device_path": [0, 0, 0], "parameter_index": 1,
+                                               "points": [{"time": 0, "value": 0.2}, {"time": 4, "value": 0.8}]})
+        self.assertEqual(result["target"], {"device_path": [0, 0, 0], "parameter_index": 1})
+        self.assertEqual(result["parameter"], "Freq")
+        for row in result["readback"]:
+            self.assertAlmostEqual(row["actual"], row["expected"], places=6)
+
+
 # ---------------------------------------------------------------- pumped server
 
 class PumpServerTests(unittest.TestCase):
@@ -549,7 +880,7 @@ class PumpServerTests(unittest.TestCase):
         info = self.call("get_script_info")
         self.assertEqual(info["status"], "success")
         self.assertIn("draw_automation", info["result"]["capabilities"])
-        self.assertEqual(info["result"]["script_version"], "1.9.0")
+        self.assertEqual(info["result"]["script_version"], "1.10.0")
         tempo = self.call("set_tempo", {"tempo": 133.0})
         self.assertEqual(tempo["status"], "success")
         self.assertEqual(self.script._song.tempo, 133.0)

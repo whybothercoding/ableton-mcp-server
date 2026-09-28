@@ -79,6 +79,7 @@ const T = target.track;
 const D = target.device;
 const S = target.slot;
 const snapshots = [pA, pB].map((p) => ({ ...p }));
+const cleanupsRegistry = []; // undo actions registered by tests that change the set, run in reverse in the finally block
 await call('create_clip', { track_index: T, clip_index: S, length: 4, name: 'MCP TEST' });
 const CLIP_BEATS = 4;
 const sendA = { track_index: T, device_index: D, parameter_index: pA.index };
@@ -86,7 +87,7 @@ const sendA = { track_index: T, device_index: D, parameter_index: pA.index };
 try {
   console.log('Bridge');
   await check('script reports the new version and capabilities', async () => {
-    assert(info.script_version === '1.9.0', `version ${info.script_version}`);
+    assert(info.script_version === '1.10.0', `version ${info.script_version}`);
     for (const c of ['draw_automation', 'clear_automation', 'ramp_parameter', 'cancel_ramps']) {
       assert(info.capabilities.includes(c), `missing capability ${c}`);
     }
@@ -114,7 +115,7 @@ try {
   });
   await check('200 parallel connections all succeed', async () => {
     const results = await Promise.all(Array.from({ length: 200 }, () => call('get_script_info')));
-    assert(results.every((r) => r.script_version === '1.9.0'), 'a response was wrong');
+    assert(results.every((r) => r.script_version === '1.10.0'), 'a response was wrong');
   });
   await check('garbage and half-open connections do not disturb the server', async () => {
     for (const junk of ['{"type": "get_scr', '\u0000\u0001\u0002', 'not json at all', '']) {
@@ -127,7 +128,7 @@ try {
         sock.on('error', resolve);
       });
     }
-    assert((await call('get_script_info')).script_version === '1.9.0', 'server stopped answering');
+    assert((await call('get_script_info')).script_version === '1.10.0', 'server stopped answering');
   });
   await check('bulk_set_device_parameters reports actual values and skipped items', async () => {
     const out = await call('bulk_set_device_parameters', {
@@ -385,9 +386,321 @@ try {
     for (const [params, fragment] of cases) await rejects(call('ramp_parameter', params), fragment);
     assert((await call('cancel_ramps')).active_ramps === 0, 'a failed call left a ramp behind');
   });
+
+  console.log('\nParameter details');
+  const continuous = (params) => params.find((p) => p.index > 0 && p.max > p.min && !p.is_quantized && p.is_enabled && !/\bon\b/i.test(p.name));
+  await check('every parameter carries range, quantized flag, display string and enabled state', async () => {
+    const out = await call('get_device_parameters', { track_index: T, device_index: D });
+    const live = await call('eval', { code: `len(self._song.tracks[${T}].devices[${D}].parameters)` });
+    assert(out.parameters.length === live, `${out.parameters.length} parameters listed, Live has ${live}`);
+    assert(out.class_name && out.device_type && out.track_type === 'track', JSON.stringify({ c: out.class_name, t: out.device_type }));
+    for (const prm of out.parameters) {
+      for (const key of ['index', 'name', 'value', 'min', 'max', 'is_quantized', 'is_enabled']) assert(prm[key] !== undefined, `${prm.name} lacks ${key}`);
+      assert(typeof prm.display === 'string', `${prm.name} has no display string`);
+    }
+  });
+  await check('quantized parameters list their labels and the display matches the value', async () => {
+    let found = null;
+    const session = await call('get_bulk_session_structure');
+    outer: for (const track of session.tracks) {
+      for (let d = 0; d < track.device_count; d += 1) {
+        const info = await call('get_device_parameters', { track_index: track.index, device_index: d });
+        const q = info.parameters.find((prm) => prm.is_quantized && prm.value_items && prm.value_items.length > 2);
+        if (q) {
+          found = { track: track.index, device: d, q, info };
+          break outer;
+        }
+      }
+    }
+    assert(found, 'no device with a quantized parameter in the set');
+    const { q } = found;
+    assert(q.value_items.length === q.max - q.min + 1, `${q.name}: ${q.value_items.length} labels for range ${q.min}..${q.max}`);
+    assert(q.display === q.value_items[q.value], `${q.name}: display "${q.display}" but label "${q.value_items[q.value]}"`);
+    assert(q.default === undefined, 'quantized parameters have no default');
+    console.log(`       ${found.info.device_name} / ${q.name}: ${q.value_items.slice(0, 4).join(', ')}...`);
+  });
+  await check('continuous parameters report a default', async () => {
+    const out = await call('get_device_parameters', { track_index: T, device_index: D });
+    const prm = continuous(out.parameters);
+    assert(typeof prm.default === 'number', `${prm.name} has no default`);
+  });
+  await check('get_track_detail classifies devices instead of reporting "unknown"', async () => {
+    const detail = await call('get_track_info', { track_index: T });
+    assert(detail.devices.length > 0 && detail.devices.every((d) => d.type !== 'unknown'), JSON.stringify(detail.devices));
+    assert(detail.devices.every((d) => typeof d.can_have_chains === 'boolean'), 'can_have_chains missing');
+  });
+  await check('set_device_parameter reports the display string', async () => {
+    const out = await call('set_device_parameter', { ...sendA, value: pA.value });
+    assert(typeof out.display === 'string', JSON.stringify(out));
+  });
+
+  console.log('\nReturn and master tracks');
+  const returns = await call('eval', { code: 'len(self._song.return_tracks)' });
+  const master = await call('eval', { code: 'self._song.master_track.name' });
+  await check('the session structure lists return tracks and the master', async () => {
+    const session = await call('get_bulk_session_structure');
+    assert(session.return_tracks.length === returns, `${session.return_tracks.length} vs ${returns}`);
+    assert(session.master.track_type === 'master' && session.master.name === master, JSON.stringify(session.master));
+    assert(session.master.index === null, 'master has no index');
+  });
+  await check('get_track_info works for return and master tracks', async () => {
+    if (returns > 0) {
+      const ret = await call('get_track_info', { track_index: 0, track_type: 'return' });
+      assert(ret.track_type === 'return' && ret.index === 0 && Array.isArray(ret.devices), JSON.stringify(ret).slice(0, 200));
+    }
+    const m = await call('get_track_info', { track_index: 0, track_type: 'master' });
+    assert(m.track_type === 'master' && m.index === null && m.name === master, JSON.stringify(m).slice(0, 200));
+  });
+  await check('track_type errors are clear', async () => {
+    await rejects(call('get_track_info', { track_index: 99, track_type: 'return' }), 'Return track index out of range');
+    await rejects(call('get_track_info', { track_index: 0, track_type: 'bus' }), 'track_type must be');
+    await rejects(call('get_device_parameters', { track_index: 99, track_type: 'return', device_index: 0 }), 'Return track index out of range');
+    await rejects(call('set_track_mute', { track_index: 0, track_type: 'master', mute: true }), 'master track cannot');
+    await rejects(call('set_track_solo', { track_index: 0, track_type: 'master', solo: true }), 'master track cannot');
+    await rejects(call('draw_automation', { track_index: 0, track_type: 'return', clip_index: 0, mixer_parameter: 'volume', points: [{ time: 0, value: 0.5 }] }), 'Only regular tracks have clips');
+  });
+  if (returns > 0) {
+    await check('a return track device can be read, set and ramped; changes are restored', async () => {
+      const dev = await call('get_device_parameters', { track_index: 0, track_type: 'return', device_index: 0 });
+      const prm = continuous(dev.parameters);
+      const span2 = prm.max - prm.min;
+      const target2 = { track_index: 0, track_type: 'return', device_index: 0, parameter_index: prm.index };
+      cleanupsRegistry.push(() => call('set_device_parameter', { ...target2, value: prm.value }));
+      const set = await call('set_device_parameter', { ...target2, value: prm.min + 0.3 * span2 });
+      near(set.value, prm.min + 0.3 * span2, 1e-4 * span2, 'set value');
+      await call('ramp_parameter', { ...target2, from: prm.min + 0.3 * span2, to: prm.min + 0.6 * span2, seconds: 0.3 });
+      await sleep(600);
+      near(await call('eval', { code: `self._song.return_tracks[0].devices[0].parameters[${prm.index}].value` }), prm.min + 0.6 * span2, 1e-4 * span2, 'ramped value');
+    });
+    await check('return track mixer volume ramps and restores', async () => {
+      const volume = 'self._song.return_tracks[0].mixer_device.volume';
+      const original = await call('eval', { code: `${volume}.value` });
+      cleanupsRegistry.push(() => call('eval', { code: `setattr(${volume}, 'value', ${original})` }));
+      await call('ramp_parameter', { track_index: 0, track_type: 'return', mixer_parameter: 'volume', from: original, to: original * 0.5, seconds: 0.2 });
+      await sleep(500);
+      near(await call('eval', { code: `${volume}.value` }), original * 0.5, 1e-4, 'return volume');
+      await call('eval', { code: `setattr(${volume}, 'value', ${original})` });
+    });
+    await check('return track name and mute round-trip', async () => {
+      // Live prefixes return track names with their letter ("A-Reverb"), so writing the full name back would double it:
+      // set and restore the name without the prefix.
+      const original = await call('eval', { code: 'self._song.return_tracks[0].name' });
+      const bare = original.replace(/^[A-Z]-/, '');
+      const wasMuted = await call('eval', { code: 'self._song.return_tracks[0].mute' });
+      cleanupsRegistry.push(async () => {
+        await call('set_track_name', { track_index: 0, track_type: 'return', name: bare });
+        await call('set_track_mute', { track_index: 0, track_type: 'return', mute: wasMuted });
+      });
+      await call('set_track_name', { track_index: 0, track_type: 'return', name: 'MCP TEST RETURN' });
+      const renamed = await call('eval', { code: 'self._song.return_tracks[0].name' });
+      assert(renamed.endsWith('MCP TEST RETURN'), `rename failed: name is "${renamed}"`);
+      await call('set_track_mute', { track_index: 0, track_type: 'return', mute: !wasMuted });
+      assert((await call('eval', { code: 'self._song.return_tracks[0].mute' })) === !wasMuted, 'mute failed');
+      await call('set_track_mute', { track_index: 0, track_type: 'return', mute: wasMuted });
+      await call('set_track_name', { track_index: 0, track_type: 'return', name: bare });
+      assert((await call('eval', { code: 'self._song.return_tracks[0].name' })) === original, 'name was not restored exactly');
+    });
+  }
+  await check('a device can be loaded onto the master track, addressed, ramped and removed', async () => {
+    const before = await call('eval', { code: 'len(self._song.master_track.devices)' });
+    const loaded = await call('load_browser_item', { track_index: 0, track_type: 'master', item_uri: 'query:AudioFx#Utility' });
+    assert(loaded.loaded === true, JSON.stringify(loaded));
+    cleanupsRegistry.push(async () => {
+      for (let i = (await call('eval', { code: 'len(self._song.master_track.devices)' })) - 1; i >= before; i -= 1) {
+        await call('eval', { code: `self._song.master_track.delete_device(${i})` });
+      }
+    });
+    assert((await call('eval', { code: 'len(self._song.master_track.devices)' })) === before + 1, 'device was not added to the master');
+    const idx = before;
+    const dev = await call('get_device_parameters', { track_index: 0, track_type: 'master', device_index: idx });
+    assert(dev.device_name === 'Utility' && dev.track_type === 'master', dev.device_name);
+    const prm = continuous(dev.parameters);
+    const span2 = prm.max - prm.min;
+    const target2 = { track_index: 0, track_type: 'master', device_index: idx, parameter_index: prm.index };
+    await call('ramp_parameter', { ...target2, from: prm.min + 0.4 * span2, to: prm.min + 0.6 * span2, seconds: 0.2 });
+    await sleep(500);
+    near(await call('eval', { code: `self._song.master_track.devices[${idx}].parameters[${prm.index}].value` }), prm.min + 0.6 * span2, 1e-4 * span2, 'master ramp');
+    const cancelled = await call('cancel_ramps', { track_index: 0, track_type: 'master', device_index: idx, parameter_index: prm.index });
+    assert(cancelled.cancelled === 0, 'the ramp had already finished');
+    const info = await call('get_track_info', { track_index: 0, track_type: 'master' });
+    assert(info.devices.length === before + 1 && info.devices.at(-1).name === 'Utility', JSON.stringify(info.devices));
+  });
+  await check('master mixer volume ramp restores', async () => {
+    const volume = 'self._song.master_track.mixer_device.volume';
+    const original = await call('eval', { code: `${volume}.value` });
+    cleanupsRegistry.push(() => call('eval', { code: `setattr(${volume}, 'value', ${original})` }));
+    await call('ramp_parameter', { track_index: 0, track_type: 'master', mixer_parameter: 'volume', from: original, to: original * 0.8, seconds: 0.2 });
+    await sleep(500);
+    near(await call('eval', { code: `${volume}.value` }), original * 0.8, 1e-4, 'master volume');
+    await call('eval', { code: `setattr(${volume}, 'value', ${original})` });
+  });
+  await check('cancelling a master ramp leaves ramps on other tracks running', async () => {
+    const masterVol = { track_index: 0, track_type: 'master', mixer_parameter: 'volume' };
+    const volume = 'self._song.master_track.mixer_device.volume';
+    const original = await call('eval', { code: `${volume}.value` });
+    cleanupsRegistry.push(() => call('eval', { code: `setattr(${volume}, 'value', ${original})` }));
+    await call('ramp_parameter', { ...sendA, from: rampStart, to: rampEnd, seconds: 5 });
+    await call('ramp_parameter', { ...masterVol, from: original, to: original * 0.5, seconds: 5 });
+    const out = await call('cancel_ramps', masterVol);
+    assert(out.cancelled === 1 && out.active_ramps === 1, JSON.stringify(out));
+    await call('cancel_ramps');
+    await call('eval', { code: `setattr(${volume}, 'value', ${original})` });
+  });
+
+  console.log('\nRacks and device paths');
+  let rackIndex = null;
+  await check('a rack is discoverable: chains and their devices are listed', async () => {
+    const before = await call('eval', { code: `len(self._song.tracks[${T}].devices)` });
+    await call('load_browser_item', { track_index: T, item_uri: 'query:AudioFx#Audio%20Effect%20Rack' });
+    rackIndex = before;
+    cleanupsRegistry.push(async () => {
+      for (let i = (await call('eval', { code: `len(self._song.tracks[${T}].devices)` })) - 1; i >= before; i -= 1) {
+        await call('eval', { code: `self._song.tracks[${T}].delete_device(${i})` });
+      }
+    });
+    const rack = `self._song.tracks[${T}].devices[${rackIndex}]`;
+    await call('eval', { code: `str(${rack}.insert_chain(0))` });
+    await call('eval', { code: `str(${rack}.chains[0].insert_device('Utility', 0))` });
+    await call('eval', { code: `str(${rack}.chains[0].insert_device('Auto Filter', 1))` });
+    const info = await call('get_device_parameters', { track_index: T, device_index: rackIndex });
+    assert(info.device_type === 'rack' && info.can_have_chains === true, JSON.stringify({ t: info.device_type }));
+    assert(info.chains.length === 1 && info.chains[0].devices.join() === 'Utility,Auto Filter', JSON.stringify(info.chains));
+    assert(Array.isArray(info.return_chains), 'return_chains missing');
+    const detail = await call('get_track_info', { track_index: T });
+    assert(detail.devices[rackIndex].type === 'rack' && detail.devices[rackIndex].can_have_chains === true, JSON.stringify(detail.devices[rackIndex]));
+  });
+  const nestedPath = () => [rackIndex, 0, 1];
+  const nestedTarget = () => ({ track_index: T, device_path: nestedPath(), parameter_index: 1 });
+  const nestedParam = () => `self._song.tracks[${T}].devices[${rackIndex}].chains[0].devices[1].parameters[1]`;
+  await check('a nested device reads, sets and reports like a top-level one', async () => {
+    const dev = await call('get_device_parameters', { track_index: T, device_path: nestedPath() });
+    assert(dev.device_name === 'Auto Filter' && dev.device_path.join() === nestedPath().join(), JSON.stringify({ n: dev.device_name }));
+    assert(dev.parameters.length === 45 || dev.parameters.length > 20, `${dev.parameters.length} parameters`);
+    const type = dev.parameters.find((prm) => prm.name === 'Filter Type');
+    assert(type && type.value_items.includes('Low-pass'), 'Filter Type labels missing on a nested device');
+    const out = await call('set_device_parameter', { ...nestedTarget(), value: 0.42 });
+    near(await call('eval', { code: `${nestedParam()}.value` }), 0.42, 1e-4, 'nested value in Live');
+    assert(typeof out.display === 'string', 'display missing');
+  });
+  await check('nested parameters ramp, cancel and are independent from top-level ones', async () => {
+    await call('ramp_parameter', { ...nestedTarget(), from: 0.2, to: 0.8, seconds: 0.3 });
+    await call('ramp_parameter', { ...sendA, from: rampStart, to: rampEnd, seconds: 5 });
+    await sleep(600);
+    near(await call('eval', { code: `${nestedParam()}.value` }), 0.8, 1e-4, 'nested ramp landed');
+    const both = await call('cancel_ramps', nestedTarget());
+    assert(both.cancelled === 0 && both.active_ramps === 1, `the top-level ramp must survive: ${JSON.stringify(both)}`);
+    await call('cancel_ramps');
+  });
+  await check('automation can be drawn on a nested device parameter and Live stores it', async () => {
+    const out = await call('draw_automation', { ...nestedTarget(), clip_index: S, points: [{ time: 0, value: 0.2 }, { time: 4, value: 0.9 }] });
+    assert(out.target.device_path.join() === nestedPath().join() && out.steps > 10, JSON.stringify(out.target));
+    for (const row of out.readback) near(row.actual, row.expected, 1e-4, `readback @${row.time}`);
+    assert(await hasEnvelope(T, S, nestedParam()), 'no envelope on the nested parameter');
+    const [start, end] = await envelopeAt(T, S, nestedParam(), [0.1, 3.95]);
+    near(start, 0.2, 0.02, 'start');
+    near(end, 0.9, 0.02, 'end');
+    const cleared = await call('clear_automation', { ...nestedTarget(), clip_index: S });
+    assert(cleared.had_envelope === true, JSON.stringify(cleared));
+  });
+  await check('bulk_set works with device paths and track types together', async () => {
+    const out = await call('bulk_set_device_parameters', { items: [
+      { track_index: T, device_path: nestedPath(), parameter_index: 1, value: 0.33 },
+      { track_index: T, device_index: D, parameter_index: pA.index, value: pA.value },
+      { track_index: T, device_path: [rackIndex, 7, 0], parameter_index: 1, value: 0.1 },
+      { track_index: T, device_index: D, device_path: nestedPath(), parameter_index: 1, value: 0.1 }
+    ] });
+    assert(out.count === 2 && out.skipped.length === 2, JSON.stringify(out));
+    assert(out.skipped[0].reason.includes('Chain index out of range'), out.skipped[0].reason);
+    assert(out.skipped[1].reason.includes('not both'), out.skipped[1].reason);
+    near(await call('eval', { code: `${nestedParam()}.value` }), 0.33, 1e-4, 'nested bulk value');
+  });
+  await check('drum pads are addressable in real kits, directly and nested inside an Instrument Rack', async () => {
+    const session = await call('get_bulk_session_structure');
+    const spare = session.tracks.find((t) => t.is_midi_track && t.device_count === 0);
+    if (!spare) {
+      console.log('       no empty MIDI track: skipped');
+      return;
+    }
+    const listing = await call('get_browser_items_at_path', { path: 'drums', limit: 150 });
+    const kits = listing.items.filter((item) => item.is_loadable && /Kit\.adg$/.test(item.name)).slice(0, 14);
+    const wipe = async () => {
+      for (let i = (await call('eval', { code: `len(self._song.tracks[${spare.index}].devices)` })) - 1; i >= 0; i -= 1) {
+        await call('eval', { code: `self._song.tracks[${spare.index}].delete_device(${i})` });
+      }
+    };
+    cleanupsRegistry.push(wipe);
+    const found = { direct: null, nested: null };
+    for (const kit of kits) {
+      if (found.direct && found.nested) break;
+      await call('load_browser_item', { track_index: spare.index, item_uri: kit.uri });
+      const top = await call('get_device_parameters', { track_index: spare.index, device_index: 0 });
+      if (top.device_type === 'drum_machine' && !found.direct) {
+        found.direct = { kit: kit.name, prefix: [0], rack: top };
+      } else if (top.device_type === 'rack' && !found.nested) {
+        for (let j = 0; j < (top.chains[0]?.device_count ?? 0); j += 1) {
+          const inner = await call('get_device_parameters', { track_index: spare.index, device_path: [0, 0, j] });
+          if (inner.device_type === 'drum_machine') {
+            found.nested = { kit: kit.name, prefix: [0, 0, j], rack: inner };
+            break;
+          }
+        }
+      }
+      if ((found.direct && found.direct.kit === kit.name) || (found.nested && found.nested.kit === kit.name)) {
+        const mine = found.direct?.kit === kit.name ? found.direct : found.nested;
+        await exercisePads(spare.index, mine);
+      }
+      await wipe();
+    }
+    assert(found.direct || found.nested, `none of the first ${kits.length} kits contained a Drum Rack`);
+    console.log(`       direct: ${found.direct ? found.direct.kit : 'none available'}; nested in an Instrument Rack: ${found.nested ? found.nested.kit : 'none available'}`);
+  });
+  async function exercisePads(trackIndex, { kit, prefix, rack }) {
+    assert(rack.can_have_drum_pads === true && rack.drum_pads.length > 0, `${kit}: no occupied pads`);
+    const pad = rack.drum_pads[0];
+    const padPath = [...prefix, { pad: pad.note }, 0];
+    const dev = await call('get_device_parameters', { track_index: trackIndex, device_path: padPath });
+    assert(dev.parameters.length > 0 && dev.device_path.length === prefix.length + 2, `${kit}: ${dev.device_name} has ${dev.parameters.length} parameters`);
+    const prm = continuous(dev.parameters);
+    const span2 = prm.max - prm.min;
+    let walk = `self._song.tracks[${trackIndex}].devices[${prefix[0]}]`;
+    for (let i = 1; i < prefix.length; i += 2) walk += `.chains[${prefix[i]}].devices[${prefix[i + 1]}]`;
+    const padParam = `${walk}.drum_pads[${pad.note}].chains[0].devices[0].parameters[${prm.index}]`;
+    const original = await call('eval', { code: `${padParam}.value` });
+    // Some device parameters step in whole numbers (e.g. 0..127) and Live truncates to them: allow one step there.
+    const tol = Number.isInteger(prm.min) && Number.isInteger(prm.max) && span2 > 20 ? 1.001 : 1e-4 * span2;
+    const set = await call('set_device_parameter', { track_index: trackIndex, device_path: padPath, parameter_index: prm.index, value: prm.min + 0.5 * span2 });
+    near(await call('eval', { code: `${padParam}.value` }), set.value, 1e-9, `${kit}: tool result matches the value in Live`);
+    near(set.value, prm.min + 0.5 * span2, tol, `${kit}: pad device value`);
+    await call('ramp_parameter', { track_index: trackIndex, device_path: padPath, parameter_index: prm.index, from: prm.min + 0.5 * span2, to: prm.min + 0.7 * span2, seconds: 0.2 });
+    await sleep(500);
+    near(await call('eval', { code: `${padParam}.value` }), prm.min + 0.7 * span2, tol, `${kit}: ramped pad value`);
+    await call('eval', { code: `setattr(${padParam}, 'value', ${original})` });
+    const emptyNote = [...Array(128).keys()].find((n) => !rack.drum_pads.some((p) => p.note === n));
+    await rejects(call('get_device_parameters', { track_index: trackIndex, device_path: [...prefix, { pad: emptyNote }, 0] }), `drum pad ${emptyNote} is empty`);
+    await rejects(call('get_device_parameters', { track_index: trackIndex, device_path: [...prefix, { pad: 999 }, 0] }), 'note out of range');
+    console.log(`       ${kit}: ${rack.drum_pads.length} pads, pad ${pad.note} -> ${dev.device_name}${prefix.length > 1 ? ' (nested)' : ''}`);
+  }
+  await check('device_path errors are precise', async () => {
+    const t = { track_index: T, parameter_index: 1 };
+    const cases = [
+      [{ device_path: [] }, 'alternate device and chain'], [{ device_path: [rackIndex, 0] }, 'alternate device and chain'],
+      [{ device_path: [99] }, 'Device index out of range at device_path[0]'], [{ device_path: [rackIndex, 9, 0] }, 'Chain index out of range at device_path[1]'],
+      [{ device_path: [rackIndex, 0, 9] }, 'Device index out of range at device_path[2]'], [{ device_path: [D, 0, 0] }, 'has no chains'],
+      [{ device_path: [rackIndex, { pad: 36 }, 0] }, 'has no drum pads'], [{ device_path: [rackIndex, { nope: 1 }, 0] }, "needs 'pad' or 'return'"],
+      [{ device_path: [rackIndex, { return: 0 }, 0] }, 'Chain index out of range'], [{ device_path: [rackIndex, 'x', 0] }, 'integer'],
+      [{ device_path: [rackIndex, 0, 1], device_index: 0 }, 'not both']
+    ];
+    for (const [extra, fragment] of cases) {
+      await rejects(call('get_device_parameters', { track_index: T, ...extra }), fragment);
+      await rejects(call('set_device_parameter', { ...t, ...extra, value: 0.1 }), fragment);
+    }
+    await rejects(call('ramp_parameter', { ...t, device_path: [rackIndex, 9, 0], to: 0.5, seconds: 1 }), 'Chain index out of range');
+    assert((await call('cancel_ramps')).active_ramps === 0, 'a failed call left a ramp behind');
+  });
 } finally {
   console.log('\nCleanup');
   await call('cancel_ramps').catch(() => {});
+  for (const undo of cleanupsRegistry.reverse()) await undo().catch(() => {});
   await call('clear_automation', { track_index: T, clip_index: S }).catch(() => {});
   await call('delete_clip', { track_index: T, clip_index: S }).catch(() => {});
   for (const p of snapshots) {
