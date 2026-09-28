@@ -13,7 +13,7 @@ A Node.js/TypeScript stdio Model Context Protocol (MCP) server for controlling a
 
 - **MCP Transport**: Communicates over `stdio` using `@modelcontextprotocol/sdk`. Diagnostics and operational logs are strictly directed to `stderr` to preserve stdout for JSON-RPC frames.
 - **Ableton Bridge**: Keeps Ableton Live access behind a typed `AbletonClient` adapter communicating over localhost TCP port `9877` using framed JSON requests.
-- **Remote Script**: A Python Control Surface script running inside Ableton Live's Python environment that handles commands and thread-safe main-thread scheduling.
+- **Remote Script**: A Python Control Surface script running inside Ableton Live's Python environment. Its socket server is pumped by a `Live.Base.Timer` on Live's main thread, so every command runs on the main thread and answers in about 10 ms (a threaded server answered in 300-600 ms because socket threads only got the GIL when Live called into Python). Live versions without `Live.Base.Timer` fall back to the threaded server.
 - **Capability Discovery**: Queries the running Remote Script's handshake (`get_script_info`) dynamically at startup to verify supported capabilities and script version.
 
 ---
@@ -157,6 +157,14 @@ With Live running and the script enabled, call the `get_health` tool. It should 
 - `bulk_edit_clips`: Batch clip creation and renaming in serial order on Live's main thread.
 - `bulk_set_device_parameters`: Batch update multiple device parameters in a single round trip.
 
+#### Automation & Ramps
+- `draw_automation`: Draw a Session-clip automation envelope for a device or mixer parameter from `{time, value}` points (times in beats from clip start, values in the parameter's own units). Curves: `linear`, `step`, `smooth`, `ease_in`, `ease_out`, per call or per point. Ramps are drawn as fine staircases (`resolution` beats per step) that start exactly on the first value and end exactly on the last. `mode: "replace"` (default) rebuilds the parameter's envelope, `"merge"` rewrites only the drawn range; `hold` (default) fills the clip edges. The result includes a readback of Live's stored values.
+- `clear_automation`: Clear one parameter's envelope on a clip, or every envelope when no parameter is given.
+- `ramp_parameter`: Sweep a device or mixer parameter to a target over `beats` or `seconds`, driven inside Live at about 100 updates per second (Live's timer resolution is 10 ms). For live gestures; use `draw_automation` for motion that belongs to a looping clip. A new ramp on the same parameter replaces the old one.
+- `cancel_ramps`: Cancel one ramp, or all of them.
+
+Targets are `device_index` + `parameter_index`, or `mixer_parameter` (`"volume"`, `"pan"`, `"send:N"`). Limits from Live's API: automation envelopes exist only on **Session** clips (not arrangement clips), and only for parameters on the clip's own track.
+
 #### Development
 - `eval_python`: Evaluate raw Python on the Remote Script instance. Executes arbitrary code inside Live; intended for development and debugging only.
 
@@ -169,6 +177,8 @@ With Live running and the script enabled, call the `get_health` tool. It should 
 - The MCP host must be able to read the same source-file path reported by Ableton Live. Analysis reads the first 60 seconds for signal statistics and frequency bands; integrated loudness is measured across the full file.
 - Not decodable by ffmpeg, so these return an "unsupported source" error: Ableton-compressed `.aif` files (Live pack samples, AIFF-C codec `able`) and REX files (`.rx2`). Analyze a WAV or uncompressed AIFF instead.
 - Audio analysis is local DSP and file metadata only. It does not provide AI instrument recognition, transcription, key detection, or tempo estimation.
+
+0. **Slow responses (hundreds of milliseconds per call)**: the timer-pumped server answers in about 10 ms. If calls are much slower, the Remote Script in your User Library is probably an older version (the log line `Server started on port 9877 (timer pump, 10 ms)` confirms the new one) or Live lacks `Live.Base.Timer` and is using the threaded fallback. Copy the current `remote-script/__init__.py` and restart Live.
 
 1. **AbletonMCP is not listed under Control Surface**:
    - Live only reads the User Library configured in **Preferences → Library**. Confirm the script is in *that* library's `Remote Scripts/AbletonMCP/__init__.py`, not a different one.
@@ -187,6 +197,18 @@ With Live running and the script enabled, call the `get_health` tool. It should 
 
 ---
 
+## Testing
+
+```bash
+npm test            # offline: Remote Script logic against a mocked Live API (no Live needed)
+npm run test:live   # integration: a running Live with AbletonMCP enabled
+npm run test:mcp    # MCP layer: tool schemas, handlers and errors over stdio (needs Live)
+```
+
+The live suites use a scratch clip on a MIDI track with a device, restore every parameter they touch, and delete what they create. Run them with the transport playing to include the check that Live's parameter follows a drawn envelope during playback. Audio will briefly change while they run.
+
+---
+
 ## How to Add a New Live-Side Command
 
 To add a new capability to the server:
@@ -199,8 +221,7 @@ To add a new capability to the server:
    ```
 
 2. **Route Command in `_process_command`**:
-   - If reading state, dispatch directly.
-   - If mutating state, schedule on the main thread via `main_thread_task`.
+   - Everything runs on Live's main thread when the timer pump is active (`_process_command(command, direct=True)`). State-changing commands go in the `main_thread_task` chain so the threaded fallback still schedules them safely; keep handlers quick, since a slow one blocks Live's main thread.
 
 3. **Register Capability in `_get_script_info`**:
    Add `"my_new_feature"` string to the `capabilities` list in `_get_script_info()`.
