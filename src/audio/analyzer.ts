@@ -104,18 +104,22 @@ function fft(real: Float64Array, imaginary: Float64Array): void {
   }
 }
 
-function pcmMetrics(pcm: Buffer) {
-  const sampleCount = Math.floor(pcm.length / 4);
-  const samples = new Float32Array(sampleCount);
+function pcmMetrics(pcm: Buffer, channelCount: number) {
+  // Interleaved f32le. Peak/RMS span every channel so out-of-phase content isn't cancelled by a mono mix.
+  const frameCount = Math.floor(pcm.length / (4 * channelCount));
+  const channels = Array.from({ length: channelCount }, () => new Float32Array(frameCount));
   let peak = 0;
   let sumSquares = 0;
-  for (let i = 0; i < sampleCount; i += 1) {
-    const sample = pcm.readFloatLE(i * 4);
-    samples[i] = sample;
-    const magnitude = Math.abs(sample);
-    if (magnitude > peak) peak = magnitude;
-    sumSquares += sample * sample;
+  for (let frame = 0; frame < frameCount; frame += 1) {
+    for (let channel = 0; channel < channelCount; channel += 1) {
+      const sample = pcm.readFloatLE((frame * channelCount + channel) * 4);
+      channels[channel][frame] = sample;
+      const magnitude = Math.abs(sample);
+      if (magnitude > peak) peak = magnitude;
+      sumSquares += sample * sample;
+    }
   }
+  const sampleCount = frameCount * channelCount;
 
   const bandDefinitions = [
     { name: 'sub_bass', minHz: 20, maxHz: 60 },
@@ -126,25 +130,27 @@ function pcmMetrics(pcm: Buffer) {
     { name: 'high', minHz: 6000, maxHz: SAMPLE_RATE / 2 }
   ];
   const bandPower = new Array(bandDefinitions.length).fill(0);
-  const windowCount = Math.max(1, Math.floor(sampleCount / FFT_SIZE));
+  const windowCount = Math.max(1, Math.floor(frameCount / FFT_SIZE));
   const real = new Float64Array(FFT_SIZE);
   const imaginary = new Float64Array(FFT_SIZE);
   const binWidth = SAMPLE_RATE / FFT_SIZE;
 
-  for (let window = 0; window < windowCount; window += 1) {
-    const offset = window * FFT_SIZE;
-    for (let i = 0; i < FFT_SIZE; i += 1) {
-      const sample = offset + i < sampleCount ? samples[offset + i] : 0;
-      const hann = 0.5 - 0.5 * Math.cos((2 * Math.PI * i) / (FFT_SIZE - 1));
-      real[i] = sample * hann;
-      imaginary[i] = 0;
-    }
-    fft(real, imaginary);
-    for (let bin = 1; bin <= FFT_SIZE / 2; bin += 1) {
-      const frequency = bin * binWidth;
-      const bandIndex = bandDefinitions.findIndex((band) => frequency >= band.minHz && frequency < band.maxHz);
-      if (bandIndex >= 0) {
-        bandPower[bandIndex] += real[bin] * real[bin] + imaginary[bin] * imaginary[bin];
+  for (const samples of channels) {
+    for (let window = 0; window < windowCount; window += 1) {
+      const offset = window * FFT_SIZE;
+      for (let i = 0; i < FFT_SIZE; i += 1) {
+        const sample = offset + i < frameCount ? samples[offset + i] : 0;
+        const hann = 0.5 - 0.5 * Math.cos((2 * Math.PI * i) / (FFT_SIZE - 1));
+        real[i] = sample * hann;
+        imaginary[i] = 0;
+      }
+      fft(real, imaginary);
+      for (let bin = 1; bin <= FFT_SIZE / 2; bin += 1) {
+        const frequency = bin * binWidth;
+        const bandIndex = bandDefinitions.findIndex((band) => frequency >= band.minHz && frequency < band.maxHz);
+        if (bandIndex >= 0) {
+          bandPower[bandIndex] += real[bin] * real[bin] + imaginary[bin] * imaginary[bin];
+        }
       }
     }
   }
@@ -152,7 +158,7 @@ function pcmMetrics(pcm: Buffer) {
   const totalBandPower = bandPower.reduce((total, value) => total + value, 0);
   return {
     sample_rate_hz: SAMPLE_RATE,
-    analyzed_duration_seconds: sampleCount / SAMPLE_RATE,
+    analyzed_duration_seconds: frameCount / SAMPLE_RATE,
     peak_linear: peak,
     peak_dbfs: peak > 0 ? 20 * Math.log10(peak) : null,
     rms_linear: sampleCount > 0 ? Math.sqrt(sumSquares / sampleCount) : 0,
@@ -190,12 +196,10 @@ export async function analyzeAudioFile(filePath: string) {
   ], 1024);
   const loudnessMatches = Array.from(loudnessRun.stderr.matchAll(/\bI:\s*(-?inf|-?\d+(?:\.\d+)?)\s*LUFS\b/gi));
   const loudnessValue = loudnessMatches.at(-1)?.[1];
-  // Average channels explicitly: `-ac 1` on float output sums stereo (~+3 dB), overstating peak/RMS.
   const channelCount = Math.max(1, audioStream.channels ?? 1);
-  const monoMix = `pan=mono|c0=${Array.from({ length: channelCount }, (_, i) => `${1 / channelCount}*c${i}`).join('+')}`;
   const pcmRun = await runProcess(ffmpeg, [
     '-hide_banner', '-loglevel', 'error', '-i', resolvedPath, '-t', String(ANALYSIS_SECONDS),
-    '-vn', '-af', monoMix, '-ar', String(SAMPLE_RATE), '-f', 'f32le', '-'
+    '-vn', '-ac', String(channelCount), '-ar', String(SAMPLE_RATE), '-f', 'f32le', '-'
   ]);
 
   return {
@@ -210,7 +214,7 @@ export async function analyzeAudioFile(filePath: string) {
     channel_layout: audioStream.channel_layout || null,
     bit_depth: audioStream.bits_per_raw_sample ? Number(audioStream.bits_per_raw_sample) : (audioStream.bits_per_sample || null),
     integrated_loudness_lufs: loudnessValue && !/inf/i.test(loudnessValue) ? Number(loudnessValue) : null,
-    signal: pcmMetrics(pcmRun.stdout),
-    analysis_notes: [`Signal statistics and frequency bands use the first ${ANALYSIS_SECONDS} seconds, resampled to mono ${SAMPLE_RATE} Hz.`, 'Integrated loudness is measured over the full source file using the EBU R128 filter.']
+    signal: pcmMetrics(pcmRun.stdout, channelCount),
+    analysis_notes: [`Signal statistics and frequency bands use the first ${ANALYSIS_SECONDS} seconds, resampled to ${SAMPLE_RATE} Hz. Peak and RMS span all channels; bands sum per-channel spectra.`, 'Integrated loudness is measured over the full source file using the EBU R128 filter.']
   };
 }
