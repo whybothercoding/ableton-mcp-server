@@ -18,57 +18,78 @@ A Node.js/TypeScript stdio Model Context Protocol (MCP) server for controlling a
 
 ---
 
-## Setup Instructions
+## Requirements
 
-### 1. Install the Ableton Remote Script
+- Ableton Live 10, 11 or 12 (any edition; Remote Scripts are supported everywhere)
+- Node.js 18+ and npm
+- Optional: `ffmpeg` / `ffprobe` for `analyze_audio_clip`
 
-Copy the `remote-script/` directory into your Ableton Live User Library's `Remote Scripts` folder:
+---
 
-**macOS**:
-```bash
-mkdir -p ~/Music/Ableton/User\ Library/Remote\ Scripts/AbletonMCP
-cp remote-script/__init__.py ~/Music/Ableton/User\ Library/Remote\ Scripts/AbletonMCP/__init__.py
-```
+## Installation
 
-**Windows**:
-```cmd
-xcopy remote-script\__init__.py "%USERPROFILE%\Documents\Ableton\User Library\Remote Scripts\AbletonMCP\" /Y
-```
+### 1. Build the MCP server
 
-### 2. Enable in Ableton Live
-
-1. Open **Ableton Live**.
-2. Open **Preferences** (`Cmd + ,` or `Ctrl + ,`).
-3. Select the **Link / Tempo / MIDI** tab.
-4. Under **Control Surface**, select **AbletonMCP** from the dropdown menu.
-5. Set Input and Output to `None`.
-6. Live will display a status message: `AbletonMCP: Listening for commands on port 9877`.
-
-### 3. Build & Run the MCP Server
+From the repository root:
 
 ```bash
-# Install dependencies
 npm install
-
-# Build TypeScript output
 npm run build
-
-# Start the stdio MCP server
-npm start
 ```
 
-### 4. Configure in MCP Client
+### 2. Install the Remote Script into Live
 
-Add the server to your MCP client configuration (e.g. `claude_desktop_config.json`):
+Live loads Remote Scripts from a `Remote Scripts` folder inside your **User Library**. The User Library location is configurable, so look up yours first:
+
+1. In Live, open **Preferences → Library**.
+2. Note the **User Library** location shown there. (It can be the default location or a custom one, e.g. on an external drive.)
+3. Inside that folder, create `Remote Scripts/AbletonMCP/` if it doesn't exist.
+4. Copy `remote-script/__init__.py` from this repo into it.
+
+The result must look like this. The file has to be named `__init__.py` and sit directly inside `AbletonMCP/`:
+
+```
+<your User Library>/
+└── Remote Scripts/
+    └── AbletonMCP/
+        └── __init__.py
+```
+
+Shell equivalent, with `USER_LIBRARY` set to the path from step 2:
+
+```bash
+mkdir -p "$USER_LIBRARY/Remote Scripts/AbletonMCP"
+cp remote-script/__init__.py "$USER_LIBRARY/Remote Scripts/AbletonMCP/"
+```
+
+> **Note:** Live scans for Remote Scripts only at launch. Restart Live after installing or updating the script. If the User Library is on an external drive, make sure it is mounted before launching Live. On macOS, the terminal you copy from may need permission to access removable volumes (System Settings → Privacy & Security → Files and Folders).
+
+### 3. Enable the script in Live
+
+1. Restart Live.
+2. Open **Preferences → Link, Tempo & MIDI**.
+3. In a **Control Surface** slot, choose **AbletonMCP**.
+4. Set **Input** and **Output** to `None`.
+5. Live shows: `AbletonMCP: Listening for commands on port 9877`.
+
+### 4. Register the server with your MCP client
+
+Point your client at the built entry point, `dist/index.js` in this repo, using an absolute path for your machine.
+
+**Claude Code** (from the repo root):
+
+```bash
+claude mcp add ableton -- node "$(pwd)/dist/index.js"
+```
+
+**Claude Desktop / other clients** (JSON config):
 
 ```json
 {
   "mcpServers": {
     "ableton": {
       "command": "node",
-      "args": [
-        "/path/to/ableton-mcp-server/dist/index.js"
-      ],
+      "args": ["<absolute path to this repo>/dist/index.js"],
       "env": {
         "ABLETON_HOST": "127.0.0.1",
         "ABLETON_PORT": "9877"
@@ -77,6 +98,20 @@ Add the server to your MCP client configuration (e.g. `claude_desktop_config.jso
   }
 }
 ```
+
+The repo's `.mcp.json` uses a relative path and works for Claude Code sessions started in the repo root.
+
+### 5. Verify
+
+With Live running and the script enabled, call the `get_health` tool. It should report the script version and capability list. Live's `Log.txt` should also contain `(AbletonMCP) AbletonMCP initialized`.
+
+### Configuration
+
+| Variable | Default | Purpose |
+|---|---|---|
+| `ABLETON_HOST` | `127.0.0.1` | Host of the Remote Script socket |
+| `ABLETON_PORT` | `9877` | Port of the Remote Script socket |
+| `FFMPEG_PATH` / `FFPROBE_PATH` | on `PATH` | Binaries used by `analyze_audio_clip` |
 
 ---
 
@@ -97,6 +132,8 @@ Add the server to your MCP client configuration (e.g. `claude_desktop_config.jso
 - `get_track_structure`: Summary of all tracks including group parent/child relationships and mixer state.
 - `get_track_detail`: Detailed track breakdown (clip slots, arrangement clips, devices).
 - `get_clip_notes`: Read all MIDI notes from a clip slot.
+- `get_audio_clip_path`: Get an audio clip's source path and Live-side sample/warp metadata from Session or Arrangement view.
+- `analyze_audio_clip`: Analyze the source file for codec/format metadata, integrated LUFS, peak/RMS levels, and an approximate six-band frequency profile.
 - `get_device_parameters`: Get parameter list for a device on a track.
 - `get_browser_tree`: Explore top-level categories in Live browser.
 - `get_browser_items`: Retrieve browser items at a category path.
@@ -104,11 +141,12 @@ Add the server to your MCP client configuration (e.g. `claude_desktop_config.jso
 
 #### Mutation / Write Tools
 - `set_tempo`: Modify BPM.
-- `set_track_name`: Rename a track.
+- `set_track_name` / `set_track_color`: Rename or recolor a track.
 - `set_track_mute` / `set_track_solo` / `set_track_arm`: Control track mixer states.
 - `create_midi_track`: Insert a new MIDI track.
 - `create_clip`: Create a new clip slot clip with specified length and name.
-- `set_clip_name`: Rename a clip.
+- `set_clip_name` / `set_clip_color`: Rename or recolor a clip.
+- `set_scene_name`: Rename a scene.
 - `edit_clip_notes`: Add or replace MIDI notes in a clip slot (`mode: "add" | "replace"`). Replacing explicitly clears existing notes before inserting the complete new sequence.
 - `delete_clip`: Remove a clip slot clip.
 - `fire_clip` / `stop_clip`: Transport controls for individual clip slots.
@@ -119,18 +157,31 @@ Add the server to your MCP client configuration (e.g. `claude_desktop_config.jso
 - `bulk_edit_clips`: Batch clip creation and renaming in serial order on Live's main thread.
 - `bulk_set_device_parameters`: Batch update multiple device parameters in a single round trip.
 
+#### Development
+- `eval_python`: Evaluate raw Python on the Remote Script instance. Executes arbitrary code inside Live; intended for development and debugging only.
+
 ---
 
 ## Troubleshooting
 
-1. **Connection Refused (`127.0.0.1:9877`)**:
+### Audio Analysis Requirements
+- Install `ffmpeg` and `ffprobe` on the machine running the MCP server. Set `FFMPEG_PATH` and `FFPROBE_PATH` if they are not on `PATH`.
+- The MCP host must be able to read the same source-file path reported by Ableton Live. Analysis reads the first 60 seconds for signal statistics and frequency bands; integrated loudness is measured across the full file.
+- Audio analysis is local DSP and file metadata only. It does not provide AI instrument recognition, transcription, key detection, or tempo estimation.
+
+1. **AbletonMCP is not listed under Control Surface**:
+   - Live only reads the User Library configured in **Preferences → Library**. Confirm the script is in *that* library's `Remote Scripts/AbletonMCP/__init__.py`, not a different one.
+   - Confirm the User Library drive is mounted, then restart Live.
+   - Check `Log.txt` (in Live's preferences folder) for `RemoteScriptError` entries mentioning AbletonMCP.
+
+2. **Connection Refused (`127.0.0.1:9877`)**:
    - Ensure Ableton Live is open and `AbletonMCP` is selected as an active **Control Surface** in Live Preferences.
    - Check if port 9877 is blocked by firewall or in use by another application.
 
-2. **Unsupported Capability Errors**:
-   - The MCP server queries `get_script_info` on startup. If a tool requires a Remote Script command that is missing, it returns a clear unsupported-capability error. Ensure `remote-script/__init__.py` is updated in your User Library.
+3. **Unsupported Capability Errors**:
+   - The MCP server queries `get_script_info` on startup. If a tool requires a Remote Script command that is missing, it returns a clear unsupported-capability error. Copy the current `remote-script/__init__.py` into your User Library's `Remote Scripts/AbletonMCP/` and restart Live.
 
-3. **Group Track Errors**:
+4. **Group Track Errors**:
    - Group tracks and Master/Return tracks do not have arm buttons. The `AbletonMCP` script handles arm state safely via `can_be_armed` checks.
 
 ---
