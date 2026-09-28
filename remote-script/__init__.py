@@ -2,6 +2,8 @@
 from __future__ import absolute_import, print_function, unicode_literals
 
 from _Framework.ControlSurface import ControlSurface
+import errno
+import math
 import socket
 import json
 import threading
@@ -18,6 +20,107 @@ except ImportError:
 # Constants for socket communication
 DEFAULT_PORT = 9877
 HOST = "localhost"
+
+# Non-blocking server pumped by a Live.Base.Timer on the main thread. Socket threads only
+# get the GIL when Live's main thread calls into Python (~100 ms apart), so a threaded
+# server answers in 300-600 ms; pumping from a timer answers in ~10 ms. Live's timer
+# resolution is 10 ms (a 5 ms request still fires at 100 Hz), which is also the ramp rate.
+PUMP_INTERVAL_MS = 10
+MAX_REQUEST_BYTES = 16 * 1024 * 1024
+CLIENT_IDLE_SECONDS = 60
+_WOULD_BLOCK = (errno.EAGAIN, errno.EWOULDBLOCK, errno.EINTR)
+
+# Automation / ramp helpers (pure functions, unit-tested without Live)
+CURVES = ("linear", "step", "smooth", "ease_in", "ease_out")
+MAX_AUTOMATION_STEPS = 20000
+_EPS = 1e-9
+
+
+def _is_number(value):
+    return isinstance(value, (int, float)) and not isinstance(value, bool) \
+        and not math.isnan(value) and not math.isinf(value)
+
+
+def _as_index(value, name):
+    if isinstance(value, bool) or not isinstance(value, (int, float)) or int(value) != value:
+        raise ValueError("{0} must be an integer".format(name))
+    return int(value)
+
+
+def _ease(curve, x):
+    """Map progress x in [0, 1] to eased progress for the named curve."""
+    if curve == "linear":
+        return x
+    if curve == "smooth":
+        return x * x * (3.0 - 2.0 * x)
+    if curve == "ease_in":
+        return x * x
+    if curve == "ease_out":
+        return 1.0 - (1.0 - x) * (1.0 - x)
+    raise ValueError("curve must be one of: " + ", ".join(CURVES))
+
+
+def _normalize_points(points, clip_length, lo, hi):
+    """Validate and time-sort automation points ({time, value[, curve]})."""
+    if not isinstance(points, list) or not points:
+        raise ValueError("points must be a non-empty list of {time, value} objects")
+    cleaned = []
+    for i, point in enumerate(points):
+        if not isinstance(point, dict):
+            raise ValueError("points[{0}] must be an object with time and value".format(i))
+        time_beats, value = point.get("time"), point.get("value")
+        if not _is_number(time_beats) or not _is_number(value):
+            raise ValueError("points[{0}] needs numeric time and value".format(i))
+        if time_beats < -_EPS or time_beats > clip_length + _EPS:
+            raise ValueError("points[{0}].time {1} is outside the clip (0 to {2} beats)".format(i, time_beats, clip_length))
+        if value < lo - _EPS or value > hi + _EPS:
+            raise ValueError("points[{0}].value {1} is outside the parameter range {2} to {3}".format(i, value, lo, hi))
+        curve = point.get("curve")
+        if curve is not None and curve not in CURVES:
+            raise ValueError("points[{0}].curve must be one of: {1}".format(i, ", ".join(CURVES)))
+        cleaned.append({"time": min(max(float(time_beats), 0.0), float(clip_length)),
+                        "value": min(max(float(value), lo), hi), "curve": curve, "order": i})
+    cleaned.sort(key=lambda point: (point["time"], point["order"]))
+    return cleaned
+
+
+def _build_steps(points, default_curve, resolution, clip_length, hold):
+    """Turn normalized points into [(start, length, value)] envelope steps.
+
+    A ramp segment is a staircase whose first step is exactly its start value and whose last
+    step is exactly its end value. With hold, the clip's edges are filled so the whole clip
+    is defined."""
+    if default_curve not in CURVES:
+        raise ValueError("curve must be one of: " + ", ".join(CURVES))
+    if not _is_number(resolution) or resolution <= 0:
+        raise ValueError("resolution must be a positive number of beats")
+    steps = []
+    first, last = points[0], points[-1]
+    if hold and first["time"] > _EPS:
+        steps.append((0.0, first["time"], first["value"]))
+    for i in range(len(points) - 1):
+        a, b = points[i], points[i + 1]
+        segment = b["time"] - a["time"]
+        if segment <= _EPS:
+            continue
+        curve = a["curve"] or default_curve
+        if curve == "step":
+            steps.append((a["time"], segment, a["value"]))
+            continue
+        count = max(1, int(math.ceil(segment / resolution - 1e-9)))
+        length = segment / count
+        for k in range(count):
+            # First step is exactly a, last step exactly b (a lone step takes a)
+            progress = k / float(count - 1) if count > 1 else 0.0
+            steps.append((a["time"] + k * length, length, a["value"] + (b["value"] - a["value"]) * _ease(curve, progress)))
+    tail = clip_length - last["time"]
+    if tail > _EPS:
+        steps.append((last["time"], tail if hold else min(resolution, tail), last["value"]))
+    if not steps:
+        raise ValueError("nothing to draw: give at least two points at different times, or one point with hold enabled")
+    if len(steps) > MAX_AUTOMATION_STEPS:
+        raise ValueError("{0} steps exceeds the {1} limit; use a larger resolution".format(len(steps), MAX_AUTOMATION_STEPS))
+    return steps
 
 def create_instance(c_instance):
     """Create and return the AbletonMCP script instance"""
@@ -36,6 +139,9 @@ class AbletonMCP(ControlSurface):
         self.client_threads = []
         self.server_thread = None
         self.running = False
+        self._clients = {}
+        self._pump_timer = None
+        self._ramps = {}
         
         # Cache the song reference for easier access
         self._song = self.song()
@@ -51,19 +157,8 @@ class AbletonMCP(ControlSurface):
     def disconnect(self):
         """Called when Ableton closes or the control surface is removed"""
         self.log_message("AbletonMCP disconnecting...")
-        self.running = False
+        self._stop_server()
         
-        # Stop the server
-        if self.server:
-            try:
-                self.server.close()
-            except:
-                pass
-        
-        # Wait for the server thread to exit
-        if self.server_thread and self.server_thread.is_alive():
-            self.server_thread.join(1.0)
-            
         # Clean up any client threads
         for client_thread in self.client_threads[:]:
             if client_thread.is_alive():
@@ -73,23 +168,158 @@ class AbletonMCP(ControlSurface):
         ControlSurface.disconnect(self)
         self.log_message("AbletonMCP disconnected")
     
+    def _stop_server(self):
+        """Stop the pump timer, ramps, open clients and the listening socket."""
+        self.running = False
+        if self._pump_timer is not None:
+            try:
+                self._pump_timer.stop()
+            except Exception:
+                pass
+            self._pump_timer = None
+        self._ramps = {}
+        for client in list(self._clients.keys()):
+            self._close_client(client)
+        
+        # Stop the server
+        if self.server:
+            try:
+                self.server.close()
+            except Exception:
+                pass
+            self.server = None
+        
+        # Wait for the (fallback) server thread to exit
+        if self.server_thread and self.server_thread.is_alive():
+            self.server_thread.join(2.0)
+        self.server_thread = None
+    
     def start_server(self):
-        """Start the socket server in a separate thread"""
+        """Start the socket server: pumped by a main-thread timer, or threaded as a fallback"""
         try:
             self.server = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
             self.server.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
             self.server.bind((HOST, DEFAULT_PORT))
-            self.server.listen(5)  # Allow up to 5 pending connections
-            
+            self.server.listen(128)
+            self._clients = {}
             self.running = True
-            self.server_thread = threading.Thread(target=self._server_thread)
-            self.server_thread.daemon = True
-            self.server_thread.start()
             
-            self.log_message("Server started on port " + str(DEFAULT_PORT))
+            if hasattr(Live, "Base") and hasattr(Live.Base, "Timer"):
+                self.server.setblocking(False)
+                self._pump_timer = Live.Base.Timer(callback=self._pump, interval=PUMP_INTERVAL_MS, repeat=True, start=True)
+                self.log_message("Server started on port {0} (timer pump, {1} ms)".format(DEFAULT_PORT, PUMP_INTERVAL_MS))
+            else:
+                self.server_thread = threading.Thread(target=self._server_thread)
+                self.server_thread.daemon = True
+                self.server_thread.start()
+                self.log_message("Server started on port {0} (threaded fallback)".format(DEFAULT_PORT))
         except Exception as e:
             self.log_message("Error starting server: " + str(e))
             self.show_message("AbletonMCP: Error starting server - " + str(e))
+    
+    # Timer-pumped server (all commands run on Live's main thread)
+    
+    def _pump(self):
+        """Timer callback: accept connections, serve requests, advance ramps.
+
+        Exceptions must never escape: Live.Base.Timer stops itself on a callback error."""
+        if not self.running:
+            return
+        try:
+            self._pump_accept()
+            self._pump_clients()
+        except Exception as e:
+            self.log_message("Pump error: " + str(e))
+            self.log_message(traceback.format_exc())
+        try:
+            self._tick_ramps()
+        except Exception as e:
+            self.log_message("Ramp error: " + str(e))
+            self.log_message(traceback.format_exc())
+    
+    def _pump_accept(self):
+        while self.server is not None:
+            try:
+                client, _address = self.server.accept()
+            except socket.error as e:
+                if e.errno not in _WOULD_BLOCK:
+                    self.log_message("Accept error: " + str(e))
+                return
+            client.setblocking(False)
+            try:
+                client.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
+            except Exception:
+                pass
+            self._clients[client] = {"in": b"", "out": b"", "last": time.time()}
+    
+    def _close_client(self, client):
+        self._clients.pop(client, None)
+        try:
+            client.close()
+        except Exception:
+            pass
+    
+    def _pump_clients(self):
+        now = time.time()
+        for client in list(self._clients.keys()):
+            state = self._clients.get(client)
+            if state is None:
+                continue
+            peer_closed = False
+            while True:
+                try:
+                    data = client.recv(65536)
+                except socket.error as e:
+                    if e.errno not in _WOULD_BLOCK:
+                        peer_closed = True
+                    break
+                if not data:
+                    peer_closed = True
+                    break
+                state["in"] += data
+                state["last"] = now
+                if len(state["in"]) > MAX_REQUEST_BYTES:
+                    state["in"] = b""
+                    self._queue_response(state, {"status": "error", "message": "Request too large"})
+                    break
+            
+            if state["in"]:
+                command = self._parse_request(state["in"])
+                if command is not None:
+                    state["in"] = b""
+                    self._queue_response(state, self._process_command(command, direct=True))
+            
+            if not self._flush_client(client, state) or (peer_closed and not state["out"]):
+                self._close_client(client)
+            elif peer_closed or (now - state["last"] > CLIENT_IDLE_SECONDS and not state["out"]):
+                self._close_client(client)
+    
+    def _parse_request(self, raw):
+        """Return the decoded command once a full JSON document has arrived, else None."""
+        try:
+            text = raw.decode("utf-8")
+            return json.loads(text)
+        except (UnicodeDecodeError, ValueError):
+            return None
+    
+    def _queue_response(self, state, response):
+        try:
+            payload = json.dumps(response)
+        except (TypeError, ValueError) as e:
+            payload = json.dumps({"status": "error", "message": "Could not serialize response: " + str(e)})
+        state["out"] += payload if isinstance(payload, bytes) else payload.encode("utf-8")
+    
+    def _flush_client(self, client, state):
+        """Send as much pending output as the socket accepts; False if the client is gone."""
+        while state["out"]:
+            try:
+                sent = client.send(state["out"])
+            except socket.error as e:
+                if e.errno in _WOULD_BLOCK:
+                    return True
+                return False
+            state["out"] = state["out"][sent:]
+        return True
     
     def _server_thread(self):
         """Server thread implementation - handles client connections"""
@@ -208,8 +438,11 @@ class AbletonMCP(ControlSurface):
                 pass
             self.log_message("Client handler stopped")
     
-    def _process_command(self, command):
-        """Process a command from the client and return a response"""
+    def _process_command(self, command, direct=False):
+        """Process a command and return a response.
+
+        direct=True means the caller is already on Live's main thread (timer pump), so state-changing
+        commands run inline instead of being scheduled and awaited."""
         command_type = command.get("type", "")
         params = command.get("params", {})
         
@@ -251,7 +484,8 @@ class AbletonMCP(ControlSurface):
                                  "set_track_mute", "set_track_solo", "set_track_arm",
                                  "set_scene_name", "eval", "set_scene_tempo", "set_device_parameter",
                                  "start_playback", "stop_playback", "load_browser_item",
-                                 "bulk_set_clip_names", "bulk_create_clips", "bulk_set_device_parameters"]:
+                                 "bulk_set_clip_names", "bulk_create_clips", "bulk_set_device_parameters",
+                                 "draw_automation", "clear_automation", "ramp_parameter", "cancel_ramps"]:
                 # Use a thread-safe approach with a response queue
                 response_queue = queue.Queue()
                 
@@ -368,6 +602,15 @@ class AbletonMCP(ControlSurface):
                             item_uri = params.get("item_uri", "")
                             result = self._load_browser_item(track_index, item_uri)
                         
+                        elif command_type == "draw_automation":
+                            result = self._draw_automation(params)
+                        elif command_type == "clear_automation":
+                            result = self._clear_automation(params)
+                        elif command_type == "ramp_parameter":
+                            result = self._ramp_parameter(params)
+                        elif command_type == "cancel_ramps":
+                            result = self._cancel_ramps(params)
+                        
                         # Put the result in the queue
                         response_queue.put({"status": "success", "result": result})
                     except Exception as e:
@@ -375,12 +618,15 @@ class AbletonMCP(ControlSurface):
                         self.log_message(traceback.format_exc())
                         response_queue.put({"status": "error", "message": str(e)})
                 
-                # Schedule the task to run on the main thread
-                try:
-                    self.schedule_message(0, main_thread_task)
-                except AssertionError:
-                    # If we're already on the main thread, execute directly
+                # Schedule the task to run on the main thread (or run it inline if already there)
+                if direct:
                     main_thread_task()
+                else:
+                    try:
+                        self.schedule_message(0, main_thread_task)
+                    except AssertionError:
+                        # If we're already on the main thread, execute directly
+                        main_thread_task()
                 
                 # Wait for the response with a timeout
                 try:
@@ -555,24 +801,35 @@ class AbletonMCP(ControlSurface):
         return {"created": created, "count": len(created)}
 
     def _bulk_set_device_parameters(self, items):
-        """Set multiple device parameters in one main thread pass"""
+        """Set multiple device parameters in one main thread pass.
+
+        Reports the value Live actually holds afterwards, and why any item was skipped."""
         updated = []
-        for item in items:
-            t_idx = item.get("track_index")
-            d_idx = item.get("device_index")
-            p_idx = item.get("parameter_index")
-            val = item.get("value")
-            if t_idx is not None and d_idx is not None and p_idx is not None and val is not None:
-                if 0 <= t_idx < len(self._song.tracks):
-                    track = self._song.tracks[t_idx]
-                    if hasattr(track, 'devices') and 0 <= d_idx < len(track.devices):
-                        device = track.devices[d_idx]
-                        if 0 <= p_idx < len(device.parameters):
-                            param = device.parameters[p_idx]
-                            if param.is_enabled:
-                                param.value = val
-                                updated.append({"track_index": t_idx, "device_index": d_idx, "parameter_index": p_idx, "value": val})
-        return {"updated": updated, "count": len(updated)}
+        skipped = []
+        for i, item in enumerate(items):
+            try:
+                t_idx = item.get("track_index")
+                d_idx = item.get("device_index")
+                p_idx = item.get("parameter_index")
+                val = item.get("value")
+                if t_idx is None or d_idx is None or p_idx is None or val is None:
+                    raise ValueError("track_index, device_index, parameter_index and value are required")
+                if not 0 <= t_idx < len(self._song.tracks):
+                    raise IndexError("Track index out of range")
+                track = self._song.tracks[t_idx]
+                if not 0 <= d_idx < len(track.devices):
+                    raise IndexError("Device index out of range")
+                device = track.devices[d_idx]
+                if not 0 <= p_idx < len(device.parameters):
+                    raise IndexError("Parameter index out of range")
+                param = device.parameters[p_idx]
+                if not param.is_enabled:
+                    raise ValueError("Parameter is not enabled")
+                param.value = val
+                updated.append({"track_index": t_idx, "device_index": d_idx, "parameter_index": p_idx, "value": param.value})
+            except Exception as e:
+                skipped.append({"item": i, "reason": str(e)})
+        return {"updated": updated, "count": len(updated), "skipped": skipped}
 
     def _get_track_info(self, track_index):
         """Get information about a track"""
@@ -707,10 +964,14 @@ class AbletonMCP(ControlSurface):
             "get_browser_items_at_path",
             "bulk_set_clip_names",
             "bulk_create_clips",
-            "bulk_set_device_parameters"
+            "bulk_set_device_parameters",
+            "draw_automation",
+            "clear_automation",
+            "ramp_parameter",
+            "cancel_ramps"
         ]
         return {
-            "script_version": "1.8.1",
+            "script_version": "1.9.0",
             "capabilities": capabilities
         }
 
@@ -1291,6 +1552,206 @@ class AbletonMCP(ControlSurface):
             raise
 
 
+    # Automation and ramps
+    
+    def _resolve_parameter(self, params):
+        """Locate a device or mixer parameter from track_index plus device_index + parameter_index,
+        or mixer_parameter ('volume', 'pan', 'send:N'). Returns (track_index, track, parameter, target)."""
+        track_index = _as_index(params.get("track_index"), "track_index")
+        if not 0 <= track_index < len(self._song.tracks):
+            raise IndexError("Track index out of range")
+        track = self._song.tracks[track_index]
+        
+        mixer_parameter = params.get("mixer_parameter")
+        if mixer_parameter is not None:
+            if params.get("device_index") is not None or params.get("parameter_index") is not None:
+                raise ValueError("give either mixer_parameter or device_index + parameter_index, not both")
+            name = str(mixer_parameter).lower()
+            mixer = track.mixer_device
+            if name == "volume":
+                parameter = mixer.volume
+            elif name in ("pan", "panning"):
+                parameter = mixer.panning
+            elif name.startswith("send"):
+                digits = name[4:].lstrip(":_ ")
+                if not digits.isdigit():
+                    raise ValueError("mixer_parameter send must look like 'send:0'")
+                if int(digits) >= len(mixer.sends):
+                    raise IndexError("Send index out of range")
+                parameter = mixer.sends[int(digits)]
+            else:
+                raise ValueError("mixer_parameter must be 'volume', 'pan' or 'send:N'")
+            return track_index, track, parameter, {"mixer_parameter": name}
+        
+        device_index = _as_index(params.get("device_index"), "device_index")
+        parameter_index = _as_index(params.get("parameter_index"), "parameter_index")
+        if not 0 <= device_index < len(track.devices):
+            raise IndexError("Device index out of range")
+        device = track.devices[device_index]
+        if not 0 <= parameter_index < len(device.parameters):
+            raise IndexError("Parameter index out of range")
+        return track_index, track, device.parameters[parameter_index], {"device_index": device_index, "parameter_index": parameter_index}
+    
+    def _get_session_clip(self, params):
+        """Return (track_index, track, clip) for a Session clip slot named by track_index and clip_index."""
+        if params.get("source", "session") != "session":
+            raise ValueError("Automation envelopes exist only on Session clips (Live's API returns none for arrangement clips)")
+        track_index = _as_index(params.get("track_index"), "track_index")
+        if not 0 <= track_index < len(self._song.tracks):
+            raise IndexError("Track index out of range")
+        track = self._song.tracks[track_index]
+        clip_index = _as_index(params.get("clip_index"), "clip_index")
+        if not 0 <= clip_index < len(track.clip_slots):
+            raise IndexError("Clip index out of range")
+        slot = track.clip_slots[clip_index]
+        if not slot.has_clip:
+            raise ValueError("The selected Session clip slot is empty")
+        return track_index, track, slot.clip
+    
+    def _draw_automation(self, params):
+        """Draw a clip automation envelope from time/value points (times in beats from clip start)."""
+        track_index, track, clip = self._get_session_clip(params)
+        _t, _track, parameter, target = self._resolve_parameter(params)
+        mode = params.get("mode", "replace")
+        if mode not in ("replace", "merge"):
+            raise ValueError("mode must be 'replace' or 'merge'")
+        hold = params.get("hold", True)
+        if not isinstance(hold, bool):
+            raise ValueError("hold must be true or false")
+        
+        clip_length = float(clip.length)
+        low, high = float(parameter.min), float(parameter.max)
+        points = _normalize_points(params.get("points"), clip_length, low, high)
+        steps = _build_steps(points, params.get("curve", "linear"), params.get("resolution", 0.125), clip_length, hold)
+        
+        if mode == "replace":
+            if clip.automation_envelope(parameter) is not None:
+                clip.clear_envelope(parameter)
+            envelope = clip.create_automation_envelope(parameter)
+        else:
+            envelope = clip.automation_envelope(parameter)
+            if envelope is None:
+                envelope = clip.create_automation_envelope(parameter)
+            envelope.delete_events_in_range(steps[0][0], steps[-1][0] + steps[-1][1])
+        if envelope is None:
+            raise RuntimeError("Live did not create an automation envelope for '{0}'".format(parameter.name))
+        
+        for start, length, value in steps:
+            envelope.insert_step(start, length, value)
+        
+        readback = []
+        seen = set()
+        for point in points:
+            if point["time"] in seen:
+                continue
+            seen.add(point["time"])
+            probe = min(point["time"] + 0.0005, clip_length - 0.0005)
+            expected = [value for start, length, value in steps if start - _EPS <= probe < start + length + _EPS]
+            readback.append({"time": point["time"], "expected": expected[0] if expected else None,
+                             "actual": envelope.value_at_time(probe)})
+        
+        return {
+            "track_index": track_index,
+            "clip_name": clip.name,
+            "parameter": parameter.name,
+            "target": target,
+            "range": [low, high],
+            "clip_length": clip_length,
+            "mode": mode,
+            "curve": params.get("curve", "linear"),
+            "steps": len(steps),
+            "readback": readback
+        }
+    
+    def _clear_automation(self, params):
+        """Clear one parameter's envelope on a Session clip, or every envelope if no parameter is given."""
+        track_index, track, clip = self._get_session_clip(params)
+        wants_parameter = any(params.get(key) is not None for key in ("device_index", "parameter_index", "mixer_parameter"))
+        if wants_parameter:
+            _t, _track, parameter, target = self._resolve_parameter(params)
+            had = clip.automation_envelope(parameter) is not None
+            if had:
+                clip.clear_envelope(parameter)
+            cleared = parameter.name
+        else:
+            had = bool(clip.has_envelopes)
+            clip.clear_all_envelopes()
+            cleared = "all"
+        return {"track_index": track_index, "clip_name": clip.name, "cleared": cleared,
+                "had_envelope": had, "clip_has_envelopes": bool(clip.has_envelopes)}
+    
+    def _ramp_key(self, track_index, target):
+        return "{0}:{1}".format(track_index, sorted(target.items()))
+    
+    def _ramp_parameter(self, params):
+        """Sweep a device or mixer parameter to a target over beats or seconds, driven by the pump timer."""
+        track_index, track, parameter, target = self._resolve_parameter(params)
+        low, high = float(parameter.min), float(parameter.max)
+        end = params.get("to")
+        if not _is_number(end) or not low - _EPS <= end <= high + _EPS:
+            raise ValueError("to must be a number within the parameter range {0} to {1}".format(low, high))
+        start = params.get("from")
+        if start is None:
+            start = parameter.value
+        elif not _is_number(start) or not low - _EPS <= start <= high + _EPS:
+            raise ValueError("from must be a number within the parameter range {0} to {1}".format(low, high))
+        curve = params.get("curve", "linear")
+        if curve not in CURVES or curve == "step":
+            raise ValueError("curve must be one of: linear, smooth, ease_in, ease_out")
+        beats, seconds = params.get("beats"), params.get("seconds")
+        if (beats is None) == (seconds is None):
+            raise ValueError("give exactly one of beats or seconds")
+        if beats is not None:
+            if not _is_number(beats):
+                raise ValueError("beats must be a number")
+            seconds = beats * 60.0 / float(self._song.tempo)
+        if not _is_number(seconds) or not 0.01 <= seconds <= 3600:
+            raise ValueError("duration must be between 0.01 and 3600 seconds")
+        if not parameter.is_enabled:
+            raise ValueError("Parameter is not enabled")
+        
+        parameter.value = min(max(float(start), low), high)
+        self._ramps[self._ramp_key(track_index, target)] = {
+            "param": parameter, "start": float(start), "end": float(end), "t0": time.time(),
+            "duration": float(seconds), "curve": curve, "low": low, "high": high, "name": parameter.name
+        }
+        return {"track_index": track_index, "parameter": parameter.name, "target": target, "from": float(start),
+                "to": float(end), "seconds": float(seconds), "curve": curve,
+                "update_interval_ms": PUMP_INTERVAL_MS, "active_ramps": len(self._ramps)}
+    
+    def _cancel_ramps(self, params):
+        """Cancel one parameter's ramp, or every active ramp when no track_index is given."""
+        if params.get("track_index") is None:
+            cancelled = len(self._ramps)
+            self._ramps = {}
+        else:
+            track_index, _track, _parameter, target = self._resolve_parameter(params)
+            cancelled = 1 if self._ramps.pop(self._ramp_key(track_index, target), None) is not None else 0
+        return {"cancelled": cancelled, "active_ramps": len(self._ramps)}
+    
+    def _tick_ramps(self):
+        """Advance every active ramp; called from the pump timer."""
+        if not self._ramps:
+            return
+        now = time.time()
+        for key in list(self._ramps.keys()):
+            ramp = self._ramps.get(key)
+            if ramp is None:
+                continue
+            progress = (now - ramp["t0"]) / ramp["duration"]
+            finished = progress >= 1.0
+            if finished:
+                value = ramp["end"]
+            else:
+                value = ramp["start"] + (ramp["end"] - ramp["start"]) * _ease(ramp["curve"], max(progress, 0.0))
+            try:
+                ramp["param"].value = min(max(value, ramp["low"]), ramp["high"])
+            except Exception as e:
+                self.log_message("Ramp on '{0}' stopped: {1}".format(ramp["name"], e))
+                finished = True
+            if finished:
+                self._ramps.pop(key, None)
+    
     def _start_playback(self):
         """Start playing the session"""
         try:

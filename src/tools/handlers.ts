@@ -2,6 +2,20 @@ import { CallToolResult } from '@modelcontextprotocol/sdk/types.js';
 import { AbletonClient, AbletonClientError } from '../client/AbletonClient.js';
 import { analyzeAudioFile } from '../audio/analyzer.js';
 
+/** Copies only the fields the caller supplied, so absent optionals stay absent (Number(undefined) would send NaN). */
+function pick(args: Record<string, any>, numbers: string[], others: string[] = []): Record<string, any> {
+  const out: Record<string, any> = {};
+  for (const key of numbers) {
+    if (args[key] !== undefined && args[key] !== null) out[key] = Number(args[key]);
+  }
+  for (const key of others) {
+    if (args[key] !== undefined && args[key] !== null) out[key] = args[key];
+  }
+  return out;
+}
+
+const TARGET_NUMBERS = ['track_index', 'device_index', 'parameter_index'];
+
 export class ToolHandler {
   constructor(private readonly client: AbletonClient) {}
 
@@ -323,6 +337,38 @@ export class ToolHandler {
             device_index: Number(args.device_index),
             parameter_index: Number(args.parameter_index),
             value: Number(args.value)
+          });
+          break;
+        }
+
+        case 'draw_automation': {
+          this.client.ensureCapability('draw_automation');
+          resultData = await this.client.sendCommand('draw_automation', {
+            ...pick(args, [...TARGET_NUMBERS, 'clip_index', 'resolution'], ['mixer_parameter', 'points', 'curve', 'mode', 'hold'])
+          });
+          break;
+        }
+
+        case 'clear_automation': {
+          this.client.ensureCapability('clear_automation');
+          resultData = await this.client.sendCommand('clear_automation', {
+            ...pick(args, [...TARGET_NUMBERS, 'clip_index'], ['mixer_parameter'])
+          });
+          break;
+        }
+
+        case 'ramp_parameter': {
+          this.client.ensureCapability('ramp_parameter');
+          resultData = await this.client.sendCommand('ramp_parameter', {
+            ...pick(args, [...TARGET_NUMBERS, 'to', 'from', 'beats', 'seconds'], ['mixer_parameter', 'curve'])
+          });
+          break;
+        }
+
+        case 'cancel_ramps': {
+          this.client.ensureCapability('cancel_ramps');
+          resultData = await this.client.sendCommand('cancel_ramps', {
+            ...pick(args, TARGET_NUMBERS, ['mixer_parameter'])
           });
           break;
         }

@@ -12,11 +12,18 @@ export interface AbletonClientOptions {
 }
 
 export class AbletonClientError extends Error {
-  constructor(message: string, public readonly code?: string) {
+  constructor(
+    message: string,
+    public readonly code?: string,
+    /** True when the failure happened before the command was sent, so retrying cannot repeat it. */
+    public readonly retryable: boolean = false
+  ) {
     super(message);
     this.name = 'AbletonClientError';
   }
 }
+
+const CONNECT_ATTEMPTS = 4;
 
 export class AbletonClient {
   private readonly host: string;
@@ -32,14 +39,27 @@ export class AbletonClient {
   }
 
   /**
-   * Execute a command on the Ableton Remote Script TCP bridge
+   * Execute a command on the Ableton Remote Script TCP bridge. Connection failures that happen
+   * before anything is sent (e.g. a burst overflowing Live's listen backlog) are retried briefly.
    */
   public async sendCommand<T = any>(
     type: string,
     params: Record<string, any> = {}
   ): Promise<T> {
+    for (let attempt = 1; ; attempt += 1) {
+      try {
+        return await this.sendOnce<T>(type, params);
+      } catch (err) {
+        if (!(err instanceof AbletonClientError) || !err.retryable || attempt >= CONNECT_ATTEMPTS) throw err;
+        await new Promise((resolve) => setTimeout(resolve, 15 * attempt + Math.random() * 15));
+      }
+    }
+  }
+
+  private sendOnce<T>(type: string, params: Record<string, any>): Promise<T> {
     return new Promise<T>((resolve, reject) => {
       let client: net.Socket | null = null;
+      let connected = false;
       let buffer = '';
       let timer: NodeJS.Timeout | null = null;
 
@@ -69,6 +89,7 @@ export class AbletonClient {
         client = net.createConnection(
           { host: this.host, port: this.port },
           () => {
+            connected = true;
             const commandPayload: RemoteScriptCommand = { type, params };
             client?.write(JSON.stringify(commandPayload));
           }
@@ -99,7 +120,8 @@ export class AbletonClient {
           reject(
             new AbletonClientError(
               `Failed to connect to Ableton Live Remote Script at ${this.host}:${this.port}: ${err.message}`,
-              'CONNECTION_ERROR'
+              'CONNECTION_ERROR',
+              !connected
             )
           );
         });

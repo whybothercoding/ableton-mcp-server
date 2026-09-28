@@ -9,6 +9,12 @@ export interface ToolDefinition {
   requiredCapability?: string;
 }
 
+const PARAMETER_TARGET_PROPERTIES = {
+  device_index: { type: 'number', description: '0-indexed device position on the track (use with parameter_index)' },
+  parameter_index: { type: 'number', description: '0-indexed parameter position (see get_device_parameters for indices and min/max)' },
+  mixer_parameter: { type: 'string', description: "Mixer target instead of a device parameter: 'volume', 'pan' or 'send:N' (0-indexed send)" }
+};
+
 export const TOOLS: ToolDefinition[] = [
   {
     name: 'get_health',
@@ -409,6 +415,89 @@ export const TOOLS: ToolDefinition[] = [
       required: ['track_index', 'device_index', 'parameter_index', 'value']
     },
     requiredCapability: 'set_device_parameter'
+  },
+  {
+    name: 'draw_automation',
+    description:
+      "Draw a clip automation envelope for a device or mixer parameter from time/value points. Runs inside Live, so it is tempo-locked and sample-accurate regardless of bridge latency. " +
+      "Session clips only (Live's API has no envelopes for arrangement clips), and the parameter must be on the clip's own track. " +
+      "Times are beats from the clip start (0 to the clip length); values are in the parameter's own units (see get_device_parameters min/max). " +
+      "Ramps are drawn as fine staircases (resolution beats per step) that start exactly on the first value and end exactly on the last. " +
+      "mode 'replace' (default) rebuilds the parameter's whole envelope; 'merge' only rewrites the drawn range. With hold (default) the clip edges are filled with the first/last value.",
+    inputSchema: {
+      type: 'object',
+      properties: {
+        track_index: { type: 'number', description: '0-indexed track position' },
+        clip_index: { type: 'number', description: '0-indexed Session clip slot' },
+        ...PARAMETER_TARGET_PROPERTIES,
+        points: {
+          type: 'array',
+          description: 'Breakpoints, e.g. [{"time":0,"value":0.2},{"time":8,"value":0.9}]. An optional per-point curve shapes the segment that starts there.',
+          items: {
+            type: 'object',
+            properties: {
+              time: { type: 'number', description: 'Beats from clip start' },
+              value: { type: 'number', description: "Value in the parameter's units" },
+              curve: { type: 'string', enum: ['linear', 'step', 'smooth', 'ease_in', 'ease_out'], description: 'Curve to the next point' }
+            },
+            required: ['time', 'value']
+          }
+        },
+        curve: { type: 'string', enum: ['linear', 'step', 'smooth', 'ease_in', 'ease_out'], description: "Default curve between points (default 'linear'); 'step' holds each value until the next point" },
+        resolution: { type: 'number', description: 'Beats per staircase step for non-step curves (default 0.125)' },
+        mode: { type: 'string', enum: ['replace', 'merge'], description: "'replace' (default) or 'merge'" },
+        hold: { type: 'boolean', description: 'Fill the clip before the first and after the last point with those values (default true)' }
+      },
+      required: ['track_index', 'clip_index', 'points']
+    },
+    requiredCapability: 'draw_automation'
+  },
+  {
+    name: 'clear_automation',
+    description: "Clear a Session clip's automation: one parameter's envelope, or every envelope on the clip when no parameter is given.",
+    inputSchema: {
+      type: 'object',
+      properties: {
+        track_index: { type: 'number', description: '0-indexed track position' },
+        clip_index: { type: 'number', description: '0-indexed Session clip slot' },
+        ...PARAMETER_TARGET_PROPERTIES
+      },
+      required: ['track_index', 'clip_index']
+    },
+    requiredCapability: 'clear_automation'
+  },
+  {
+    name: 'ramp_parameter',
+    description:
+      'Sweep a device or mixer parameter to a target value over a number of beats or seconds, driven inside Live at about 100 updates per second. ' +
+      'Use for live gestures; use draw_automation for motion that belongs to a looping clip. Starting a new ramp on the same parameter replaces the old one. ' +
+      'Returns immediately while the sweep runs; cancel with cancel_ramps.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        track_index: { type: 'number', description: '0-indexed track position' },
+        ...PARAMETER_TARGET_PROPERTIES,
+        to: { type: 'number', description: "Target value in the parameter's units" },
+        from: { type: 'number', description: 'Start value (default: the current value)' },
+        beats: { type: 'number', description: 'Duration in beats at the current tempo (give beats or seconds)' },
+        seconds: { type: 'number', description: 'Duration in seconds, 0.01 to 3600 (give beats or seconds)' },
+        curve: { type: 'string', enum: ['linear', 'smooth', 'ease_in', 'ease_out'], description: "Easing (default 'linear')" }
+      },
+      required: ['track_index', 'to']
+    },
+    requiredCapability: 'ramp_parameter'
+  },
+  {
+    name: 'cancel_ramps',
+    description: 'Cancel active ramps: one parameter when track_index and a target are given, otherwise all of them. The parameter stays at its current value.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        track_index: { type: 'number', description: '0-indexed track position (omit to cancel every ramp)' },
+        ...PARAMETER_TARGET_PROPERTIES
+      }
+    },
+    requiredCapability: 'cancel_ramps'
   },
   {
     name: 'load_browser_item',
