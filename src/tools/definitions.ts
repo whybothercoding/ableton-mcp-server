@@ -9,8 +9,25 @@ export interface ToolDefinition {
   requiredCapability?: string;
 }
 
+const TRACK_TYPE_PROPERTY = {
+  type: 'string',
+  enum: ['track', 'return', 'master'],
+  description: "Which track list track_index refers to: 'track' (default), 'return' (return tracks) or 'master' (track_index is then ignored, pass 0)"
+};
+
+const DEVICE_PATH_PROPERTY = {
+  type: 'array',
+  items: {},
+  description:
+    'Address a device inside racks instead of device_index: [device, chain, device, ...], ending in a device index. ' +
+    'A chain selector is a chain index, {"pad": note} or {"pad": note, "chain": n} for a drum pad, or {"return": n} for a return chain. ' +
+    "get_device_parameters lists a rack's chains, return chains and occupied drum pads."
+};
+
 const PARAMETER_TARGET_PROPERTIES = {
-  device_index: { type: 'number', description: '0-indexed device position on the track (use with parameter_index)' },
+  track_type: TRACK_TYPE_PROPERTY,
+  device_path: DEVICE_PATH_PROPERTY,
+  device_index: { type: 'number', description: '0-indexed top-level device position on the track (use with parameter_index)' },
   parameter_index: { type: 'number', description: '0-indexed parameter position (see get_device_parameters for indices and min/max)' },
   mixer_parameter: { type: 'string', description: "Mixer target instead of a device parameter: 'volume', 'pan' or 'send:N' (0-indexed send)" }
 };
@@ -48,7 +65,8 @@ export const TOOLS: ToolDefinition[] = [
     inputSchema: {
       type: 'object',
       properties: {
-        track_index: { type: 'number', description: '0-indexed track position' }
+        track_index: { type: 'number', description: '0-indexed track position' },
+        track_type: TRACK_TYPE_PROPERTY
       },
       required: ['track_index']
     },
@@ -97,14 +115,18 @@ export const TOOLS: ToolDefinition[] = [
   },
   {
     name: 'get_device_parameters',
-    description: 'Get parameter list for a specific device on a track, including index, name, current value, min, max.',
+    description:
+      "Get a device's parameters: index, name, value, min, max, whether it is quantized (with its value_items labels, e.g. Filter Type 0 = Low-pass), the display string, the default and whether it is enabled. " +
+      'Works on regular, return and master tracks and, via device_path, on devices inside racks. Racks also list their chains, return chains and occupied drum pads.',
     inputSchema: {
       type: 'object',
       properties: {
         track_index: { type: 'number', description: '0-indexed track position' },
-        device_index: { type: 'number', description: '0-indexed device position' }
+        track_type: TRACK_TYPE_PROPERTY,
+        device_index: { type: 'number', description: '0-indexed top-level device position (or use device_path)' },
+        device_path: DEVICE_PATH_PROPERTY
       },
-      required: ['track_index', 'device_index']
+      required: ['track_index']
     },
     requiredCapability: 'get_device_parameters'
   },
@@ -165,6 +187,7 @@ export const TOOLS: ToolDefinition[] = [
       type: 'object',
       properties: {
         track_index: { type: 'number', description: '0-indexed track position' },
+        track_type: TRACK_TYPE_PROPERTY,
         name: { type: 'string', description: 'New name for the track' }
       },
       required: ['track_index', 'name']
@@ -178,6 +201,7 @@ export const TOOLS: ToolDefinition[] = [
       type: 'object',
       properties: {
         track_index: { type: 'number', description: '0-indexed track position' },
+        track_type: TRACK_TYPE_PROPERTY,
         color: { type: 'number', description: 'Integer RGB color value' }
       },
       required: ['track_index', 'color']
@@ -205,6 +229,7 @@ export const TOOLS: ToolDefinition[] = [
       type: 'object',
       properties: {
         track_index: { type: 'number', description: '0-indexed track position' },
+        track_type: TRACK_TYPE_PROPERTY,
         mute: { type: 'boolean', description: 'True to mute, false to unmute' }
       },
       required: ['track_index', 'mute']
@@ -218,6 +243,7 @@ export const TOOLS: ToolDefinition[] = [
       type: 'object',
       properties: {
         track_index: { type: 'number', description: '0-indexed track position' },
+        track_type: TRACK_TYPE_PROPERTY,
         solo: { type: 'boolean', description: 'True to solo, false to unsolo' }
       },
       required: ['track_index', 'solo']
@@ -231,6 +257,7 @@ export const TOOLS: ToolDefinition[] = [
       type: 'object',
       properties: {
         track_index: { type: 'number', description: '0-indexed track position' },
+        track_type: TRACK_TYPE_PROPERTY,
         arm: { type: 'boolean', description: 'True to arm, false to disarm' }
       },
       required: ['track_index', 'arm']
@@ -403,16 +430,18 @@ export const TOOLS: ToolDefinition[] = [
   },
   {
     name: 'set_device_parameter',
-    description: 'Set value of a device parameter.',
+    description: 'Set the value of a device parameter (regular, return or master track; use device_path for devices inside racks). Returns the old value, the value Live holds and its display string.',
     inputSchema: {
       type: 'object',
       properties: {
         track_index: { type: 'number', description: '0-indexed track position' },
-        device_index: { type: 'number', description: '0-indexed device position' },
+        track_type: TRACK_TYPE_PROPERTY,
+        device_index: { type: 'number', description: '0-indexed top-level device position (or use device_path)' },
+        device_path: DEVICE_PATH_PROPERTY,
         parameter_index: { type: 'number', description: '0-indexed parameter position' },
         value: { type: 'number', description: 'Parameter value' }
       },
-      required: ['track_index', 'device_index', 'parameter_index', 'value']
+      required: ['track_index', 'parameter_index', 'value']
     },
     requiredCapability: 'set_device_parameter'
   },
@@ -489,7 +518,7 @@ export const TOOLS: ToolDefinition[] = [
   },
   {
     name: 'cancel_ramps',
-    description: 'Cancel active ramps: one parameter when track_index and a target are given, otherwise all of them. The parameter stays at its current value.',
+    description: 'Cancel active ramps: one parameter when a track (track_index, or track_type "master") and a target are given, otherwise all of them. The parameter stays at its current value.',
     inputSchema: {
       type: 'object',
       properties: {
@@ -506,6 +535,7 @@ export const TOOLS: ToolDefinition[] = [
       type: 'object',
       properties: {
         track_index: { type: 'number', description: '0-indexed track position' },
+        track_type: TRACK_TYPE_PROPERTY,
         item_uri: { type: 'string', description: 'URI of browser item' }
       },
       required: ['track_index', 'item_uri']
@@ -551,7 +581,7 @@ export const TOOLS: ToolDefinition[] = [
   },
   {
     name: 'bulk_set_device_parameters',
-    description: 'Batch update multiple device parameters in a single round trip.',
+    description: 'Batch update multiple device parameters in a single round trip. Each item may name a track_type and a device_path; the result reports the value Live holds and why any item was skipped.',
     inputSchema: {
       type: 'object',
       properties: {
@@ -562,11 +592,13 @@ export const TOOLS: ToolDefinition[] = [
             type: 'object',
             properties: {
               track_index: { type: 'number' },
+              track_type: TRACK_TYPE_PROPERTY,
               device_index: { type: 'number' },
+              device_path: DEVICE_PATH_PROPERTY,
               parameter_index: { type: 'number' },
               value: { type: 'number' }
             },
-            required: ['track_index', 'device_index', 'parameter_index', 'value']
+            required: ['track_index', 'parameter_index', 'value']
           }
         }
       },

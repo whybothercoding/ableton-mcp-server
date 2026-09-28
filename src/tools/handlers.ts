@@ -75,7 +75,8 @@ export class ToolHandler {
         case 'get_track_detail': {
           this.client.ensureCapability('get_track_info');
           resultData = await this.client.sendCommand('get_track_info', {
-            track_index: Number(args.track_index)
+            track_index: Number(args.track_index),
+            ...pick(args, [], ['track_type'])
           });
           break;
         }
@@ -114,8 +115,7 @@ export class ToolHandler {
         case 'get_device_parameters': {
           this.client.ensureCapability('get_device_parameters');
           resultData = await this.client.sendCommand('get_device_parameters', {
-            track_index: Number(args.track_index),
-            device_index: Number(args.device_index)
+            ...pick(args, ['track_index', 'device_index'], ['track_type', 'device_path'])
           });
           break;
         }
@@ -156,7 +156,8 @@ export class ToolHandler {
           this.client.ensureCapability('set_track_name');
           resultData = await this.client.sendCommand('set_track_name', {
             track_index: Number(args.track_index),
-            name: String(args.name)
+            name: String(args.name),
+            ...pick(args, [], ['track_type'])
           });
           break;
         }
@@ -165,7 +166,8 @@ export class ToolHandler {
           this.client.ensureCapability('set_track_color');
           resultData = await this.client.sendCommand('set_track_color', {
             track_index: Number(args.track_index),
-            color: Number(args.color)
+            color: Number(args.color),
+            ...pick(args, [], ['track_type'])
           });
           break;
         }
@@ -184,7 +186,8 @@ export class ToolHandler {
           this.client.ensureCapability('set_track_mute');
           resultData = await this.client.sendCommand('set_track_mute', {
             track_index: Number(args.track_index),
-            mute: Boolean(args.mute)
+            mute: Boolean(args.mute),
+            ...pick(args, [], ['track_type'])
           });
           break;
         }
@@ -193,7 +196,8 @@ export class ToolHandler {
           this.client.ensureCapability('set_track_solo');
           resultData = await this.client.sendCommand('set_track_solo', {
             track_index: Number(args.track_index),
-            solo: Boolean(args.solo)
+            solo: Boolean(args.solo),
+            ...pick(args, [], ['track_type'])
           });
           break;
         }
@@ -202,7 +206,8 @@ export class ToolHandler {
           this.client.ensureCapability('set_track_arm');
           resultData = await this.client.sendCommand('set_track_arm', {
             track_index: Number(args.track_index),
-            arm: Boolean(args.arm)
+            arm: Boolean(args.arm),
+            ...pick(args, [], ['track_type'])
           });
           break;
         }
@@ -333,10 +338,7 @@ export class ToolHandler {
         case 'set_device_parameter': {
           this.client.ensureCapability('set_device_parameter');
           resultData = await this.client.sendCommand('set_device_parameter', {
-            track_index: Number(args.track_index),
-            device_index: Number(args.device_index),
-            parameter_index: Number(args.parameter_index),
-            value: Number(args.value)
+            ...pick(args, ['track_index', 'device_index', 'parameter_index', 'value'], ['track_type', 'device_path'])
           });
           break;
         }
@@ -344,7 +346,7 @@ export class ToolHandler {
         case 'draw_automation': {
           this.client.ensureCapability('draw_automation');
           resultData = await this.client.sendCommand('draw_automation', {
-            ...pick(args, [...TARGET_NUMBERS, 'clip_index', 'resolution'], ['mixer_parameter', 'points', 'curve', 'mode', 'hold'])
+            ...pick(args, [...TARGET_NUMBERS, 'clip_index', 'resolution'], ['mixer_parameter', 'track_type', 'device_path', 'points', 'curve', 'mode', 'hold'])
           });
           break;
         }
@@ -352,7 +354,7 @@ export class ToolHandler {
         case 'clear_automation': {
           this.client.ensureCapability('clear_automation');
           resultData = await this.client.sendCommand('clear_automation', {
-            ...pick(args, [...TARGET_NUMBERS, 'clip_index'], ['mixer_parameter'])
+            ...pick(args, [...TARGET_NUMBERS, 'clip_index'], ['mixer_parameter', 'track_type', 'device_path'])
           });
           break;
         }
@@ -360,7 +362,7 @@ export class ToolHandler {
         case 'ramp_parameter': {
           this.client.ensureCapability('ramp_parameter');
           resultData = await this.client.sendCommand('ramp_parameter', {
-            ...pick(args, [...TARGET_NUMBERS, 'to', 'from', 'beats', 'seconds'], ['mixer_parameter', 'curve'])
+            ...pick(args, [...TARGET_NUMBERS, 'to', 'from', 'beats', 'seconds'], ['mixer_parameter', 'track_type', 'device_path', 'curve'])
           });
           break;
         }
@@ -368,7 +370,7 @@ export class ToolHandler {
         case 'cancel_ramps': {
           this.client.ensureCapability('cancel_ramps');
           resultData = await this.client.sendCommand('cancel_ramps', {
-            ...pick(args, TARGET_NUMBERS, ['mixer_parameter'])
+            ...pick(args, TARGET_NUMBERS, ['mixer_parameter', 'track_type', 'device_path'])
           });
           break;
         }
@@ -377,7 +379,8 @@ export class ToolHandler {
           this.client.ensureCapability('load_browser_item');
           resultData = await this.client.sendCommand('load_browser_item', {
             track_index: Number(args.track_index),
-            item_uri: String(args.item_uri)
+            item_uri: String(args.item_uri),
+            ...pick(args, [], ['track_type'])
           });
           break;
         }
