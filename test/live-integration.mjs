@@ -87,7 +87,7 @@ const sendA = { track_index: T, device_index: D, parameter_index: pA.index };
 try {
   console.log('Bridge');
   await check('script reports the new version and capabilities', async () => {
-    assert(info.script_version === '1.10.0', `version ${info.script_version}`);
+    assert(info.script_version === '1.11.0', `version ${info.script_version}`);
     for (const c of ['draw_automation', 'clear_automation', 'ramp_parameter', 'cancel_ramps']) {
       assert(info.capabilities.includes(c), `missing capability ${c}`);
     }
@@ -115,7 +115,7 @@ try {
   });
   await check('200 parallel connections all succeed', async () => {
     const results = await Promise.all(Array.from({ length: 200 }, () => call('get_script_info')));
-    assert(results.every((r) => r.script_version === '1.10.0'), 'a response was wrong');
+    assert(results.every((r) => r.script_version === '1.11.0'), 'a response was wrong');
   });
   await check('garbage and half-open connections do not disturb the server', async () => {
     for (const junk of ['{"type": "get_scr', '\u0000\u0001\u0002', 'not json at all', '']) {
@@ -128,7 +128,7 @@ try {
         sock.on('error', resolve);
       });
     }
-    assert((await call('get_script_info')).script_version === '1.10.0', 'server stopped answering');
+    assert((await call('get_script_info')).script_version === '1.11.0', 'server stopped answering');
   });
   await check('bulk_set_device_parameters reports actual values and skipped items', async () => {
     const out = await call('bulk_set_device_parameters', {
@@ -139,6 +139,73 @@ try {
     });
     assert(out.count === 1 && out.skipped.length === 1, JSON.stringify(out));
     near(out.updated[0].value, pA.value, 1e-4, 'actual value');
+  });
+
+  console.log('\nDispatcher: error codes, timing, undo');
+  const rawCall = (type, params = {}) =>
+    new Promise((resolve, reject) => {
+      const sock = net.createConnection({ host: '127.0.0.1', port: 9877 }, () => sock.write(JSON.stringify({ type, params })));
+      let buffer = '';
+      sock.on('data', (d) => {
+        buffer += d;
+        try {
+          resolve(JSON.parse(buffer));
+          sock.destroy();
+        } catch {
+          /* wait for more */
+        }
+      });
+      sock.on('error', reject);
+    });
+  await check('responses carry elapsed_ms and errors carry a stable code', async () => {
+    const ok = await rawCall('get_session_info');
+    assert(ok.status === 'success' && typeof ok.elapsed_ms === 'number', JSON.stringify(ok).slice(0, 120));
+    const cases = [
+      [{ type: 'get_track_info', params: { track_index: 99 } }, 'OUT_OF_RANGE'],
+      [{ type: 'nope', params: {} }, 'UNKNOWN_COMMAND'],
+      [{ type: 'get_track_info', params: { track_index: 0, track_type: 'bus' } }, 'INVALID_ARGUMENT'],
+      [{ type: 'eval', params: { code: '{}["missing"]' } }, 'NOT_FOUND'],
+      [{ type: 'eval', params: { code: '1 + "a"' } }, 'TYPE_ERROR']
+    ];
+    for (const [cmd, code] of cases) {
+      const r = await rawCall(cmd.type, cmd.params);
+      assert(r.status === 'error' && r.code === code && typeof r.elapsed_ms === 'number', `${cmd.type}: ${JSON.stringify(r)}`);
+    }
+  });
+  await check('the client keeps the bridge error code on the thrown error', async () => {
+    try {
+      await call('get_track_info', { track_index: 99 });
+    } catch (err) {
+      assert(err.bridgeCode === 'OUT_OF_RANGE' && err.code === 'REMOTE_ERROR', `${err.code}/${err.bridgeCode}`);
+      return;
+    }
+    throw new Error('expected an error');
+  });
+  await check('eval failures are errors, not success strings', async () => {
+    await rejects(call('eval', { code: 'undefined_name_xyz' }), 'undefined_name_xyz');
+    assert((await call('eval', { code: '6 * 7' })) === 42, 'eval result');
+  });
+  await check('each writing command is exactly one undo step: undo reverts the last command only', async () => {
+    const name = `self._song.tracks[${T}].clip_slots[${S}].clip.name`;
+    const original = await call('eval', { code: name });
+    await call('set_clip_name', { track_index: T, clip_index: S, name: 'MCP TEST UNDO 1' });
+    await call('set_clip_name', { track_index: T, clip_index: S, name: 'MCP TEST UNDO 2' });
+    assert((await call('eval', { code: name })) === 'MCP TEST UNDO 2', 'rename 2 not applied');
+    // a read-only command in between must not add an undo entry
+    await call('get_session_info');
+    await call('eval', { code: 'self._song.undo()' });
+    assert((await call('eval', { code: name })) === 'MCP TEST UNDO 1', 'first undo should revert only the last rename');
+    await call('eval', { code: 'self._song.undo()' });
+    assert((await call('eval', { code: name })) === original, 'second undo should revert the first rename');
+    assert(await call('eval', { code: `self._song.tracks[${T}].clip_slots[${S}].has_clip` }), 'undo went too far: the scratch clip vanished');
+  });
+  await check('a failing command leaves no half-open undo step', async () => {
+    const name = `self._song.tracks[${T}].clip_slots[${S}].clip.name`;
+    const original = await call('eval', { code: name });
+    await rejects(call('set_clip_name', { track_index: T, clip_index: 999, name: 'x' }), 'Clip index out of range');
+    await call('set_clip_name', { track_index: T, clip_index: S, name: 'MCP TEST UNDO 3' });
+    await call('eval', { code: 'self._song.undo()' });
+    assert((await call('eval', { code: name })) === original, 'undo after a failed command should revert only the next successful one');
   });
 
   console.log('\ndraw_automation');

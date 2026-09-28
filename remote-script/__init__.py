@@ -1,21 +1,12 @@
 # AbletonMCP/init.py
-from __future__ import absolute_import, print_function, unicode_literals
-
 from _Framework.ControlSurface import ControlSurface
 import errno
 import math
 import socket
 import json
-import threading
 import time
 import traceback
 import Live
-
-# Change queue import for Python 2
-try:
-    import Queue as queue  # Python 2
-except ImportError:
-    import queue  # Python 3
 
 # Constants for socket communication
 DEFAULT_PORT = 9877
@@ -130,6 +121,53 @@ def _build_steps(points, default_curve, resolution, clip_length, hold):
         raise ValueError("{0} steps exceeds the {1} limit; use a larger resolution".format(len(steps), MAX_AUTOMATION_STEPS))
     return steps
 
+# Command registry: the single source of truth for dispatch, undo behaviour and the capability list.
+_COMMANDS = {}
+
+
+def command(name, writes=False, destructive=False):
+    """Register a bridge command handler `fn(self, params)`.
+
+    writes=True runs the command inside its own undo step. Without explicit steps Live coalesces
+    consecutive API edits into one giant step, so a single `undo` could revert unrelated work;
+    empty steps are not recorded, so commands that change nothing cost no undo entry."""
+    def register(fn):
+        _COMMANDS[name] = {"fn": fn, "writes": writes, "destructive": destructive}
+        return fn
+    return register
+
+
+class BridgeError(Exception):
+    """An error with a stable machine-readable code."""
+    code = "INTERNAL_ERROR"
+
+    def __init__(self, message, code=None):
+        Exception.__init__(self, message)
+        if code:
+            self.code = code
+
+
+def _error_code(exc):
+    """Map an exception to a stable error code (Boost's ArgumentError is a TypeError)."""
+    if isinstance(exc, BridgeError):
+        return exc.code
+    if isinstance(exc, IndexError):
+        return "OUT_OF_RANGE"
+    if isinstance(exc, KeyError):
+        return "NOT_FOUND"
+    if isinstance(exc, TypeError):
+        return "TYPE_ERROR"
+    if isinstance(exc, ValueError):
+        return "NOT_FOUND" if "not found" in str(exc).lower() else "INVALID_ARGUMENT"
+    if isinstance(exc, RuntimeError):
+        return "LIVE_ERROR"
+    return "INTERNAL_ERROR"
+
+
+def _error_response(code, message):
+    return {"status": "error", "code": code, "message": message}
+
+
 def create_instance(c_instance):
     """Create and return the AbletonMCP script instance"""
     return AbletonMCP(c_instance)
@@ -144,8 +182,6 @@ class AbletonMCP(ControlSurface):
         
         # Socket server for communication
         self.server = None
-        self.client_threads = []
-        self.server_thread = None
         self.running = False
         self._clients = {}
         self._pump_timer = None
@@ -166,12 +202,6 @@ class AbletonMCP(ControlSurface):
         """Called when Ableton closes or the control surface is removed"""
         self.log_message("AbletonMCP disconnecting...")
         self._stop_server()
-        
-        # Clean up any client threads
-        for client_thread in self.client_threads[:]:
-            if client_thread.is_alive():
-                # We don't join them as they might be stuck
-                self.log_message("Client thread still alive during disconnect")
         
         ControlSurface.disconnect(self)
         self.log_message("AbletonMCP disconnected")
@@ -196,31 +226,21 @@ class AbletonMCP(ControlSurface):
             except Exception:
                 pass
             self.server = None
-        
-        # Wait for the (fallback) server thread to exit
-        if self.server_thread and self.server_thread.is_alive():
-            self.server_thread.join(2.0)
-        self.server_thread = None
     
     def start_server(self):
-        """Start the socket server: pumped by a main-thread timer, or threaded as a fallback"""
+        """Start the socket server, pumped by a Live.Base.Timer so every command runs on Live's main thread."""
         try:
+            if not (hasattr(Live, "Base") and hasattr(Live.Base, "Timer")):
+                raise RuntimeError("Live.Base.Timer is unavailable: AbletonMCP requires Live 12 or later")
             self.server = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
             self.server.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
             self.server.bind((HOST, DEFAULT_PORT))
             self.server.listen(128)
+            self.server.setblocking(False)
             self._clients = {}
             self.running = True
-            
-            if hasattr(Live, "Base") and hasattr(Live.Base, "Timer"):
-                self.server.setblocking(False)
-                self._pump_timer = Live.Base.Timer(callback=self._pump, interval=PUMP_INTERVAL_MS, repeat=True, start=True)
-                self.log_message("Server started on port {0} (timer pump, {1} ms)".format(DEFAULT_PORT, PUMP_INTERVAL_MS))
-            else:
-                self.server_thread = threading.Thread(target=self._server_thread)
-                self.server_thread.daemon = True
-                self.server_thread.start()
-                self.log_message("Server started on port {0} (threaded fallback)".format(DEFAULT_PORT))
+            self._pump_timer = Live.Base.Timer(callback=self._pump, interval=PUMP_INTERVAL_MS, repeat=True, start=True)
+            self.log_message("Server started on port {0} (timer pump, {1} ms)".format(DEFAULT_PORT, PUMP_INTERVAL_MS))
         except Exception as e:
             self.log_message("Error starting server: " + str(e))
             self.show_message("AbletonMCP: Error starting server - " + str(e))
@@ -295,7 +315,7 @@ class AbletonMCP(ControlSurface):
                 command = self._parse_request(state["in"])
                 if command is not None:
                     state["in"] = b""
-                    self._queue_response(state, self._process_command(command, direct=True))
+                    self._queue_response(state, self._process_command(command))
             
             if not self._flush_client(client, state) or (peer_closed and not state["out"]):
                 self._close_client(client)
@@ -329,355 +349,219 @@ class AbletonMCP(ControlSurface):
             state["out"] = state["out"][sent:]
         return True
     
-    def _server_thread(self):
-        """Server thread implementation - handles client connections"""
-        try:
-            self.log_message("Server thread started")
-            # Set a timeout to allow regular checking of running flag
-            self.server.settimeout(1.0)
-            
-            while self.running:
-                try:
-                    # Accept connections with timeout
-                    client, address = self.server.accept()
-                    self.log_message("Connection accepted from " + str(address))
-                    self.show_message("AbletonMCP: Client connected")
-                    
-                    # Handle client in a separate thread
-                    client_thread = threading.Thread(
-                        target=self._handle_client,
-                        args=(client,)
-                    )
-                    client_thread.daemon = True
-                    client_thread.start()
-                    
-                    # Keep track of client threads
-                    self.client_threads.append(client_thread)
-                    
-                    # Clean up finished client threads
-                    self.client_threads = [t for t in self.client_threads if t.is_alive()]
-                    
-                except socket.timeout:
-                    # No connection yet, just continue
-                    continue
-                except Exception as e:
-                    if self.running:  # Only log if still running
-                        self.log_message("Server accept error: " + str(e))
-                    time.sleep(0.5)
-            
-            self.log_message("Server thread stopped")
-        except Exception as e:
-            self.log_message("Server thread error: " + str(e))
-    
-    def _handle_client(self, client):
-        """Handle communication with a connected client"""
-        self.log_message("Client handler started")
-        client.settimeout(None)  # No timeout for client socket
-        buffer = ''  # Changed from b'' to '' for Python 2
-        
-        try:
-            while self.running:
-                try:
-                    # Receive data
-                    data = client.recv(8192)
-                    
-                    if not data:
-                        # Client disconnected
-                        self.log_message("Client disconnected")
-                        break
-                    
-                    # Accumulate data in buffer with explicit encoding/decoding
-                    try:
-                        # Python 3: data is bytes, decode to string
-                        buffer += data.decode('utf-8')
-                    except AttributeError:
-                        # Python 2: data is already string
-                        buffer += data
-                    
-                    try:
-                        # Try to parse command from buffer
-                        command = json.loads(buffer)  # Removed decode('utf-8')
-                        buffer = ''  # Clear buffer after successful parse
-                        
-                        self.log_message("Received command: " + str(command.get("type", "unknown")))
-                        
-                        # Process the command and get response
-                        response = self._process_command(command)
-                        
-                        # Send the response with explicit encoding
-                        try:
-                            # Python 3: encode string to bytes
-                            client.sendall(json.dumps(response).encode('utf-8'))
-                        except AttributeError:
-                            # Python 2: string is already bytes
-                            client.sendall(json.dumps(response))
-                    except ValueError:
-                        # Incomplete data, wait for more
-                        continue
-                        
-                except Exception as e:
-                    self.log_message("Error handling client data: " + str(e))
-                    self.log_message(traceback.format_exc())
-                    
-                    # Send error response if possible
-                    error_response = {
-                        "status": "error",
-                        "message": str(e)
-                    }
-                    try:
-                        # Python 3: encode string to bytes
-                        client.sendall(json.dumps(error_response).encode('utf-8'))
-                    except AttributeError:
-                        # Python 2: string is already bytes
-                        client.sendall(json.dumps(error_response))
-                    except:
-                        # If we can't send the error, the connection is probably dead
-                        break
-                    
-                    # For serious errors, break the loop
-                    if not isinstance(e, ValueError):
-                        break
-        except Exception as e:
-            self.log_message("Error in client handler: " + str(e))
-        finally:
-            try:
-                client.close()
-            except:
-                pass
-            self.log_message("Client handler stopped")
-    
-    def _process_command(self, command, direct=False):
-        """Process a command and return a response.
-
-        direct=True means the caller is already on Live's main thread (timer pump), so state-changing
-        commands run inline instead of being scheduled and awaited."""
-        command_type = command.get("type", "")
-        params = command.get("params", {})
-        
-        # Initialize response
-        response = {
-            "status": "success",
-            "result": {}
-        }
-        
-        try:
-            # Route the command to the appropriate handler
-            if command_type == "get_session_info":
-                response["result"] = self._get_session_info()
-            elif command_type == "get_audio_clip_path":
-                track_index = params.get("track_index", 0)
-                clip_index = params.get("clip_index", 0)
-                source = params.get("source", "session")
-                response["result"] = self._get_audio_clip_path(track_index, clip_index, source)
-            elif command_type == "get_track_info":
-                track_index = params.get("track_index", 0)
-                response["result"] = self._get_track_info(track_index, params.get("track_type", "track"))
-            elif command_type == "get_script_info":
-                response["result"] = self._get_script_info()
-            elif command_type == "get_clip_notes":
-                track_index = params.get("track_index", 0)
-                clip_index = params.get("clip_index", 0)
-                response["result"] = self._get_clip_notes(track_index, clip_index)
-            elif command_type == "get_device_parameters":
-                track_index = params.get("track_index", 0)
-                device_path = params.get("device_path")
-                device_index = params.get("device_index", None if device_path is not None else 0)
-                response["result"] = self._get_device_parameters(track_index, device_index, params.get("track_type", "track"), device_path)
-            elif command_type == "get_bulk_session_structure":
-                response["result"] = self._get_bulk_session_structure()
-            # Commands that modify Live's state should be scheduled on the main thread
-            elif command_type in ["create_midi_track", "set_track_name", "set_track_color", "set_clip_color",
-                                 "create_clip", "add_notes_to_clip", "set_clip_name",
-                                 "set_tempo", "fire_clip", "stop_clip", "delete_clip",
-                                 "clear_notes_from_clip", "fire_scene", "stop_all_clips",
-                                 "set_track_mute", "set_track_solo", "set_track_arm",
-                                 "set_scene_name", "eval", "set_scene_tempo", "set_device_parameter",
-                                 "start_playback", "stop_playback", "load_browser_item",
-                                 "bulk_set_clip_names", "bulk_create_clips", "bulk_set_device_parameters",
-                                 "draw_automation", "clear_automation", "ramp_parameter", "cancel_ramps"]:
-                # Use a thread-safe approach with a response queue
-                response_queue = queue.Queue()
-                
-                # Define a function to execute on the main thread
-                def main_thread_task():
-                    try:
-                        result = None
-                        if command_type == "create_midi_track":
-                            index = params.get("index", -1)
-                            result = self._create_midi_track(index)
-                        elif command_type == "bulk_set_clip_names":
-                            items = params.get("items", [])
-                            result = self._bulk_set_clip_names(items)
-                        elif command_type == "bulk_create_clips":
-                            items = params.get("items", [])
-                            result = self._bulk_create_clips(items)
-                        elif command_type == "bulk_set_device_parameters":
-                            items = params.get("items", [])
-                            result = self._bulk_set_device_parameters(items)
-                        elif command_type == "set_track_name":
-                            track_index = params.get("track_index", 0)
-                            name = params.get("name", "")
-                            result = self._set_track_name(track_index, name, params.get("track_type", "track"))
-                        elif command_type == "set_track_color":
-                            track_index = params.get("track_index", 0)
-                            color = params.get("color", 0)
-                            result = self._set_track_color(track_index, color, params.get("track_type", "track"))
-                        elif command_type == "set_clip_color":
-                            track_index = params.get("track_index", 0)
-                            clip_index = params.get("clip_index", 0)
-                            color = params.get("color", 0)
-                            result = self._set_clip_color(track_index, clip_index, color)
-                        elif command_type == "create_clip":
-                            track_index = params.get("track_index", 0)
-                            clip_index = params.get("clip_index", 0)
-                            length = params.get("length", 4.0)
-                            result = self._create_clip(track_index, clip_index, length)
-                        elif command_type == "add_notes_to_clip":
-                            track_index = params.get("track_index", 0)
-                            clip_index = params.get("clip_index", 0)
-                            notes = params.get("notes", [])
-                            result = self._add_notes_to_clip(track_index, clip_index, notes)
-                        elif command_type == "set_clip_name":
-                            track_index = params.get("track_index", 0)
-                            clip_index = params.get("clip_index", 0)
-                            name = params.get("name", "")
-                            result = self._set_clip_name(track_index, clip_index, name)
-                        elif command_type == "set_tempo":
-                            tempo = params.get("tempo", 120.0)
-                            result = self._set_tempo(tempo)
-                        elif command_type == "fire_clip":
-                            track_index = params.get("track_index", 0)
-                            clip_index = params.get("clip_index", 0)
-                            result = self._fire_clip(track_index, clip_index)
-                        elif command_type == "stop_clip":
-                            track_index = params.get("track_index", 0)
-                            clip_index = params.get("clip_index", 0)
-                            result = self._stop_clip(track_index, clip_index)
-                        elif command_type == "delete_clip":
-                            track_index = params.get("track_index", 0)
-                            clip_index = params.get("clip_index", 0)
-                            result = self._delete_clip(track_index, clip_index)
-                        elif command_type == "clear_notes_from_clip":
-                            track_index = params.get("track_index", 0)
-                            clip_index = params.get("clip_index", 0)
-                            result = self._clear_notes_from_clip(track_index, clip_index)
-                        elif command_type == "fire_scene":
-                            scene_index = params.get("scene_index", 0)
-                            result = self._fire_scene(scene_index)
-                        elif command_type == "stop_all_clips":
-                            result = self._stop_all_clips()
-                        elif command_type == "set_track_mute":
-                            track_index = params.get("track_index", 0)
-                            mute = params.get("mute", False)
-                            result = self._set_track_mute(track_index, mute, params.get("track_type", "track"))
-                        elif command_type == "set_track_solo":
-                            track_index = params.get("track_index", 0)
-                            solo = params.get("solo", False)
-                            result = self._set_track_solo(track_index, solo, params.get("track_type", "track"))
-                        elif command_type == "set_track_arm":
-                            track_index = params.get("track_index", 0)
-                            arm = params.get("arm", False)
-                            result = self._set_track_arm(track_index, arm, params.get("track_type", "track"))
-                        elif command_type == "eval":
-                            code = params.get("code", "")
-                            try:
-                                result = eval(code, {"self": self})
-                            except Exception as eval_e:
-                                result = str(eval_e)
-                        elif command_type == "set_scene_name":
-                            scene_index = params.get("scene_index", 0)
-                            name = params.get("name", "")
-                            result = self._set_scene_name(scene_index, name)
-                        elif command_type == "set_scene_tempo":
-                            scene_index = params.get("scene_index", 0)
-                            tempo = params.get("tempo", 120.0)
-                            result = self._set_scene_tempo(scene_index, tempo)
-                        elif command_type == "set_device_parameter":
-                            track_index = params.get("track_index", 0)
-                            device_path = params.get("device_path")
-                            device_index = params.get("device_index", None if device_path is not None else 0)
-                            parameter_index = params.get("parameter_index", 0)
-                            value = params.get("value", 0.0)
-                            result = self._set_device_parameter(track_index, device_index, parameter_index, value,
-                                                                params.get("track_type", "track"), device_path)
-                        elif command_type == "start_playback":
-                            result = self._start_playback()
-                        elif command_type == "stop_playback":
-                            result = self._stop_playback()
-                        elif command_type == "load_instrument_or_effect":
-                            track_index = params.get("track_index", 0)
-                            uri = params.get("uri", "")
-                            result = self._load_instrument_or_effect(track_index, uri)
-                        elif command_type == "load_browser_item":
-                            track_index = params.get("track_index", 0)
-                            item_uri = params.get("item_uri", "")
-                            result = self._load_browser_item(track_index, item_uri, params.get("track_type", "track"))
-                        
-                        elif command_type == "draw_automation":
-                            result = self._draw_automation(params)
-                        elif command_type == "clear_automation":
-                            result = self._clear_automation(params)
-                        elif command_type == "ramp_parameter":
-                            result = self._ramp_parameter(params)
-                        elif command_type == "cancel_ramps":
-                            result = self._cancel_ramps(params)
-                        
-                        # Put the result in the queue
-                        response_queue.put({"status": "success", "result": result})
-                    except Exception as e:
-                        self.log_message("Error in main thread task: " + str(e))
-                        self.log_message(traceback.format_exc())
-                        response_queue.put({"status": "error", "message": str(e)})
-                
-                # Schedule the task to run on the main thread (or run it inline if already there)
-                if direct:
-                    main_thread_task()
-                else:
-                    try:
-                        self.schedule_message(0, main_thread_task)
-                    except AssertionError:
-                        # If we're already on the main thread, execute directly
-                        main_thread_task()
-                
-                # Wait for the response with a timeout
-                try:
-                    task_response = response_queue.get(timeout=10.0)
-                    if task_response.get("status") == "error":
-                        response["status"] = "error"
-                        response["message"] = task_response.get("message", "Unknown error")
-                    else:
-                        response["result"] = task_response.get("result", {})
-                except queue.Empty:
-                    response["status"] = "error"
-                    response["message"] = "Timeout waiting for operation to complete"
-            elif command_type == "get_browser_item":
-                uri = params.get("uri", None)
-                path = params.get("path", None)
-                response["result"] = self._get_browser_item(uri, path)
-            elif command_type == "get_browser_categories":
-                category_type = params.get("category_type", "all")
-                response["result"] = self._get_browser_categories(category_type)
-            elif command_type == "get_browser_items":
-                path = params.get("path", "")
-                item_type = params.get("item_type", "all")
-                response["result"] = self._get_browser_items(path, item_type, params.get("limit", 200), params.get("offset", 0))
-            # Add the new browser commands
-            elif command_type == "get_browser_tree":
-                category_type = params.get("category_type", "all")
-                response["result"] = self.get_browser_tree(category_type)
-            elif command_type == "get_browser_items_at_path":
-                path = params.get("path", "")
-                response["result"] = self.get_browser_items_at_path(path, params.get("limit", 200), params.get("offset", 0))
+    def _process_command(self, command):
+        """Run one bridge command on Live's main thread and return the response dict."""
+        started = time.time()
+        if not isinstance(command, dict):
+            response = _error_response("INVALID_REQUEST", "Request must be a JSON object")
+        else:
+            command_type = command.get("type", "")
+            params = command.get("params")
+            if params is None:
+                params = {}
+            entry = _COMMANDS.get(command_type)
+            if entry is None:
+                response = _error_response("UNKNOWN_COMMAND", "Unknown command: " + str(command_type))
+            elif not isinstance(params, dict):
+                response = _error_response("INVALID_REQUEST", "params must be an object")
             else:
-                response["status"] = "error"
-                response["message"] = "Unknown command: " + command_type
-        except Exception as e:
-            self.log_message("Error processing command: " + str(e))
-            self.log_message(traceback.format_exc())
-            response["status"] = "error"
-            response["message"] = str(e)
-        
+                try:
+                    response = {"status": "success", "result": self._run_command(entry, params)}
+                except Exception as e:
+                    self.log_message("Error processing command '{0}': {1}".format(command_type, e))
+                    self.log_message(traceback.format_exc())
+                    response = _error_response(_error_code(e), str(e))
+        response["elapsed_ms"] = round((time.time() - started) * 1000.0, 2)
         return response
+    
+    def _run_command(self, entry, params):
+        if not entry["writes"]:
+            return entry["fn"](self, params)
+        self._song.begin_undo_step()
+        try:
+            return entry["fn"](self, params)
+        finally:
+            self._song.end_undo_step()
+    
+    # Command handlers: thin adapters that pull parameters and call the implementation below
+    
+    @command("get_session_info")
+    def _cmd_get_session_info(self, params):
+        return self._get_session_info()
+    
+    @command("get_script_info")
+    def _cmd_get_script_info(self, params):
+        return self._get_script_info()
+    
+    @command("get_bulk_session_structure")
+    def _cmd_get_bulk_session_structure(self, params):
+        return self._get_bulk_session_structure()
+    
+    @command("get_audio_clip_path")
+    def _cmd_get_audio_clip_path(self, params):
+        return self._get_audio_clip_path(params.get("track_index", 0), params.get("clip_index", 0), params.get("source", "session"))
+    
+    @command("get_track_info")
+    def _cmd_get_track_info(self, params):
+        return self._get_track_info(params.get("track_index", 0), params.get("track_type", "track"))
+    
+    @command("get_clip_notes")
+    def _cmd_get_clip_notes(self, params):
+        return self._get_clip_notes(params.get("track_index", 0), params.get("clip_index", 0))
+    
+    @command("get_device_parameters")
+    def _cmd_get_device_parameters(self, params):
+        device_path = params.get("device_path")
+        device_index = params.get("device_index", None if device_path is not None else 0)
+        return self._get_device_parameters(params.get("track_index", 0), device_index, params.get("track_type", "track"), device_path)
+    
+    @command("get_browser_item")
+    def _cmd_get_browser_item(self, params):
+        return self._get_browser_item(params.get("uri", None), params.get("path", None))
+    
+    @command("get_browser_categories")
+    def _cmd_get_browser_categories(self, params):
+        return self._get_browser_categories(params.get("category_type", "all"))
+    
+    @command("get_browser_items")
+    def _cmd_get_browser_items(self, params):
+        return self._get_browser_items(params.get("path", ""), params.get("item_type", "all"), params.get("limit", 200), params.get("offset", 0))
+    
+    @command("get_browser_tree")
+    def _cmd_get_browser_tree(self, params):
+        return self.get_browser_tree(params.get("category_type", "all"))
+    
+    @command("get_browser_items_at_path")
+    def _cmd_get_browser_items_at_path(self, params):
+        return self.get_browser_items_at_path(params.get("path", ""), params.get("limit", 200), params.get("offset", 0))
+    
+    @command("cancel_ramps")
+    def _cmd_cancel_ramps(self, params):
+        return self._cancel_ramps(params)
+    
+    @command("create_midi_track", writes=True)
+    def _cmd_create_midi_track(self, params):
+        return self._create_midi_track(params.get("index", -1))
+    
+    @command("bulk_set_clip_names", writes=True)
+    def _cmd_bulk_set_clip_names(self, params):
+        return self._bulk_set_clip_names(params.get("items", []))
+    
+    @command("bulk_create_clips", writes=True)
+    def _cmd_bulk_create_clips(self, params):
+        return self._bulk_create_clips(params.get("items", []))
+    
+    @command("bulk_set_device_parameters", writes=True)
+    def _cmd_bulk_set_device_parameters(self, params):
+        return self._bulk_set_device_parameters(params.get("items", []))
+    
+    @command("set_track_name", writes=True)
+    def _cmd_set_track_name(self, params):
+        return self._set_track_name(params.get("track_index", 0), params.get("name", ""), params.get("track_type", "track"))
+    
+    @command("set_track_color", writes=True)
+    def _cmd_set_track_color(self, params):
+        return self._set_track_color(params.get("track_index", 0), params.get("color", 0), params.get("track_type", "track"))
+    
+    @command("set_clip_color", writes=True)
+    def _cmd_set_clip_color(self, params):
+        return self._set_clip_color(params.get("track_index", 0), params.get("clip_index", 0), params.get("color", 0))
+    
+    @command("create_clip", writes=True)
+    def _cmd_create_clip(self, params):
+        return self._create_clip(params.get("track_index", 0), params.get("clip_index", 0), params.get("length", 4.0))
+    
+    @command("add_notes_to_clip", writes=True)
+    def _cmd_add_notes_to_clip(self, params):
+        return self._add_notes_to_clip(params.get("track_index", 0), params.get("clip_index", 0), params.get("notes", []))
+    
+    @command("set_clip_name", writes=True)
+    def _cmd_set_clip_name(self, params):
+        return self._set_clip_name(params.get("track_index", 0), params.get("clip_index", 0), params.get("name", ""))
+    
+    @command("set_tempo", writes=True)
+    def _cmd_set_tempo(self, params):
+        return self._set_tempo(params.get("tempo", 120.0))
+    
+    @command("fire_clip", writes=True)
+    def _cmd_fire_clip(self, params):
+        return self._fire_clip(params.get("track_index", 0), params.get("clip_index", 0))
+    
+    @command("stop_clip", writes=True)
+    def _cmd_stop_clip(self, params):
+        return self._stop_clip(params.get("track_index", 0), params.get("clip_index", 0))
+    
+    @command("delete_clip", writes=True, destructive=True)
+    def _cmd_delete_clip(self, params):
+        return self._delete_clip(params.get("track_index", 0), params.get("clip_index", 0))
+    
+    @command("clear_notes_from_clip", writes=True, destructive=True)
+    def _cmd_clear_notes_from_clip(self, params):
+        return self._clear_notes_from_clip(params.get("track_index", 0), params.get("clip_index", 0))
+    
+    @command("fire_scene", writes=True)
+    def _cmd_fire_scene(self, params):
+        return self._fire_scene(params.get("scene_index", 0))
+    
+    @command("stop_all_clips", writes=True)
+    def _cmd_stop_all_clips(self, params):
+        return self._stop_all_clips()
+    
+    @command("set_track_mute", writes=True)
+    def _cmd_set_track_mute(self, params):
+        return self._set_track_mute(params.get("track_index", 0), params.get("mute", False), params.get("track_type", "track"))
+    
+    @command("set_track_solo", writes=True)
+    def _cmd_set_track_solo(self, params):
+        return self._set_track_solo(params.get("track_index", 0), params.get("solo", False), params.get("track_type", "track"))
+    
+    @command("set_track_arm", writes=True)
+    def _cmd_set_track_arm(self, params):
+        return self._set_track_arm(params.get("track_index", 0), params.get("arm", False), params.get("track_type", "track"))
+    
+    @command("eval", writes=True)
+    def _cmd_eval(self, params):
+        # Errors propagate as real error responses (they used to come back as plain success strings)
+        return eval(params.get("code", ""), {"self": self})
+    
+    @command("set_scene_name", writes=True)
+    def _cmd_set_scene_name(self, params):
+        return self._set_scene_name(params.get("scene_index", 0), params.get("name", ""))
+    
+    @command("set_scene_tempo", writes=True)
+    def _cmd_set_scene_tempo(self, params):
+        return self._set_scene_tempo(params.get("scene_index", 0), params.get("tempo", 120.0))
+    
+    @command("set_device_parameter", writes=True)
+    def _cmd_set_device_parameter(self, params):
+        device_path = params.get("device_path")
+        device_index = params.get("device_index", None if device_path is not None else 0)
+        return self._set_device_parameter(params.get("track_index", 0), device_index, params.get("parameter_index", 0),
+                                          params.get("value", 0.0), params.get("track_type", "track"), device_path)
+    
+    @command("start_playback", writes=True)
+    def _cmd_start_playback(self, params):
+        return self._start_playback()
+    
+    @command("stop_playback", writes=True)
+    def _cmd_stop_playback(self, params):
+        return self._stop_playback()
+    
+    @command("load_browser_item", writes=True)
+    def _cmd_load_browser_item(self, params):
+        return self._load_browser_item(params.get("track_index", 0), params.get("item_uri", ""), params.get("track_type", "track"))
+    
+    @command("draw_automation", writes=True)
+    def _cmd_draw_automation(self, params):
+        return self._draw_automation(params)
+    
+    @command("clear_automation", writes=True, destructive=True)
+    def _cmd_clear_automation(self, params):
+        return self._clear_automation(params)
+    
+    @command("ramp_parameter", writes=True)
+    def _cmd_ramp_parameter(self, params):
+        return self._ramp_parameter(params)
     
     # Command implementations
     
@@ -956,52 +840,10 @@ class AbletonMCP(ControlSurface):
 
     def _get_script_info(self):
         """Report script version and capabilities (handshake)."""
-        capabilities = [
-            "get_session_info",
-            "get_audio_clip_path",
-            "get_track_info",
-            "get_bulk_session_structure",
-            "get_script_info",
-            "create_midi_track",
-            "set_track_name", "set_track_color", "set_clip_color",
-            "create_clip",
-            "add_notes_to_clip",
-            "set_clip_name",
-            "set_tempo",
-            "fire_clip",
-            "stop_clip",
-            "delete_clip",
-            "clear_notes_from_clip",
-            "get_clip_notes",
-            "fire_scene",
-            "stop_all_clips",
-            "set_scene_name", "eval",
-            "set_track_mute",
-            "set_track_solo",
-            "set_track_arm",
-            "get_device_parameters",
-            "set_device_parameter",
-            "start_playback",
-            "stop_playback",
-            "load_browser_item",
-            "get_browser_item",
-            "get_browser_categories",
-            "get_browser_items",
-            "get_browser_tree",
-            "get_browser_items_at_path",
-            "bulk_set_clip_names",
-            "bulk_create_clips",
-            "bulk_set_device_parameters",
-            "draw_automation",
-            "clear_automation",
-            "ramp_parameter",
-            "cancel_ramps",
-            "track_types",
-            "device_paths",
-            "parameter_details"
-        ]
+        # Commands come from the registry; the extra strings advertise features that clients can probe for.
+        capabilities = sorted(_COMMANDS.keys()) + ["track_types", "device_paths", "parameter_details", "undo_steps", "error_codes"]
         return {
-            "script_version": "1.10.0",
+            "script_version": "1.11.0",
             "capabilities": capabilities
         }
 
@@ -1346,8 +1188,8 @@ class AbletonMCP(ControlSurface):
             if slot.has_clip and slot.clip:
                 if hasattr(slot.clip, 'color'):
                     slot.clip.color = color
-                return {"status": "success", "color": getattr(slot.clip, 'color', color)}
-            return {"status": "error", "message": "No clip in slot"}
+                return {"color": getattr(slot.clip, 'color', color)}
+            raise ValueError("No clip in slot")
         except Exception as e:
             self.log_message("Error setting clip color: " + str(e))
             raise
@@ -1455,7 +1297,7 @@ class AbletonMCP(ControlSurface):
                 raise Exception("Scene tempo property not found in this Live version")
         except Exception as e:
             self.log_message("Error setting scene tempo: " + str(e))
-            return {"status": "error", "message": str(e)}
+            raise
 
     def _set_scene_name(self, scene_index, name):
         """Set the name of a scene"""

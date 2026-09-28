@@ -13,7 +13,7 @@ A Node.js/TypeScript stdio Model Context Protocol (MCP) server for controlling a
 
 - **MCP Transport**: Communicates over `stdio` using `@modelcontextprotocol/sdk`. Diagnostics and operational logs are strictly directed to `stderr` to preserve stdout for JSON-RPC frames.
 - **Ableton Bridge**: Keeps Ableton Live access behind a typed `AbletonClient` adapter communicating over localhost TCP port `9877` using framed JSON requests.
-- **Remote Script**: A Python Control Surface script running inside Ableton Live's Python environment. Its socket server is pumped by a `Live.Base.Timer` on Live's main thread, so every command runs on the main thread and answers in about 10 ms (a threaded server answered in 300-600 ms because socket threads only got the GIL when Live called into Python). Live versions without `Live.Base.Timer` fall back to the threaded server.
+- **Remote Script**: A Python Control Surface script running inside Ableton Live's Python environment (**Live 12 or later**). Its socket server is pumped by a `Live.Base.Timer` on Live's main thread, so every command runs on the main thread and answers in about 10 ms (a threaded server answered in 300-600 ms because socket threads only got the GIL when Live called into Python). Commands are registered with a `@command` decorator, which is the single source of truth for dispatch, undo behaviour and the capability list.
 - **Capability Discovery**: Queries the running Remote Script's handshake (`get_script_info`) dynamically at startup to verify supported capabilities and script version.
 
 ---
@@ -176,11 +176,15 @@ Every device-facing tool (`get_track_detail`, `get_device_parameters`, `set_devi
 Not covered: device properties Live keeps outside `parameters` (Wavetable's oscillator wavetable selection, Drift's mod matrix, unison and voice modes), and VST/AU plugin parameters beyond the ones Live has configured.
 
 #### Development
-- `eval_python`: Evaluate raw Python on the Remote Script instance. Executes arbitrary code inside Live; intended for development and debugging only.
+- `eval_python`: Evaluate raw Python on the Remote Script instance. Executes arbitrary code inside Live, so the tool is **hidden and refused unless `ABLETON_MCP_ALLOW_EVAL=1`** is set in the MCP server's environment (this repo's `.mcp.json` sets it for development). Failures come back as errors, not success strings.
 
 ---
 
 ## Troubleshooting
+
+### Errors, timing and undo
+- Every bridge response carries `elapsed_ms` (time spent inside Live). Errors carry a stable `code`: `OUT_OF_RANGE`, `NOT_FOUND`, `INVALID_ARGUMENT`, `TYPE_ERROR`, `LIVE_ERROR` (Live itself refused), `UNKNOWN_COMMAND`, `INVALID_REQUEST`, `INTERNAL_ERROR`. The Node client exposes it as `error.bridgeCode`.
+- Every writing command runs in its own undo step, so one `undo` in Live reverts exactly one tool call. (Without explicit steps Live coalesces all API edits into a single giant step.) Read-only and no-op commands add no undo entries. Ramps run outside any step and each becomes one undo step of its own.
 
 ### Audio Analysis Requirements
 - Install `ffmpeg` and `ffprobe` on the machine running the MCP server. Set `FFMPEG_PATH` and `FFPROBE_PATH` if they are not on `PATH`.

@@ -619,3 +619,13 @@ export const TOOLS: ToolDefinition[] = [
     requiredCapability: 'eval'
   }
 ];
+
+/** Tools that are hidden and refused unless the named environment variable is "1" in the MCP server's environment. */
+export const GATED_TOOLS: Record<string, string> = {
+  eval_python: 'ABLETON_MCP_ALLOW_EVAL'
+};
+
+export function isToolEnabled(name: string, env: NodeJS.ProcessEnv = process.env): boolean {
+  const variable = GATED_TOOLS[name];
+  return variable === undefined || env[variable] === '1';
+}

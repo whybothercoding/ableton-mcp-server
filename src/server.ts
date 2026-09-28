@@ -5,7 +5,7 @@ import {
   ListToolsRequestSchema
 } from '@modelcontextprotocol/sdk/types.js';
 import { AbletonClient } from './client/AbletonClient.js';
-import { TOOLS } from './tools/definitions.js';
+import { TOOLS, isToolEnabled } from './tools/definitions.js';
 import { ToolHandler } from './tools/handlers.js';
 
 export class AbletonMcpServer {
@@ -36,7 +36,7 @@ export class AbletonMcpServer {
     // List available tools
     this.server.setRequestHandler(ListToolsRequestSchema, async () => {
       return {
-        tools: TOOLS.map((t) => ({
+        tools: TOOLS.filter((t) => isToolEnabled(t.name)).map((t) => ({
           name: t.name,
           description: t.description,
           inputSchema: t.inputSchema

@@ -1,6 +1,7 @@
 import { CallToolResult } from '@modelcontextprotocol/sdk/types.js';
 import { AbletonClient, AbletonClientError } from '../client/AbletonClient.js';
 import { analyzeAudioFile } from '../audio/analyzer.js';
+import { GATED_TOOLS, isToolEnabled } from './definitions.js';
 
 /** Copies only the fields the caller supplied, so absent optionals stay absent (Number(undefined) would send NaN). */
 function pick(args: Record<string, any>, numbers: string[], others: string[] = []): Record<string, any> {
@@ -24,6 +25,18 @@ export class ToolHandler {
     args: Record<string, any> = {}
   ): Promise<CallToolResult> {
     try {
+      if (!isToolEnabled(toolName)) {
+        return {
+          content: [
+            {
+              type: 'text',
+              text: `Tool '${toolName}' is disabled. Set ${GATED_TOOLS[toolName]}=1 in the MCP server's environment to enable it.`
+            }
+          ],
+          isError: true
+        };
+      }
+
       let resultData: any;
 
       switch (toolName) {

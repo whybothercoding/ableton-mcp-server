@@ -221,9 +221,12 @@ def make_song():
     master.devices = [FakeDevice("Limiter")]
     master.mixer_device = make_mixer(sends=False)
     del master.mute, master.solo
-    return types.SimpleNamespace(tempo=120.0, signature_numerator=4, signature_denominator=4, scenes=[],
+    song = types.SimpleNamespace(tempo=120.0, signature_numerator=4, signature_denominator=4, scenes=[],
                                  tracks=[FakeTrack("A"), FakeTrack("B"), make_rack_track()],
-                                 return_tracks=[ret], master_track=master)
+                                 return_tracks=[ret], master_track=master, undo_log=[])
+    song.begin_undo_step = lambda: song.undo_log.append("begin")
+    song.end_undo_step = lambda: song.undo_log.append("end")
+    return song
 
 
 # ---------------------------------------------------------------- module loading
@@ -571,6 +574,112 @@ class RampTests(unittest.TestCase):
         self.assertTrue(all(0.0 <= w <= 1.0 for w in self.freq.writes))
 
 
+# ---------------------------------------------------------------- dispatcher: registry, errors, undo steps
+
+class DispatcherTests(unittest.TestCase):
+    def setUp(self):
+        self.script = make_script()
+        self.addCleanup(self.script._stop_server)
+        self.song = self.script._song
+
+    def run_command(self, command_type, params=None):
+        return self.script._process_command({"type": command_type, "params": params or {}})
+
+    def test_every_registered_command_has_a_handler_and_is_advertised(self):
+        self.assertGreater(len(mod._COMMANDS), 40)
+        capabilities = self.script._get_script_info()["capabilities"]
+        for name, entry in mod._COMMANDS.items():
+            self.assertTrue(callable(entry["fn"]), name)
+            self.assertIn(name, capabilities)
+        for feature in ("track_types", "device_paths", "parameter_details", "undo_steps", "error_codes"):
+            self.assertIn(feature, capabilities)
+
+    def test_previously_dispatchable_commands_still_exist_and_the_dead_one_is_gone(self):
+        expected = """add_notes_to_clip bulk_create_clips bulk_set_clip_names bulk_set_device_parameters cancel_ramps
+            clear_automation clear_notes_from_clip create_clip create_midi_track delete_clip draw_automation eval fire_clip
+            fire_scene get_audio_clip_path get_browser_categories get_browser_item get_browser_items get_browser_items_at_path
+            get_browser_tree get_bulk_session_structure get_clip_notes get_device_parameters get_script_info get_session_info
+            get_track_info load_browser_item ramp_parameter set_clip_color set_clip_name set_device_parameter set_scene_name
+            set_scene_tempo set_tempo set_track_arm set_track_color set_track_mute set_track_name set_track_solo
+            start_playback stop_all_clips stop_clip stop_playback""".split()
+        for name in expected:
+            self.assertIn(name, mod._COMMANDS)
+        self.assertNotIn("load_instrument_or_effect", mod._COMMANDS)
+
+    def test_responses_carry_elapsed_time(self):
+        for response in (self.run_command("get_script_info"), self.run_command("nope")):
+            self.assertIsInstance(response["elapsed_ms"], float)
+            self.assertGreaterEqual(response["elapsed_ms"], 0)
+
+    def test_error_codes(self):
+        cases = [
+            ({"type": "nope"}, "UNKNOWN_COMMAND"),
+            ({"type": "get_track_info", "params": {"track_index": 99}}, "OUT_OF_RANGE"),
+            ({"type": "get_track_info", "params": {"track_index": 0, "track_type": "bus"}}, "INVALID_ARGUMENT"),
+            ({"type": "get_track_info", "params": {"track_index": "x"}}, "INVALID_ARGUMENT"),
+            ({"type": "eval", "params": {"code": "1 +"}}, "INTERNAL_ERROR"),
+            ({"type": "eval", "params": {"code": "{}['missing']"}}, "NOT_FOUND"),
+            ({"type": "eval", "params": {"code": "[].pop()"}}, "OUT_OF_RANGE"),
+            ({"type": "eval", "params": {"code": "1 + 'a'"}}, "TYPE_ERROR"),
+            ({"type": "get_track_info", "params": []}, "INVALID_REQUEST"),
+        ]
+        for command, code in cases:
+            response = self.script._process_command(command)
+            self.assertEqual(response["status"], "error", command)
+            self.assertEqual(response["code"], code, command)
+            self.assertTrue(response["message"])
+        self.assertEqual(self.script._process_command([1, 2])["code"], "INVALID_REQUEST")
+
+    def test_bridge_error_codes_and_live_errors(self):
+        self.assertEqual(mod._error_code(mod.BridgeError("x", "GUARD_FAILED")), "GUARD_FAILED")
+        self.assertEqual(mod._error_code(RuntimeError("Cannot set LoopEnd before LoopStart")), "LIVE_ERROR")
+        self.assertEqual(mod._error_code(ValueError("Device X not found.")), "NOT_FOUND")
+        self.assertEqual(mod._error_code(ZeroDivisionError()), "INTERNAL_ERROR")
+
+    def test_eval_errors_are_errors_not_success_strings(self):
+        ok = self.run_command("eval", {"code": "6 * 7"})
+        self.assertEqual((ok["status"], ok["result"]), ("success", 42))
+        bad = self.run_command("eval", {"code": "undefined_name"})
+        self.assertEqual(bad["status"], "error")
+        self.assertIn("undefined_name", bad["message"])
+
+    def test_writing_commands_run_inside_exactly_one_undo_step(self):
+        self.song.undo_log.clear()
+        self.assertEqual(self.run_command("set_tempo", {"tempo": 130.0})["status"], "success")
+        self.assertEqual(self.song.undo_log, ["begin", "end"])
+        self.song.undo_log.clear()
+        self.run_command("set_track_name", {"track_index": 0, "name": "X"})
+        self.run_command("set_track_name", {"track_index": 1, "name": "Y"})
+        self.assertEqual(self.song.undo_log, ["begin", "end", "begin", "end"])  # one step per command, not one giant step
+
+    def test_undo_step_is_closed_when_the_command_fails(self):
+        self.song.undo_log.clear()
+        response = self.run_command("set_track_name", {"track_index": 99, "name": "X"})
+        self.assertEqual(response["status"], "error")
+        self.assertEqual(self.song.undo_log, ["begin", "end"])
+
+    def test_read_commands_open_no_undo_step(self):
+        self.song.undo_log.clear()
+        for name in ("get_session_info", "get_script_info", "get_bulk_session_structure"):
+            self.run_command(name)
+        self.run_command("get_track_info", {"track_index": 0})
+        self.run_command("cancel_ramps")
+        self.assertEqual(self.song.undo_log, [])
+
+    def test_destructive_commands_are_flagged(self):
+        for name in ("delete_clip", "clear_notes_from_clip", "clear_automation"):
+            self.assertTrue(mod._COMMANDS[name]["destructive"], name)
+        self.assertFalse(mod._COMMANDS["set_tempo"]["destructive"])
+
+    def test_errors_are_no_longer_hidden_inside_success_payloads(self):
+        response = self.run_command("set_scene_tempo", {"scene_index": 99, "tempo": 120})
+        self.assertEqual(response["status"], "error")
+        self.assertEqual(response["code"], "OUT_OF_RANGE")
+        response = self.run_command("set_clip_color", {"track_index": 0, "clip_index": 1, "color": 5})  # empty slot
+        self.assertEqual(response["status"], "error")
+        self.assertIn("No clip in slot", response["message"])
+
+
 # ---------------------------------------------------------------- addressing: track types, device paths, details
 
 class AddressingTests(unittest.TestCase):
@@ -871,8 +980,7 @@ class PumpServerTests(unittest.TestCase):
         finally:
             sock.close()
 
-    def test_server_uses_the_timer_pump_not_threads(self):
-        self.assertIsNone(self.script.server_thread)
+    def test_server_uses_the_timer_pump(self):
         self.assertTrue(self.timer.running)
         self.assertEqual(self.timer.interval, mod.PUMP_INTERVAL_MS)
 
@@ -880,7 +988,7 @@ class PumpServerTests(unittest.TestCase):
         info = self.call("get_script_info")
         self.assertEqual(info["status"], "success")
         self.assertIn("draw_automation", info["result"]["capabilities"])
-        self.assertEqual(info["result"]["script_version"], "1.10.0")
+        self.assertEqual(info["result"]["script_version"], "1.11.0")
         tempo = self.call("set_tempo", {"tempo": 133.0})
         self.assertEqual(tempo["status"], "success")
         self.assertEqual(self.script._song.tempo, 133.0)
@@ -1002,20 +1110,17 @@ class PumpServerTests(unittest.TestCase):
             socket.create_connection(("127.0.0.1", self.port), timeout=1)
 
 
-class ThreadedFallbackTests(unittest.TestCase):
-    """Without Live.Base.Timer the original threaded server is used."""
+class NoTimerTests(unittest.TestCase):
+    """Live 12+ only: without Live.Base.Timer the server refuses to start instead of falling back to threads."""
 
-    def test_fallback_serves_requests(self):
+    def test_missing_timer_is_reported_not_faked(self):
         timer = sys.modules["Live"].Base.Timer
         del sys.modules["Live"].Base.Timer
         try:
             script = make_script()
             self.assertIsNone(script._pump_timer)
-            self.assertIsNotNone(script.server_thread)
-            sock = socket.create_connection(("127.0.0.1", mod.DEFAULT_PORT), timeout=5)
-            sock.sendall(json.dumps({"type": "get_script_info", "params": {}}).encode("utf-8"))
-            self.assertEqual(json.loads(sock.recv(1 << 16).decode("utf-8"))["status"], "success")
-            sock.close()
+            self.assertIsNone(script.server)
+            self.assertTrue(any("requires Live 12" in message for message in script.logs))
             script.disconnect()
         finally:
             sys.modules["Live"].Base.Timer = timer
