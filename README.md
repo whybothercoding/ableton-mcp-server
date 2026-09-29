@@ -123,12 +123,12 @@ Most tools take an **address** (`song`, `tracks/N`, `tracks/N/slots/M/clip`, `gr
 
 | Area | Tools |
 | --- | --- |
-| Discover | `get_health`, `get_capabilities`, `describe_set`, `list_properties`, `get_track_detail`, `get_device`, `browse`, `get_audio_clip_path`, `analyze_audio_clip` |
+| Discover | `get_health`, `get_capabilities`, `describe_set`, `list_properties`, `get_device`, `browse`, `analyze_audio_clip` |
 | Read / change any property | `get_properties`, `set_properties` |
 | Structure | `create`, `duplicate`, `delete` (needs `expect`) |
 | Play | `transport`, `launch`, `history` (undo/redo) |
 | Mixing and routing | `routing` (plus `set_properties` on mixer parameters and track properties) |
-| Clips and notes | `clip_action`, `get_notes`, `write_notes`, `edit_notes` |
+| Clips and notes | `clip_action`, `get_notes`, `write_notes`, `edit_notes`, `convert` |
 | Many edits at once | `batch` |
 | Compose | `generate_notes`, `transform_notes` |
 | Devices and sound | `device_action`, `load_item`, `draw_automation`, `get_automation`, `clear_automation`, `ramp_parameter`, `cancel_ramps` (parameters and device properties are written with `set_properties`) |
@@ -148,11 +148,17 @@ Earlier versions had one tool per property or action. These were folded into the
 | `bulk_edit_clips` | `batch` (`create` midi_clip + `set_properties` name/color per clip, one undo step) |
 | `get_browser_tree`, `get_browser_items` | `browse` (list, search) |
 | `load_browser_item` | `load_item` (target is an address; loads devices, presets, samples, hot-swaps) |
+| `get_track_detail` | `describe_set` (every track, its devices and clips), `get_properties`, `get_device` |
+| `get_audio_clip_path` | `get_properties` on the clip (`file_path`, `sample_rate`, `warping`, ...) |
 | `get_device_parameters` | `get_device` (parameters with addresses, racks with their chains and pads) |
 | `set_device_parameter`, `bulk_set_device_parameters` | `set_properties` on a parameter address (`.../parameters/5`), `items` for many at once |
 
-#### Notes on a few tools
-- `get_track_detail`: clip slots, arrangement clips and devices of a track. `get_audio_clip_path`: an audio clip's source path and warp metadata. `analyze_audio_clip`: codec/format metadata, integrated LUFS, sample and true peak (dBTP), RMS and an approximate six-band frequency profile of the clip's source file. 
+#### Audio clips, warp markers and conversions
+- `create` `kind: "audio_clip"`: `address` of an empty slot on an audio track and `path`, an absolute path to an audio file. Live warps it according to its own settings; the result reports `length`, `file_path` and `warping`. Bad or relative paths are refused.
+- Audio clip settings are ordinary clip properties: `warping`, `warp_mode` (by name), `gain` (and `gain_display_string`), `pitch_coarse`, `pitch_fine`, `ram_mode`, `sample_rate`, `sample_length`, `available_warp_modes`, and `warp_markers` (`[{beat_time, sample_time}]`, sample time in seconds in the file).
+- `clip_action` warp actions: `add_warp_marker` (`beat_time`; without `sample_time` it is placed where it changes nothing), `move_warp_marker` (`beat_time` of an existing marker, `distance` in beats: this is how audio is retimed) and `remove_warp_marker`. Live's messages come through (`Cannot add warp marker to an unwarped clip`, `Segment length out of range`).
+- `analyze_audio_clip` (`address` of an audio clip): format metadata, integrated LUFS, sample and true peak (dBTP), RMS and an approximate six-band frequency profile of the source file (ffmpeg on the MCP host), next to the clip's settings.
+- `convert` (edition dependent, Live's refusals come through): `check`, `audio_to_midi` (`type` harmony, melody or drums; Live finishes in the background, so the tool waits up to 15 s for the new track), `simpler_track`, `drum_rack_from_clip`, `pad_to_track` (a drum pad's chain becomes its own MIDI track) and `slice_to_drum_rack` (a Simpler in Slicing mode). Each returns the new tracks with their addresses, devices and clips.
 
 #### Automation & Ramps
 Targets are addresses: a Session **clip** (`tracks/2/slots/0/clip`) and a **parameter** (`tracks/2/devices/0/parameters/5`, `tracks/2/mixer/volume`, `.../chains/1/devices/0/parameters/3`, ...).
@@ -230,7 +236,7 @@ Devices, rack chains, drum pads and parameters have addresses under a track (`tr
 - Live renumbers default track names when tracks are inserted or removed ("12-Acid..." becomes "13-Acid..."), so re-read addresses after structural changes instead of caching them.
 
 #### Addressing: track types, racks and parameter details
-`get_track_detail` still names its target with track numbers instead of an address (it is the last such tool):
+The Remote Script still accepts the older track-number argument forms on its commands (its tests use them); every MCP tool takes addresses:
 
 - `track_type`: `"track"` (default), `"return"` (`track_index` counts return tracks) or `"master"` (`track_index` is ignored; pass 0). The master and return tracks can hold devices, so they can be read, loaded onto, set, ramped and mixed like any other. Clip automation is not available on them (they have no clips). Live prefixes return track names with their letter (`A-Reverb`), so write the bare name when renaming.
 - `device_path`: reaches devices inside racks. It alternates device and chain selectors and ends on a device index, e.g. `[0, 2, 1]` is device 1 in chain 2 of the rack at device 0. A chain selector is a chain index, `{"pad": 36}` (or `{"pad": 36, "chain": 1}`) for a drum pad, or `{"return": 0}` for a return chain. Use it instead of `device_index`.

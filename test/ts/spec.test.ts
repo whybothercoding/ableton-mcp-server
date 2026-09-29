@@ -142,7 +142,7 @@ test('launch and clip_action schemas and risk annotations', () => {
   assert.equal(launch.annotations.destructiveHint, false);
   assert.deepEqual(action.inputSchema.required, ['address', 'action']);
   assert.equal(action.annotations.destructiveHint, true);
-  assert.deepEqual(action.inputSchema.properties.action.enum, ['crop', 'duplicate_loop', 'quantize', 'quantize_pitch', 'scrub', 'stop_scrub', 'move_playing_pos']);
+  assert.deepEqual(action.inputSchema.properties.action.enum, ['crop', 'duplicate_loop', 'quantize', 'quantize_pitch', 'scrub', 'stop_scrub', 'move_playing_pos', 'add_warp_marker', 'move_warp_marker', 'remove_warp_marker']);
   assert.equal(validateArgs(launch.inputSchema, { address: 'tracks/0/slots/0', legato: 'yes' }), 'legato must be true or false');
   assert.equal(validateArgs(action.inputSchema, { address: 'tracks/0/slots/0/clip', action: 'quantize', amount: 0.5 }), null);
 });
@@ -166,10 +166,10 @@ test('tools folded into the verb tools are no longer advertised', () => {
   const retired = ['get_session_info', 'get_track_structure', 'get_bulk_session_structure', 'get_clip_notes', 'edit_clip_notes', 'set_tempo', 'set_track_name',
     'set_track_color', 'set_track_mute', 'set_track_solo', 'set_track_arm', 'set_clip_name', 'set_clip_color', 'set_scene_name', 'create_midi_track', 'create_clip',
     'delete_clip', 'fire_clip', 'stop_clip', 'fire_scene', 'stop_all_clips', 'start_playback', 'stop_playback', 'get_device_parameters', 'set_device_parameter',
-    'bulk_set_device_parameters', 'bulk_edit_clips', 'load_browser_item', 'get_browser_tree', 'get_browser_items'];
+    'bulk_set_device_parameters', 'bulk_edit_clips', 'load_browser_item', 'get_browser_tree', 'get_browser_items', 'get_audio_clip_path', 'get_track_detail'];
   const names = new Set(TOOLS.map((t) => t.name));
   for (const name of retired) assert.ok(!names.has(name), `${name} should be retired`);
-  assert.deepEqual(TOOL_SPEC_BY_NAME.create.inputSchema.properties.kind.enum, ['audio_track', 'midi_track', 'return_track', 'scene', 'midi_clip', 'cue_point']);
+  assert.deepEqual(TOOL_SPEC_BY_NAME.create.inputSchema.properties.kind.enum, ['audio_track', 'midi_track', 'return_track', 'scene', 'midi_clip', 'audio_clip', 'cue_point']);
 });
 
 test('device tools: schemas and risk annotations', () => {
@@ -202,4 +202,16 @@ test('automation tools take addresses: schemas, annotations and batchability', (
   assert.equal(TOOL_SPEC_BY_NAME.cancel_ramps.inputSchema.required, undefined);
   assert.match(validateArgs(draw.inputSchema, { clip: 'x', parameter: 'y', points: [{ time: 0 }] }) ?? '', /points\[0\]: missing required argument 'value'/);
   assert.match(TOOL_SPEC_BY_NAME.batch.description, /draw_automation, get_automation, clear_automation/);
+});
+
+test('audio tools: convert, warp marker actions and audio_clip creation are declared', () => {
+  const convert = TOOL_SPEC_BY_NAME.convert;
+  assert.deepEqual(convert.inputSchema.required, ['address', 'action']);
+  assert.deepEqual(convert.inputSchema.properties.type.enum, ['harmony', 'melody', 'drums']);
+  assert.equal(convert.annotations.destructiveHint, false);
+  assert.equal(validateArgs(convert.inputSchema, { address: 'tracks/0/slots/0/clip', action: 'audio_to_midi', type: 'melody' }), null);
+  assert.ok(TOOL_SPEC_BY_NAME.create.inputSchema.properties.path);
+  assert.deepEqual(TOOL_SPEC_BY_NAME.analyze_audio_clip.inputSchema.required, ['address']);
+  assert.equal(TOOL_SPEC_BY_NAME.analyze_audio_clip.annotations.readOnlyHint, true);
+  assert.ok(TOOL_SPEC_BY_NAME.convert.run, 'convert waits for Live to finish, so it is a composed tool');
 });

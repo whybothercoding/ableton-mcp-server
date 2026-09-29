@@ -57,8 +57,9 @@ let T, S, D, P;
 for (const track of session.tracks) {
   if (track.kind !== 'midi' || track.devices.length < 1) continue;
   const trackIndex = Number(track.address.split('/')[1]);
-  const detail = await ok('get_track_detail', { track_index: trackIndex });
-  const free = detail.clip_slots.find((slot) => !slot.has_clip);
+  const occupied = new Set((track.clips ?? []).map((c) => c.slot));
+  const freeIndex = session.scenes.findIndex((_, i) => !occupied.has(i));
+  const free = freeIndex >= 0 ? { index: freeIndex } : undefined;
   const params = (await ok('get_device', { address: `tracks/${trackIndex}/devices/0` })).parameters;
   const p = params.find((x) => x.index > 0 && x.max > x.min && !/\bon\b|type|mode|sync/i.test(x.name) && !Number.isInteger(x.value));
   if (free && p) {
@@ -247,7 +248,7 @@ try {
       }
     }
     assert((await ok('describe_set', { include_clips: false })).scenes.length === scenes, 'the scratch scenes should be gone');
-    await fails('create', { kind: 'device' }, 'kind must be one of: audio_track, midi_track, return_track, scene, midi_clip, cue_point');
+    await fails('create', { kind: 'device' }, 'kind must be one of: audio_track, midi_track, return_track, scene, midi_clip, audio_clip, cue_point');
     await fails('duplicate', { address: 'master' }, 'Only regular tracks, scenes and clip slots can be duplicated');
   });
   await check('launch and clip_action are listed with the right risk annotations and required arguments', async () => {
@@ -340,6 +341,17 @@ try {
     await fails('browse', { action: 'search' }, 'search needs a query');
     await fails('load_item', { path: 'audio_effects/EQ Eight', target: 'tracks/9999' }, 'out of range');
   });
+  await check('analyze_audio_clip works by address: settings and file analysis together, and MIDI clips are refused readably', async () => {
+    const audioClip = (await ok('describe_set')).tracks.flatMap((t) => (t.clips ?? []).filter((c) => c.kind === 'audio').map((c) => `${t.address}/slots/${c.slot}/clip`))[0];
+    if (!audioClip) {
+      console.log('       no audio clip in the Set: skipped');
+    } else {
+      const out = await ok('analyze_audio_clip', { address: audioClip });
+      assert(out.clip.address === audioClip && out.clip.file_path && out.analysis, JSON.stringify(out).slice(0, 200));
+    }
+    await fails('analyze_audio_clip', { address: clipAddress }, 'is a MIDI clip');
+    await fails('analyze_audio_clip', {}, "missing required argument 'address'");
+  });
   await check('argument problems are caught in TypeScript with a readable message', async () => {
     await fails('get_properties', {}, "missing required argument 'address'");
     await fails('get_properties', { address: 5 }, 'address must be a string');
@@ -355,13 +367,7 @@ try {
     await fails('set_properties', { address: `tracks/${T}`, properties: { mute: true }, expect: { name: 'Definitely Not This' } }, 'Guard failed');
   });
 
-  console.log('\nTrack types, device paths and parameter details');
-  await check('schemas expose track_type and device_path where they apply', async () => {
-    for (const name of ['get_track_detail']) {
-      const prop = byName[name].inputSchema.properties.track_type;
-      assert(prop && JSON.stringify(prop.enum) === JSON.stringify(['track', 'return', 'master']), `${name} lacks a track_type enum`);
-    }
-  });
+  console.log('\nDevices, return and master tracks');
   await check('get_device returns quantized labels, display strings and parameter addresses', async () => {
     const out = await ok('get_device', { address: `tracks/${T}/devices/${D}` });
     assert(out.class_name && out.device_type && out.address === `tracks/${T}/devices/${D}`, JSON.stringify(out).slice(0, 200));
@@ -396,18 +402,18 @@ try {
         near(set.applied.value.to, prm.min + 0.25 * rspan, 1e-4 * rspan, 'set value');
         await ok('ramp_parameter', { parameter: prm.address, to: prm.min + 0.5 * rspan, seconds: 0.2 });
         await sleep(500);
-        const detail = await ok('get_track_detail', { track_index: 0, track_type: 'return' });
-        assert(detail.track_type === 'return' && detail.devices.length >= 1, JSON.stringify(detail).slice(0, 160));
+        const returns = (await ok('describe_set', { include_clips: false })).returns;
+        assert(returns[0].address === 'returns/0' && returns[0].devices.length >= 1, JSON.stringify(returns[0]).slice(0, 160));
       } finally {
         await tool('set_properties', { address: prm.address, properties: { value: prm.value } });
       }
     });
   }
   await check('master track works through the tools and guards what it cannot do', async () => {
-    const detail = await ok('get_track_detail', { track_index: 0, track_type: 'master' });
-    assert(detail.track_type === 'master' && detail.index === null, JSON.stringify(detail).slice(0, 160));
+    const master = (await ok('describe_set', { include_clips: false })).master;
+    assert(master.address === 'master' && master.kind === 'master', JSON.stringify(master).slice(0, 160));
     await fails('set_properties', { address: 'master', properties: { mute: true } }, 'mute');
-    await fails('get_track_detail', { track_index: 99, track_type: 'return' }, 'Return track index out of range');
+    await fails('get_properties', { address: 'returns/99' }, 'out of range');
     const currentVolume = (await ok('describe_set', { include_clips: false })).master.volume;
     const volume = await tool('ramp_parameter', { parameter: 'master/mixer/volume', to: currentVolume, seconds: 0.05 });
     assert(!volume.isError, volume.text);

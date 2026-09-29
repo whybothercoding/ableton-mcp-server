@@ -3,6 +3,8 @@
 Both take an address. `launch` never edits the Set; `clip_action` rewrites clip content in place, which is why it runs in
 its own undo step and accepts an `expect` guard like the other writing commands.
 """
+import Live
+
 from . import properties
 from .helpers import _is_number
 from .registry import BridgeError, command
@@ -12,7 +14,8 @@ _NO_RECORD_LENGTH = 1.7976931348623157e+308
 _NO_QUANTIZATION = -2147483648
 
 LAUNCH_ACTIONS = ("fire", "stop")
-CLIP_ACTIONS = ("crop", "duplicate_loop", "quantize", "quantize_pitch", "scrub", "stop_scrub", "move_playing_pos")
+CLIP_ACTIONS = ("crop", "duplicate_loop", "quantize", "quantize_pitch", "scrub", "stop_scrub", "move_playing_pos", "add_warp_marker",
+                "move_warp_marker", "remove_warp_marker")
 
 
 def _grid(value):
@@ -32,6 +35,23 @@ def _amount(params, name="amount", default=1.0):
     if not 0.0 <= value <= 1.0:
         raise BridgeError("{0} {1} is outside 0 to 1".format(name, value), "OUT_OF_RANGE")
     return float(value)
+
+
+def _warp_markers(clip):
+    return [{"beat_time": m.beat_time, "sample_time": m.sample_time} for m in clip.warp_markers]
+
+
+def _sample_time_at(clip, beat):
+    """Where in the file a new marker at `beat` belongs so that adding it changes nothing: interpolate between its neighbours."""
+    markers = sorted(_warp_markers(clip), key=lambda m: m["beat_time"])
+    if not markers:
+        raise BridgeError("The clip has no warp markers to place a new one against: warp it first", "UNAVAILABLE")
+    for left, right in zip(markers, markers[1:]):
+        if left["beat_time"] - 1e-9 <= beat <= right["beat_time"] + 1e-9 and right["beat_time"] > left["beat_time"]:
+            span = (beat - left["beat_time"]) / (right["beat_time"] - left["beat_time"])
+            return left["sample_time"] + span * (right["sample_time"] - left["sample_time"])
+    raise BridgeError("beat_time {0:g} is outside the warped range ({1:g} to {2:g}): give sample_time too".format(
+        beat, markers[0]["beat_time"], markers[-1]["beat_time"]), "OUT_OF_RANGE")
 
 
 class ClipActionsMixin(object):
@@ -136,10 +156,37 @@ class ClipActionsMixin(object):
             clip.scrub(float(position))
         elif action == "stop_scrub":
             clip.stop_scrub()
+        elif action in ("add_warp_marker", "move_warp_marker", "remove_warp_marker"):
+            self._warp_marker_action(clip, action, params)
         elif action == "move_playing_pos":
             amount = params.get("amount")
             if not _is_number(amount):
                 raise BridgeError("move_playing_pos needs amount: the number of beats to move the playing position by", "INVALID_ARGUMENT")
             clip.move_playing_pos(float(amount))
-        return {"address": canonical, "action": action, "length": clip.length, "loop_start": clip.loop_start,
-                "loop_end": clip.loop_end, "is_playing": bool(clip.is_playing)}
+        result = {"address": canonical, "action": action, "length": clip.length, "loop_start": clip.loop_start,
+                  "loop_end": clip.loop_end, "is_playing": bool(clip.is_playing)}
+        if action.endswith("warp_marker"):
+            result["warp_markers"] = _warp_markers(clip)
+        return result
+
+    def _warp_marker_action(self, clip, action, params):
+        if not clip.is_audio_clip:
+            raise BridgeError("Warp markers exist only on audio clips", "INVALID_ARGUMENT")
+        beat = params.get("beat_time")
+        if not _is_number(beat) or beat < 0:
+            raise BridgeError("{0} needs beat_time: a position in beats".format(action), "INVALID_ARGUMENT")
+        beat = float(beat)
+        if action == "remove_warp_marker":
+            clip.remove_warp_marker(beat)
+        elif action == "move_warp_marker":
+            distance = params.get("distance")
+            if not _is_number(distance):
+                raise BridgeError("move_warp_marker needs distance: how many beats to move the marker (negative moves it earlier)", "INVALID_ARGUMENT")
+            clip.move_warp_marker(beat, float(distance))
+        else:
+            sample = params.get("sample_time")
+            if sample is None:
+                sample = _sample_time_at(clip, beat)
+            elif not _is_number(sample) or sample < 0:
+                raise BridgeError("sample_time must be a position in the audio file in seconds", "INVALID_ARGUMENT")
+            clip.add_warp_marker(Live.Clip.WarpMarker(float(sample), beat))

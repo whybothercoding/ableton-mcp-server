@@ -12,29 +12,7 @@ export interface ToolDefinition {
   requiredCapability?: string;
 }
 
-const TRACK_TYPE_PROPERTY = {
-  type: 'string',
-  enum: ['track', 'return', 'master'],
-  description: "Which track list track_index refers to: 'track' (default), 'return' (return tracks) or 'master' (track_index is then ignored, pass 0)"
-};
-
-const DEVICE_PATH_PROPERTY = {
-  type: 'array',
-  items: {},
-  description:
-    'Address a device inside racks instead of device_index: [device, chain, device, ...], ending in a device index. ' +
-    'A chain selector is a chain index, {"pad": note} or {"pad": note, "chain": n} for a drum pad, or {"return": n} for a return chain. ' +
-    "get_device lists a rack's chains, return chains and occupied drum pads."
-};
-
-const PARAMETER_TARGET_PROPERTIES = {
-  track_type: TRACK_TYPE_PROPERTY,
-  device_path: DEVICE_PATH_PROPERTY,
-  device_index: { type: 'number', description: '0-indexed top-level device position on the track (use with parameter_index)' },
-  parameter_index: { type: 'number', description: '0-indexed parameter position (see get_device for indices and min/max)' },
-  mixer_parameter: { type: 'string', description: "Mixer target instead of a device parameter: 'volume', 'pan' or 'send:N' (0-indexed send)" }
-};
-
+/** The two tools that are not declarative specs: a health ping and the gated Python escape hatch. */
 const LEGACY_TOOLS: ToolDefinition[] = [
   {
     name: 'get_health',
@@ -43,47 +21,6 @@ const LEGACY_TOOLS: ToolDefinition[] = [
       type: 'object',
       properties: {}
     }
-  },
-  {
-    name: 'get_track_detail',
-    description: 'Get detailed information for a specific track, including session clip slots, arrangement clips, and device list.',
-    inputSchema: {
-      type: 'object',
-      properties: {
-        track_index: { type: 'number', description: '0-indexed track position' },
-        track_type: TRACK_TYPE_PROPERTY
-      },
-      required: ['track_index']
-    },
-    requiredCapability: 'get_track_info'
-  },
-  {
-    name: 'get_audio_clip_path',
-    description: 'Get the source audio file path and Live clip metadata for an audio clip in Session or Arrangement view.',
-    inputSchema: {
-      type: 'object',
-      properties: {
-        track_index: { type: 'number', description: '0-indexed track position' },
-        clip_index: { type: 'number', description: '0-indexed clip slot (Session) or arrangement clip position' },
-        source: { type: 'string', enum: ['session', 'arrangement'], description: 'Clip collection to inspect; defaults to session' }
-      },
-      required: ['track_index', 'clip_index']
-    },
-    requiredCapability: 'get_audio_clip_path'
-  },
-  {
-    name: 'analyze_audio_clip',
-    description: 'Analyze a clip source file locally for format metadata, integrated loudness, peak/RMS levels, and an approximate frequency-band profile. Requires ffmpeg and ffprobe on the MCP host.',
-    inputSchema: {
-      type: 'object',
-      properties: {
-        track_index: { type: 'number', description: '0-indexed track position' },
-        clip_index: { type: 'number', description: '0-indexed clip slot (Session) or arrangement clip position' },
-        source: { type: 'string', enum: ['session', 'arrangement'], description: 'Clip collection to inspect; defaults to session' }
-      },
-      required: ['track_index', 'clip_index']
-    },
-    requiredCapability: 'get_audio_clip_path'
   },
   {
     name: 'eval_python',

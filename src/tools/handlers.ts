@@ -1,23 +1,8 @@
 import { CallToolResult } from '@modelcontextprotocol/sdk/types.js';
 import { AbletonClient, AbletonClientError } from '../client/AbletonClient.js';
-import { analyzeAudioFile } from '../audio/analyzer.js';
 import { GATED_TOOLS, isToolEnabled } from './definitions.js';
 import { CompositionError } from './composition.js';
 import { TOOL_SPEC_BY_NAME, validateArgs } from './spec.js';
-
-/** Copies only the fields the caller supplied, so absent optionals stay absent (Number(undefined) would send NaN). */
-function pick(args: Record<string, any>, numbers: string[], others: string[] = []): Record<string, any> {
-  const out: Record<string, any> = {};
-  for (const key of numbers) {
-    if (args[key] !== undefined && args[key] !== null) out[key] = Number(args[key]);
-  }
-  for (const key of others) {
-    if (args[key] !== undefined && args[key] !== null) out[key] = args[key];
-  }
-  return out;
-}
-
-const TARGET_NUMBERS = ['track_index', 'device_index', 'parameter_index'];
 
 export class ToolHandler {
   constructor(private readonly client: AbletonClient) {}
@@ -65,37 +50,6 @@ export class ToolHandler {
             capabilities_count: info.capabilities?.length || 0,
             capabilities: info.capabilities
           };
-          break;
-        }
-
-        case 'get_track_detail': {
-          this.client.ensureCapability('get_track_info');
-          resultData = await this.client.sendCommand('get_track_info', {
-            track_index: Number(args.track_index),
-            ...pick(args, [], ['track_type'])
-          });
-          break;
-        }
-
-        case 'get_audio_clip_path': {
-          this.client.ensureCapability('get_audio_clip_path');
-          resultData = await this.client.sendCommand('get_audio_clip_path', {
-            track_index: Number(args.track_index),
-            clip_index: Number(args.clip_index),
-            source: args.source || 'session'
-          });
-          break;
-        }
-
-        case 'analyze_audio_clip': {
-          this.client.ensureCapability('get_audio_clip_path');
-          const clipInfo = await this.client.sendCommand<Record<string, any>>('get_audio_clip_path', {
-            track_index: Number(args.track_index),
-            clip_index: Number(args.clip_index),
-            source: args.source || 'session'
-          });
-          const analysis = await analyzeAudioFile(clipInfo.file_path);
-          resultData = { clip: clipInfo, analysis };
           break;
         }
 

@@ -1,3 +1,4 @@
+import { AUDIO_SPECS } from './audio.js';
 import { BATCH_SPECS } from './batch.js';
 import { BROWSE_SPECS } from './browse.js';
 import { COMPOSITION_SPECS } from './composition.js';
@@ -156,15 +157,16 @@ export const TOOL_SPECS: ToolSpec[] = [
   {
     name: 'create',
     description:
-      "Create a track, return track, scene, MIDI clip or cue point and get back its address. kind: audio_track, midi_track, return_track (always appended), scene, midi_clip " +
+      "Create a track, return track, scene, MIDI clip, audio clip or cue point and get back its address. kind: audio_track, midi_track, return_track (always appended), scene, audio_clip (`address` of an EMPTY slot on an audio track and `path`: an absolute path to an audio file; it is auto-warped by Live's settings and the result reports its length), midi_clip " +
       "(`address` of an EMPTY clip slot like 'tracks/2/slots/0', `length` in beats, default 4) or cue_point (`time` in beats; the transport must be stopped: Live sets cue points at the playhead, which is put back afterwards). For tracks and scenes `index` is the insertion position (0-based; omit or -1 to append; existing objects shift, so re-read addresses afterwards). " +
       "Optional `name` and `color` (RGB integer; Live snaps it to the nearest palette colour and the result reports the colour it applied) are applied immediately. One undo step.",
     inputSchema: {
       type: 'object',
       properties: {
-        kind: { type: 'string', enum: ['audio_track', 'midi_track', 'return_track', 'scene', 'midi_clip', 'cue_point'], description: 'What to create' },
+        kind: { type: 'string', enum: ['audio_track', 'midi_track', 'return_track', 'scene', 'midi_clip', 'audio_clip', 'cue_point'], description: 'What to create' },
         index: { type: 'number', description: 'Insertion position, -1 (default) appends' },
-        address: { type: 'string', description: "midi_clip: the empty clip slot to fill, e.g. 'tracks/2/slots/0'" },
+        address: { type: 'string', description: "midi_clip, audio_clip: the empty clip slot to fill, e.g. 'tracks/2/slots/0'" },
+        path: { type: 'string', description: 'audio_clip: absolute path of the audio file' },
         length: { type: 'number', description: 'midi_clip: length in beats (default 4)' },
         time: { type: 'number', description: 'cue_point: position in beats' },
         name: { type: 'string', description: 'Name to give it' },
@@ -239,13 +241,17 @@ export const TOOL_SPECS: ToolSpec[] = [
     description:
       "Edit a clip in place: crop (discard everything outside the loop), duplicate_loop (loop twice as long, notes and envelopes copied; MIDI only), " +
       "quantize (`grid`: rec_q_quarter, rec_q_eight, rec_q_eight_triplet, rec_q_sixtenth, rec_q_thirtysecond...; `amount` 0-1, default 1; on audio clips it aligns warp markers), " +
-      "quantize_pitch (like quantize for one `pitch`, 0-127; MIDI only), scrub (`position` in beats) / stop_scrub, move_playing_pos (`amount` beats, negative goes back; clip must be playing). " +
+      "quantize_pitch (like quantize for one `pitch`, 0-127; MIDI only), scrub (`position` in beats) / stop_scrub, move_playing_pos (`amount` beats, negative goes back; clip must be playing), and on AUDIO clips add_warp_marker (`beat_time`; `sample_time` = seconds in the file, default: where it changes nothing), " +
+      "move_warp_marker (`beat_time` of an existing marker, `distance` in beats: this is how audio is retimed) and remove_warp_marker (`beat_time`); current markers are the clip's `warp_markers` property. " +
       "`address` must be a clip. crop and quantize rewrite content: one undo step each, and `expect` ({name}) refuses to act on the wrong clip. Returns the clip's length and loop after the action.",
     inputSchema: {
       type: 'object',
       properties: {
         address: { type: 'string', description: "A clip, e.g. 'tracks/2/slots/0/clip'" },
-        action: { type: 'string', enum: ['crop', 'duplicate_loop', 'quantize', 'quantize_pitch', 'scrub', 'stop_scrub', 'move_playing_pos'], description: 'What to do' },
+        action: { type: 'string', enum: ['crop', 'duplicate_loop', 'quantize', 'quantize_pitch', 'scrub', 'stop_scrub', 'move_playing_pos', 'add_warp_marker', 'move_warp_marker', 'remove_warp_marker'], description: 'What to do' },
+        beat_time: { type: 'number', description: 'Warp marker actions: the marker position in beats' },
+        distance: { type: 'number', description: 'move_warp_marker: beats to move by' },
+        sample_time: { type: 'number', description: 'add_warp_marker: position in the file in seconds' },
         grid: { type: 'string', description: 'Song.RecordingQuantization name (quantize, quantize_pitch)' },
         amount: { type: 'number', description: 'quantize: 0-1 strength; move_playing_pos: beats' },
         pitch: { type: 'number', description: 'MIDI note number (quantize_pitch)' },
@@ -527,6 +533,6 @@ export const TOOL_SPECS: ToolSpec[] = [
   ...COMPOSITION_SPECS
 ];
 
-TOOL_SPECS.push(...BATCH_SPECS, ...BROWSE_SPECS);
+TOOL_SPECS.push(...BATCH_SPECS, ...BROWSE_SPECS, ...AUDIO_SPECS);
 
 export const TOOL_SPEC_BY_NAME: Record<string, ToolSpec> = Object.fromEntries(TOOL_SPECS.map((s) => [s.name, s]));

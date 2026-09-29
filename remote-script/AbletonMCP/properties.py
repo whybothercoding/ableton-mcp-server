@@ -34,6 +34,10 @@ def _pan_set(track, value):
     track.mixer_device.panning.value = value
 
 
+def _warp_markers_get(clip):
+    return [{"beat_time": m.beat_time, "sample_time": m.sample_time} for m in clip.warp_markers]
+
+
 def _mixer_get(name):
     return lambda track: getattr(track.mixer_device, name)
 
@@ -253,6 +257,7 @@ PROPERTY_SPECS = {
         "sample_length": _spec("int", RO, doc="Audio clips only, samples"),
         "gain_display_string": _spec("str", RO, doc="Audio clips only, e.g. '-3.0 dB'"),
         "available_warp_modes": _spec("list", RO, doc="Audio clips only: the warp_mode values this clip accepts"),
+        "warp_markers": _spec("list", RO, doc="Audio clips only: [{beat_time, sample_time (seconds in the file)}]; edit with clip_action", get=_warp_markers_get),
         "has_envelopes": _spec("bool", RO),
         "has_groove": _spec("bool", RO),
         "groove": _spec("ref", ref="groove", doc="Address of a groove in the pool (grooves/N); a clip always has one"),

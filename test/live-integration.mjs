@@ -1300,6 +1300,76 @@ try {
     await call('load_item', { action: 'stop_preview' });
   });
 
+  console.log('\nAudio clips, warp markers and conversions');
+  const sourceClip = await call('eval', { code: "[sl.clip.file_path for t in self._song.tracks for sl in getattr(t, 'clip_slots', []) if sl.has_clip and sl.clip.is_audio_clip][:1]" });
+  if (sourceClip.length === 0) {
+    console.log('  (no audio clip in the Set to borrow a file from: audio tests skipped)');
+  } else {
+    const file = sourceClip[0];
+    const audioTrack = await call('create', { kind: 'audio_track', name: 'MCP TEST AUDIO' });
+    await trackPtr(audioTrack.address, 'tracks');
+    const audioClip = `${audioTrack.address}/slots/0/clip`;
+    await check('create audio_clip makes a warped clip from an absolute path; bad paths and occupied slots are refused', async () => {
+      const made = await call('create', { kind: 'audio_clip', address: `${audioTrack.address}/slots/0`, path: file, name: 'MCP TEST LOOP' });
+      assert(made.address === audioClip && made.file_path === file && made.length > 0 && made.name === 'MCP TEST LOOP', JSON.stringify(made));
+      const props = await call('get_properties', { address: audioClip, names: ['is_audio_clip', 'warping', 'sample_rate', 'sample_length', 'gain_display_string', 'available_warp_modes'] });
+      assert(props.properties.is_audio_clip === true && props.properties.sample_rate > 0 && props.properties.available_warp_modes.length > 2, JSON.stringify(props.properties));
+      for (const [params, code] of [[{ path: 'relative.wav' }, 'INVALID_ARGUMENT'], [{ path: '/no/such/file.wav', address: `${audioTrack.address}/slots/1` }, 'NOT_FOUND'],
+        [{ path: file }, 'INVALID_ARGUMENT']]) {
+        await failsCode(() => call('create', { kind: 'audio_clip', address: `${audioTrack.address}/slots/0`, ...params }), code);
+      }
+    });
+    await check('warp markers are readable; add places a marker where it changes nothing, move retimes, remove undoes it', async () => {
+      const before = (await call('get_properties', { address: audioClip, names: ['warp_markers'] })).properties.warp_markers;
+      assert(before.length >= 2 && before.every((m) => typeof m.beat_time === 'number' && typeof m.sample_time === 'number'), JSON.stringify(before));
+      const beat = 1.5;
+      const added = await call('clip_action', { address: audioClip, action: 'add_warp_marker', beat_time: beat });
+      const marker = added.warp_markers.find((m) => Math.abs(m.beat_time - beat) < 1e-6);
+      assert(marker && added.warp_markers.length === before.length + 1, JSON.stringify(added.warp_markers));
+      const moved = await call('clip_action', { address: audioClip, action: 'move_warp_marker', beat_time: beat, distance: 0.25 });
+      assert(moved.warp_markers.some((m) => Math.abs(m.beat_time - (beat + 0.25)) < 1e-6), JSON.stringify(moved.warp_markers));
+      const removed = await call('clip_action', { address: audioClip, action: 'remove_warp_marker', beat_time: beat + 0.25 });
+      assert(removed.warp_markers.length === before.length, JSON.stringify(removed.warp_markers));
+      await failsCode(() => call('clip_action', { address: audioClip, action: 'remove_warp_marker', beat_time: 3.3333 }), 'LIVE_ERROR', "doesn't exist");
+      await failsCode(() => call('clip_action', { address: audioClip, action: 'add_warp_marker', beat_time: 999 }), 'OUT_OF_RANGE');
+      await failsCode(() => call('clip_action', { address: `tracks/${T}/slots/${S}/clip`, action: 'remove_warp_marker', beat_time: 1 }), 'INVALID_ARGUMENT', 'audio clips');
+    });
+    await check('audio clip settings: warp mode, gain, pitch and warping round-trip', async () => {
+      const original = await call('get_properties', { address: audioClip, names: ['warp_mode', 'gain', 'pitch_coarse', 'warping', 'ram_mode'] });
+      await call('set_properties', { address: audioClip, properties: { warp_mode: 'complex', gain: 0.5, pitch_coarse: 3, ram_mode: true } });
+      const got = await call('get_properties', { address: audioClip, names: ['warp_mode', 'gain', 'pitch_coarse', 'ram_mode', 'gain_display_string'] });
+      assert(got.properties.warp_mode === 'complex' && got.properties.pitch_coarse === 3 && got.properties.ram_mode === true && Math.abs(got.properties.gain - 0.5) < 1e-3, JSON.stringify(got.properties));
+      await call('set_properties', { address: audioClip, properties: original.properties });
+      await call('set_properties', { address: audioClip, properties: { warping: false } });
+      await failsCode(() => call('clip_action', { address: audioClip, action: 'add_warp_marker', beat_time: 1 }), 'LIVE_ERROR', 'unwarped');
+      await call('set_properties', { address: audioClip, properties: { warping: true } });
+    });
+    await check('convert: check, audio to MIDI (drums) creates a MIDI track with notes, simpler_track creates a Simpler track', async () => {
+      const checked = await call('convert', { action: 'check', address: audioClip });
+      assert(typeof checked.convertible_to_midi === 'boolean', JSON.stringify(checked));
+      const before = await trackCount();
+      if (checked.convertible_to_midi) {
+        const out = await call('convert', { action: 'audio_to_midi', address: audioClip, type: 'drums' });
+        // Live analyses in the background: the track appears after the call returns (the MCP tool waits for it)
+        assert(out.pending === true || out.new_tracks.length === 1, JSON.stringify(out).slice(0, 300));
+        for (let i = 0; i < 60 && (await trackCount()) === before; i += 1) await sleep(250);
+        assert((await trackCount()) === before + 1, 'one new track');
+        const created = await call('eval', { code: 'self._song.tracks[-1]._live_ptr' });
+        scratchPtrs.push(created);
+        const slotWithClip = await call('eval', { code: '[i for i, s in enumerate(self._song.tracks[-1].clip_slots) if s.has_clip]' });
+        assert(slotWithClip.length >= 1, 'the converted track holds a MIDI clip');
+        const notes = await call('get_notes', { address: `tracks/${before}/slots/${slotWithClip[0]}/clip` });
+        assert(notes.count >= 0, 'the converted clip is readable as MIDI');
+      }
+      const simpler = await call('convert', { action: 'simpler_track', address: audioClip });
+      for (const created of simpler.new_tracks) await trackPtr(created.address, 'tracks');      // registered first, so a failed check still cleans up
+      assert(simpler.new_tracks.length === 1 && simpler.new_tracks[0].device_classes.includes('OriginalSimpler'), JSON.stringify(simpler).slice(0, 300));
+      await failsCode(() => call('convert', { action: 'audio_to_midi', address: audioClip, type: 'vocals' }), 'INVALID_ARGUMENT');
+      await failsCode(() => call('convert', { action: 'audio_to_midi', address: `tracks/${T}/slots/${S}/clip`, type: 'drums' }), 'INVALID_ARGUMENT', 'MIDI clip');
+      await failsCode(() => call('convert', { action: 'pad_to_track', address: audioClip }), 'INVALID_ARGUMENT');
+    });
+  }
+
   console.log('\ndraw_automation');
   await check('linear ramp: readback and independent envelope values match', async () => {
     const lo = pA.min + 0.2 * (pA.max - pA.min);

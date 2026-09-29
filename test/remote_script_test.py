@@ -165,6 +165,48 @@ class FakeClip(object):
         self.envelopes.clear()
 
 
+class FakeWarpMarker(object):
+    """Like Live's constructor: WarpMarker(sample_time, beat_time), sample time first."""
+    def __init__(self, sample_time, beat_time):
+        self.sample_time, self.beat_time = sample_time, beat_time
+
+
+class FakeConversions(object):
+    def __init__(self):
+        self.calls, self.convertible, self.song_tracks, self.background = [], True, None, False
+
+    def is_convertible_to_midi(self, song, clip):
+        return self.convertible
+
+    def _spawn(self, song, name, midi_clip=False):
+        track = FakeTrack(name, with_clips=False)
+        track.clip_slots = [FakeSlot(PropClip("converted", 4.0))] if midi_clip else []
+        track.devices = [FakeDevice("Simpler")] if not midi_clip else []
+        for device in track.devices:
+            device.class_name = "OriginalSimpler"
+        song.tracks.append(track)
+
+    def audio_to_midi_clip(self, song, clip, kind):
+        self.calls.append(("audio_to_midi", kind))
+        if not self.background:                       # Live analyses in the background: the track may appear after the call returns
+            self._spawn(song, "MIDI from audio", midi_clip=True)
+
+    def create_midi_track_with_simpler(self, song, clip):
+        self.calls.append(("simpler",))
+        self._spawn(song, "Simpler track")
+
+    def create_drum_rack_from_audio_clip(self, song, clip):
+        self.calls.append(("drum_rack",))
+        self._spawn(song, "Drum rack track")
+
+    def create_midi_track_from_drum_pad(self, song, pad):
+        self.calls.append(("pad", pad.note))
+        self._spawn(song, "Pad track")
+
+    def sliced_simpler_to_drum_rack(self, song, simpler):
+        self.calls.append(("slice", simpler.name))
+
+
 class FakeSlot(object):
     def __init__(self, clip=None):
         self.clip = clip
@@ -181,6 +223,13 @@ class FakeSlot(object):
 
     def create_clip(self, length):
         self.clip, self.has_clip = PropClip("", length), True
+
+    def create_audio_clip(self, path):
+        clip = PropClip(os.path.basename(path), 4.0)
+        clip.is_audio_clip, clip.is_midi_clip, clip.warping, clip.file_path = True, False, True, path
+        clip.warp_markers = [FakeWarpMarker(0.0, 0.0), FakeWarpMarker(2.0, 4.0)]
+        self.clip, self.has_clip = clip, True
+        return clip
 
 
 class Typed(object):
@@ -517,6 +566,8 @@ def load_module():
     live.ClipSlot = types.SimpleNamespace(ClipSlotPlayingState=FakeEnum(stopped=0, started=1, recording=2))
     live.Device = types.SimpleNamespace(Device=FakeDevice, DeviceType=FakeEnum(undefined=0, instrument=1, audio_effect=2, midi_effect=4))
     live.Envelope = types.SimpleNamespace(EnvelopeEvent=FakeEnvelopeEvent)
+    live.Clip.WarpMarker = FakeWarpMarker
+    live.Conversions = FakeConversions()
     live.Chain = types.SimpleNamespace(Chain=FakeChain)
     live.DrumPad = types.SimpleNamespace(DrumPad=FakePad)
     live.DeviceParameter = types.SimpleNamespace(DeviceParameter=FakeParam)
@@ -1177,6 +1228,9 @@ class StructureTests(unittest.TestCase):
 
     # ---- get_capabilities
     def test_capabilities_probe_features_instead_of_trusting_the_variant(self):
+        conversions = sys.modules["Live"].Conversions
+        del sys.modules["Live"].Conversions                       # this Live build has no Conversions module
+        self.addCleanup(setattr, sys.modules["Live"], "Conversions", conversions)
         out = self.script._get_capabilities()
         self.assertEqual(out["live"]["variant"], "Beta")
         self.assertEqual(out["live"]["edition"], "unknown")
@@ -2872,6 +2926,162 @@ class BrowserTests(unittest.TestCase):
         self.assertEqual(self.song.undo_log, ["begin", "end"])
 
 
+# ---------------------------------------------------------------- audio clips, warp markers, conversions
+
+class AudioTests(unittest.TestCase):
+    def setUp(self):
+        self.script = make_script()
+        self.addCleanup(self.script._stop_server)
+        song = make_song()
+        song.tracks = [FakeTrack("Loops"), FakeTrack("Keys")]
+        for track in song.tracks:
+            track.clip_slots = [FakeSlot(), FakeSlot()]
+        song.tracks[1].clip_slots[0] = FakeSlot(PropClip("riff", 4.0))
+        self.script._song = self.song = song
+        self.conversions = sys.modules["Live"].Conversions
+        self.conversions.calls.clear()
+        self.conversions.convertible, self.conversions.background = True, False
+
+    def run_command(self, name, params):
+        return self.script._process_command({"type": name, "params": params})
+
+    def ok(self, command_name, /, **params):
+        response = self.run_command(command_name, params)
+        self.assertEqual(response["status"], "success", response)
+        return response["result"]
+
+    def code(self, command_name, /, **params):
+        response = self.run_command(command_name, params)
+        self.assertEqual(response["status"], "error", response)
+        return response["code"]
+
+    def audio(self):
+        return self.ok("create", kind="audio_clip", address="tracks/0/slots/0", path=os.path.abspath(__file__), name="Loop")
+
+    # ---- create audio_clip
+    def test_an_audio_clip_is_made_from_an_absolute_path(self):
+        made = self.audio()
+        self.assertEqual((made["address"], made["name"], made["kind"], made["length"], made["warping"]), ("tracks/0/slots/0/clip", "Loop", "audio_clip", 4.0, True))
+        self.assertEqual(made["file_path"], os.path.abspath(__file__))
+        self.assertTrue(self.song.tracks[0].clip_slots[0].clip.is_audio_clip)
+
+    def test_audio_clip_errors(self):
+        good = os.path.abspath(__file__)
+        for params, code in [({"address": "tracks/0/slots/0"}, "INVALID_ARGUMENT"), ({"address": "tracks/0/slots/0", "path": "loop.wav"}, "INVALID_ARGUMENT"),
+                             ({"address": "tracks/0/slots/0", "path": "/no/such/file.wav"}, "NOT_FOUND"), ({"address": "tracks/0/slots/0", "path": 5}, "INVALID_ARGUMENT"),
+                             ({"address": "tracks/1/slots/0", "path": good}, "INVALID_ARGUMENT"), ({"address": "tracks/0", "path": good}, "INVALID_ARGUMENT"),
+                             ({"path": good}, "INVALID_ARGUMENT")]:
+            self.assertEqual(self.code("create", kind="audio_clip", **params), code, params)
+        self.assertFalse(self.song.tracks[0].clip_slots[0].has_clip)
+
+    # ---- warp markers
+    def markers(self):
+        return [(m.beat_time, m.sample_time) for m in self.song.tracks[0].clip_slots[0].clip.warp_markers]
+
+    def test_warp_markers_are_a_read_only_property(self):
+        self.audio()
+        got = self.ok("get_properties", address="tracks/0/slots/0/clip", names=["warp_markers"])["properties"]["warp_markers"]
+        self.assertEqual(got, [{"beat_time": 0.0, "sample_time": 0.0}, {"beat_time": 4.0, "sample_time": 2.0}])
+        self.assertEqual(self.code("set_properties", address="tracks/0/slots/0/clip", properties={"warp_markers": []}), "INVALID_ARGUMENT")
+        midi = self.ok("get_properties", address="tracks/1/slots/0/clip")
+        self.assertIn("warp_markers", midi["unavailable"])
+
+    def test_a_new_marker_goes_where_it_changes_nothing(self):
+        self.audio()
+        clip = self.song.tracks[0].clip_slots[0].clip
+        clip.add_warp_marker = lambda marker: clip.warp_markers.append(marker)
+        out = self.ok("clip_action", address="tracks/0/slots/0/clip", action="add_warp_marker", beat_time=1.0)
+        self.assertEqual(self.markers()[-1], (1.0, 0.5))                                       # a quarter of the way: 0.5 s of 2 s
+        self.assertEqual(out["warp_markers"][-1], {"beat_time": 1.0, "sample_time": 0.5})
+        self.ok("clip_action", address="tracks/0/slots/0/clip", action="add_warp_marker", beat_time=3.0, sample_time=1.1)
+        self.assertEqual(self.markers()[-1], (3.0, 1.1))
+
+    def test_marker_edits_pass_arguments_to_live_and_validate_them(self):
+        self.audio()
+        clip = self.song.tracks[0].clip_slots[0].clip
+        calls = []
+        clip.move_warp_marker = lambda beat, distance: calls.append(("move", beat, distance))
+        clip.remove_warp_marker = lambda beat: calls.append(("remove", beat))
+        self.ok("clip_action", address="tracks/0/slots/0/clip", action="move_warp_marker", beat_time=4, distance=-0.25)
+        self.ok("clip_action", address="tracks/0/slots/0/clip", action="remove_warp_marker", beat_time=4)
+        self.assertEqual(calls, [("move", 4.0, -0.25), ("remove", 4.0)])
+        for action, params, code in [("move_warp_marker", {"beat_time": 4}, "INVALID_ARGUMENT"), ("move_warp_marker", {"distance": 1}, "INVALID_ARGUMENT"),
+                                     ("remove_warp_marker", {}, "INVALID_ARGUMENT"), ("add_warp_marker", {"beat_time": -1}, "INVALID_ARGUMENT"),
+                                     ("add_warp_marker", {"beat_time": 9}, "OUT_OF_RANGE"), ("add_warp_marker", {"beat_time": 1, "sample_time": "x"}, "INVALID_ARGUMENT")]:
+            self.assertEqual(self.code("clip_action", address="tracks/0/slots/0/clip", action=action, **params), code, (action, params))
+        self.assertEqual(self.code("clip_action", address="tracks/1/slots/0/clip", action="remove_warp_marker", beat_time=1), "INVALID_ARGUMENT")
+
+    def test_the_marker_constructor_takes_sample_time_first(self):
+        self.audio()
+        clip = self.song.tracks[0].clip_slots[0].clip
+        added = []
+        clip.add_warp_marker = added.append
+        self.ok("clip_action", address="tracks/0/slots/0/clip", action="add_warp_marker", beat_time=2.0, sample_time=0.75)
+        self.assertEqual((added[0].sample_time, added[0].beat_time), (0.75, 2.0))
+
+    # ---- convert
+    def test_check_reports_whether_a_clip_can_become_midi(self):
+        self.audio()
+        self.assertEqual(self.ok("convert", action="check", address="tracks/0/slots/0/clip")["convertible_to_midi"], True)
+        self.conversions.convertible = False
+        self.assertEqual(self.ok("convert", action="check", address="tracks/0/slots/0/clip")["convertible_to_midi"], False)
+
+    def test_audio_to_midi_returns_the_new_track(self):
+        self.audio()
+        out = self.ok("convert", action="audio_to_midi", address="tracks/0/slots/0/clip", type="drums")
+        self.assertEqual(self.conversions.calls, [("audio_to_midi", 2)])
+        self.assertEqual([(t["address"], t["name"]) for t in out["new_tracks"]], [("tracks/2", "MIDI from audio")])
+        self.assertEqual(out["new_tracks"][0]["clips"], [{"slot": 0, "name": "converted", "kind": "midi"}])
+        for name, expected in (("harmony", 0), ("melody", 1)):
+            self.ok("convert", action="audio_to_midi", address="tracks/0/slots/0/clip", type=name)
+            self.assertEqual(self.conversions.calls[-1], ("audio_to_midi", expected))
+
+    def test_a_background_conversion_reports_pending_instead_of_no_tracks(self):
+        self.audio()
+        self.conversions.background = True
+        try:
+            out = self.ok("convert", action="audio_to_midi", address="tracks/0/slots/0/clip", type="melody")
+        finally:
+            self.conversions.background = False
+        self.assertEqual((out["new_tracks"], out["pending"]), ([], True))
+        self.assertNotIn("pending", self.ok("convert", action="simpler_track", address="tracks/0/slots/0/clip"))
+
+    def test_simpler_and_drum_rack_conversions(self):
+        self.audio()
+        simpler = self.ok("convert", action="simpler_track", address="tracks/0/slots/0/clip")["new_tracks"][0]
+        self.assertEqual((simpler["devices"], simpler["device_classes"]), (["Simpler"], ["OriginalSimpler"]))
+        self.assertEqual(self.ok("convert", action="drum_rack_from_clip", address="tracks/0/slots/0/clip")["new_tracks"][0]["name"], "Drum rack track")
+
+    def test_conversion_errors(self):
+        self.audio()
+        clip = "tracks/0/slots/0/clip"
+        self.conversions.convertible = False
+        self.assertEqual(self.code("convert", action="audio_to_midi", address=clip, type="melody"), "UNAVAILABLE")
+        self.conversions.convertible = True
+        for params, code in [({"action": "explode", "address": clip}, "INVALID_ARGUMENT"), ({"action": "audio_to_midi", "address": clip}, "INVALID_ARGUMENT"),
+                             ({"action": "audio_to_midi", "address": clip, "type": "vocals"}, "INVALID_ARGUMENT"),
+                             ({"action": "audio_to_midi", "address": "tracks/1/slots/0/clip", "type": "melody"}, "INVALID_ARGUMENT"),
+                             ({"action": "simpler_track", "address": "tracks/0"}, "INVALID_ARGUMENT"), ({"action": "pad_to_track", "address": clip}, "INVALID_ARGUMENT"),
+                             ({"action": "slice_to_drum_rack", "address": clip}, "INVALID_ARGUMENT"), ({"action": "check"}, "INVALID_ARGUMENT")]:
+            self.assertEqual(self.code("convert", **params), code, params)
+        self.assertEqual(self.conversions.calls, [])
+        self.assertEqual(len(self.song.tracks), 2)
+
+    def test_a_missing_conversions_api_is_reported(self):
+        self.audio()
+        live = sys.modules["Live"]
+        saved = live.Conversions
+        del live.Conversions
+        self.addCleanup(setattr, live, "Conversions", saved)
+        self.assertEqual(self.code("convert", action="check", address="tracks/0/slots/0/clip"), "UNAVAILABLE")
+
+    def test_a_conversion_is_one_undo_step(self):
+        self.audio()
+        self.song.undo_log.clear()
+        self.ok("convert", action="simpler_track", address="tracks/0/slots/0/clip")
+        self.assertEqual(self.song.undo_log, ["begin", "end"])
+
+
 # ---------------------------------------------------------------- routing and mixer state
 
 class FakeRoutingType(object):
@@ -3050,8 +3260,8 @@ class RegistryTests(unittest.TestCase):
         self.addCleanup(script._stop_server)
         script._song = make_song()
         listing = script._list_properties(kind="clip")
-        self.assertIn("warp_markers", listing["not_exposed"])    # a property we do not expose yet
-        self.assertEqual(listing["not_exposed"]["warp_markers"]["writable"], False)
+        self.assertIn("automation_envelopes", listing["not_exposed"])    # a property we do not expose yet
+        self.assertEqual(listing["not_exposed"]["automation_envelopes"]["writable"], False)
         self.assertNotIn("groove", listing["not_exposed"])       # exposed as a reference
         self.assertNotIn("name", listing["not_exposed"])          # exposed properties are not repeated
         for kind in self.specs:

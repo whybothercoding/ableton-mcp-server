@@ -3,10 +3,12 @@
 Everything returns an address the caller can reuse. delete is destructive and demands an `expect` guard, because indices
 shift after every earlier create/delete and a stale index is exactly how the wrong object gets removed.
 """
+import os
+
 from .helpers import _is_number
 from .registry import BridgeError, command
 
-CREATE_KINDS = ("audio_track", "midi_track", "return_track", "scene", "midi_clip", "cue_point")
+CREATE_KINDS = ("audio_track", "midi_track", "return_track", "scene", "midi_clip", "audio_clip", "cue_point")
 
 
 class LifecycleMixin(object):
@@ -37,6 +39,8 @@ class LifecycleMixin(object):
             raise BridgeError("cue points have no color", "INVALID_ARGUMENT")
         if kind == "midi_clip":
             created, address = self._create_midi_clip(params)
+        elif kind == "audio_clip":
+            created, address = self._create_audio_clip(params)
         elif kind == "cue_point":
             created, address = self._create_cue_point(params)
         elif kind == "return_track":
@@ -58,11 +62,30 @@ class LifecycleMixin(object):
             created.color = color
         # Live snaps colors to its palette, so report the color it actually applied
         result = {"address": address, "name": created.name, "kind": kind, "color": getattr(created, "color", None)}
-        if kind == "midi_clip":
+        if kind in ("midi_clip", "audio_clip"):
             result["length"] = created.length
+        if kind == "audio_clip":
+            result.update({"file_path": created.file_path, "warping": created.warping})
         if kind == "cue_point":
             result["time"] = created.time
         return result
+
+    def _create_audio_clip(self, params):
+        """A clip in the empty slot at `address` that plays the audio file at `path` (an absolute path Live can read)."""
+        slot_kind, slot, canonical = self._resolve(params.get("address"))
+        if slot_kind != "slot":
+            raise BridgeError("audio_clip needs address: the clip slot to fill (tracks/N/slots/M) on an audio track", "INVALID_ARGUMENT")
+        if slot.has_clip:
+            raise BridgeError("'{0}' already holds a clip: pick an empty slot or delete the clip first".format(canonical), "INVALID_ARGUMENT")
+        path = params.get("path")
+        if not isinstance(path, str) or not path:
+            raise BridgeError("audio_clip needs path: the absolute path of an audio file", "INVALID_ARGUMENT")
+        if not os.path.isabs(path):
+            raise BridgeError("path must be absolute, got '{0}'".format(path), "INVALID_ARGUMENT")
+        if not os.path.isfile(path):
+            raise BridgeError("No file at '{0}'".format(path), "NOT_FOUND")
+        clip = slot.create_audio_clip(path)
+        return clip, canonical + "/clip"
 
     def _at_playhead(self, time, action):
         """Run `action` with the playhead at `time` (cue points can only be set or removed at the playhead), then put it back."""
