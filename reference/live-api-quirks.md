@@ -29,3 +29,8 @@ Behaviours found against a real Live, not in any documentation. The README recor
 - Boost setters are strict (int properties reject floats). Non-applicable attributes raise `RuntimeError`, not `AttributeError`, so `hasattr` can raise: use try/except (`_safe_attr`).
 - The master track has input routing. `Track.insert_device` accepts native device names, and a chain holds one instrument.
 - Rack variations: `store_variation` does not select the new variation; `delete_selected_variation` and `recall_selected_variation` silently do nothing when none is selected.
+
+## Recording
+- `song.record_mode = True` (arrangement recording) starts the transport by itself, even when the caller does not ask for playback, and records every playing Session clip onto its own track's timeline, armed or not; the clips appear when recording stops. Sets that show Session clips as playing while the transport is stopped are affected too.
+- `song.trigger_session_record(length)` records into the armed track's slot of the SELECTED scene (not slot 0), begins at the next launch-quantization boundary (`session_record` reads false until then), rounds the clip up to that quantization (two beats came out as one 4-beat bar), and starts playing the new clip when it stops.
+- Recording flags (`record_mode`, `session_record`, overdub, punch, automation record) take effect a moment after the call that set them: a read-back in the same call shows the old value.

@@ -3854,6 +3854,56 @@ class RecordingTests(unittest.TestCase):
                              ({"action": "automation"}, "INVALID_ARGUMENT"), ({"action": "rewind"}, "INVALID_ARGUMENT")]:
             self.assertEqual(self.code(**params), code, params)
 
+    def test_responses_show_what_was_just_set_although_live_applies_flags_a_moment_later(self):
+        flags = ("record_mode", "arrangement_overdub", "punch_in", "punch_out", "session_automation_record", "session_record")
+
+        class Lagging(types.SimpleNamespace):
+            def __setattr__(self, name, value):
+                if name in flags and getattr(self, "lag", False):
+                    return                                    # Live applies it after the call returns: a read-back in the same call is stale
+                types.SimpleNamespace.__setattr__(self, name, value)
+
+        song = Lagging(**vars(self.song))
+        song.lag = True
+        self.script._song = song
+        song.tracks[0].arm = True
+        self.assertEqual(self.ok(action="arrangement_start", play=False)["record_mode"], True)
+        self.assertFalse(song.record_mode)                    # the song itself still shows the old value
+        song.__dict__["record_mode"] = True
+        self.assertEqual(self.ok(action="arrangement_stop")["record_mode"], False)
+        self.assertEqual(self.ok(action="overdub", enabled=True)["arrangement_overdub"], True)
+        both = self.ok(action="punch", punch_in=True, punch_out=False)
+        self.assertEqual((both["punch_in"], both["punch_out"]), (True, False))
+        self.assertEqual(self.ok(action="automation", enabled=True)["session_automation_record"], True)
+        song.__dict__["session_record"] = True
+        self.assertEqual(self.ok(action="session_stop")["session_record"], False)
+
+    def test_session_start_explains_that_recording_begins_at_the_next_quantization_boundary(self):
+        self.song.tracks[0].arm = True
+        note = self.ok(action="session_start", record_length=2)["note"]
+        self.assertIn("launch-quantization", note)
+        self.assertIn("selected scene", note)
+
+    def test_arrangement_start_warns_when_playing_session_clips_would_be_recorded_onto_their_tracks(self):
+        self.song.tracks[0].arm = True
+        quiet = self.ok(action="arrangement_start", play=False)
+        self.assertNotIn("warning", quiet)
+        self.ok(action="arrangement_stop")
+        slot = types.SimpleNamespace(has_clip=True, clip=types.SimpleNamespace(is_playing=True))
+        self.song.tracks[1].clip_slots = [slot]
+        for play in (True, False):                              # Live starts the transport whatever `play` says, so both warn
+            warned = self.ok(action="arrangement_start", play=play)
+            self.assertIn("tracks/1", warned["warning"], play)
+            self.assertIn("armed or not", warned["warning"])
+            self.ok(action="arrangement_stop")
+
+    def test_arrangement_start_says_the_transport_starts_even_when_play_is_false(self):
+        self.song.tracks[0].arm = True
+        started = self.ok(action="arrangement_start", play=False)
+        self.assertEqual(started["is_playing"], True)
+        self.assertIn("starts the transport", started["note"])
+        self.assertEqual(self.song.calls, [])                   # the command itself does not start it: Live does
+
     def test_bad_start_arguments(self):
         self.song.tracks[0].arm = True
         for params in ({"from_time": -1}, {"from_time": "start"}):

@@ -2254,7 +2254,7 @@ try {
   });
 
   console.log('\nRecording (opt-in: MCP_TEST_RECORD=1)');
-  await check('record: a scratch MIDI track records two beats into a session slot, the flags round-trip and everything is put back', async () => {
+  await check('record: a scratch MIDI track records a short clip into a session slot, the flags round-trip and everything is put back', async () => {
     if (process.env.MCP_TEST_RECORD !== '1') skip('opt-in: run with MCP_TEST_RECORD=1 (it records two beats into a scratch MIDI track)', 'optin');
     const armed = await call('eval', { code: '[t.name for t in self._song.tracks if t.can_be_armed and t.arm]' });
     if (armed.length) skip(`already armed: ${armed.join(', ')}. Arming the scratch track could disarm them, so this check leaves armed tracks alone`, 'state');
@@ -2265,6 +2265,8 @@ try {
     });
     const before = await state();
     assert(!before.record_mode && !before.session_record, 'recording is already on: refusing to start another');
+    const timelineClips = () => call('eval', { code: "sum(len(t.arrangement_clips) for t in self._song.tracks if hasattr(t, 'arrangement_clips'))" });
+    const clipsBefore = await timelineClips();
 
     // The script keeps record switched off unless ~/.ableton-mcp-server/allow_record exists: prove that, then open it for this check only.
     const marker = path.join(os.homedir(), '.ableton-mcp-server', 'allow_record');
@@ -2297,14 +2299,16 @@ try {
     await rejectsCode(() => call('record', { action: 'overdub' }), 'INVALID_ARGUMENT');
     await rejectsCode(() => call('record', { action: 'punch' }), 'INVALID_ARGUMENT');
 
-    // session recording: two beats into the scratch track's first slot, then Live stops it by itself
+    // session recording: Live records into the slot of the SELECTED scene (not necessarily slot 0), rounds the length up to its
+    // launch quantization (two beats came out as one 4-beat bar) and starts playing the new clip when it stops recording
     const started = await call('record', { action: 'session_start', record_length: 2 });
     assert(JSON.stringify(started.recording_into) === JSON.stringify([tr]), JSON.stringify(started));
-    assert(await waitFor(async () => (await call('eval', { code: `self._song.tracks[${scratch}].clip_slots[0].has_clip` })) === true, 10000), 'a clip should appear in the scratch track');
+    const filled = () => call('eval', { code: `[j for j, s in enumerate(self._song.tracks[${scratch}].clip_slots) if s.has_clip]` });
+    assert(await waitFor(async () => (await filled()).length === 1, 10000), 'exactly one clip should appear in the scratch track');
     assert(await waitFor(async () => (await call('eval', { code: 'bool(self._song.session_record)' })) === false, 10000), 'recording two beats should end by itself');
-    const clip = await call('get_properties', { address: `${tr}/slots/0/clip`, names: ['length', 'is_midi_clip'] });
-    near(clip.properties.length, 2, 0.05, 'the recorded clip is two beats long');
-    assert(clip.properties.is_midi_clip === true, 'the recording is a MIDI clip');
+    const [slot] = await filled();
+    const clip = await call('get_properties', { address: `${tr}/slots/${slot}/clip`, names: ['length', 'is_midi_clip'] });
+    assert(clip.properties.is_midi_clip === true && clip.properties.length >= 2 && clip.properties.length <= 8, `the recording should be a short MIDI clip: ${JSON.stringify(clip.properties)}`);
     await call('launch', { address: tr, action: 'stop', quantized: false });
 
     // the flags: each one changes and reads back, and the record command restores nothing behind our back
@@ -2318,11 +2322,10 @@ try {
     await call('record', { action: 'automation', enabled: before.automation });
     await call('record', { action: 'punch', punch_in: before.punch_in, punch_out: before.punch_out });
 
-    // arrangement recording is only switched on and off here, with the transport not running: nothing is written to the timeline
-    const arr = await call('record', { action: 'arrangement_start', play: false });
-    assert(arr.record_mode === true && JSON.stringify(arr.recording_into) === JSON.stringify([tr]), JSON.stringify(arr));
-    await rejectsCode(() => call('record', { action: 'arrangement_start', play: false }), 'UNAVAILABLE');      // already on
-    assert((await call('record', { action: 'arrangement_stop' })).record_mode === false, 'arrangement recording should switch off');
+    // Arrangement recording is deliberately NOT switched on here: Live starts the transport the moment it is on (even with play: false) and
+    // records every playing Session clip onto its own track's timeline, armed or not. An earlier version of this check wrote clips onto the
+    // user's tracks. Its behaviour is covered offline; here we only prove that nothing above wrote to any timeline.
+    assert((await timelineClips()) === clipsBefore, 'the record checks must not write anything to a timeline');
     await call('set_properties', { address: tr, properties: { arm: false } });
 
     if (!before.playing) await call('transport', { action: 'stop' });
