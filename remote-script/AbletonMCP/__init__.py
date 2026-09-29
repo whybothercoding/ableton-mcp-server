@@ -9,6 +9,7 @@ from .registry import _COMMANDS, BridgeError, _error_code, _error_response, comm
 from .helpers import _as_index, _is_number, _safe_attr
 from .curves import CURVES, MAX_AUTOMATION_STEPS, _EPS, _build_steps, _ease, _normalize_points
 from .addressing import AddressingMixin
+from .device_addressing import DeviceAddressingMixin
 from .properties import PropertiesMixin
 from .structure import StructureMixin
 from .lifecycle import LifecycleMixin
@@ -20,6 +21,7 @@ from .session import SessionMixin
 from .tracks import TracksMixin
 from .clips import ClipsMixin
 from .devices import DevicesMixin
+from .device_actions import DeviceActionsMixin
 from .automation import AutomationMixin
 from .browser import BrowserMixin
 
@@ -42,7 +44,7 @@ def create_instance(c_instance):
     return AbletonMCP(c_instance)
 
 
-class AbletonMCP(ServerMixin, AddressingMixin, PropertiesMixin, StructureMixin, LifecycleMixin, ClipActionsMixin, NotesMixin, IntrospectMixin, SessionMixin, TracksMixin, ClipsMixin, DevicesMixin, AutomationMixin, BrowserMixin,
+class AbletonMCP(ServerMixin, AddressingMixin, DeviceAddressingMixin, PropertiesMixin, StructureMixin, LifecycleMixin, ClipActionsMixin, NotesMixin, IntrospectMixin, SessionMixin, TracksMixin, ClipsMixin, DevicesMixin, DeviceActionsMixin, AutomationMixin, BrowserMixin,
                  ControlSurface):
     """AbletonMCP Remote Script for Ableton Live"""
 

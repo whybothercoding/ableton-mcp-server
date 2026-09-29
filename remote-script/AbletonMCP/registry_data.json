@@ -48,6 +48,66 @@
     }
    }
   },
+  "Live.Chain.Chain": {
+   "properties": {
+    "canonical_parent": {
+     "get": "Device.Device",
+     "set": null
+    },
+    "color": {
+     "get": "int",
+     "set": "int"
+    },
+    "color_index": {
+     "get": "object",
+     "set": "object"
+    },
+    "devices": {
+     "get": "Base.Vector",
+     "set": null
+    },
+    "has_audio_input": {
+     "get": "bool",
+     "set": null
+    },
+    "has_audio_output": {
+     "get": "bool",
+     "set": null
+    },
+    "has_midi_input": {
+     "get": "bool",
+     "set": null
+    },
+    "has_midi_output": {
+     "get": "bool",
+     "set": null
+    },
+    "is_auto_colored": {
+     "get": "bool",
+     "set": "bool"
+    },
+    "mixer_device": {
+     "get": "LomObject.LomObject",
+     "set": null
+    },
+    "mute": {
+     "get": "bool",
+     "set": "bool"
+    },
+    "muted_via_solo": {
+     "get": "bool",
+     "set": null
+    },
+    "name": {
+     "get": "str",
+     "set": "object"
+    },
+    "solo": {
+     "get": "bool",
+     "set": "bool"
+    }
+   }
+  },
   "Live.Clip.Clip": {
    "properties": {
     "automation_envelopes": {
@@ -356,6 +416,94 @@
     }
    }
   },
+  "Live.DeviceParameter.DeviceParameter": {
+   "properties": {
+    "automation_state": {
+     "get": "int",
+     "set": null
+    },
+    "canonical_parent": {
+     "get": "LomObject.LomObject",
+     "set": null
+    },
+    "default_value": {
+     "get": "float",
+     "set": null
+    },
+    "display_value": {
+     "get": "float",
+     "set": "float"
+    },
+    "is_enabled": {
+     "get": "bool",
+     "set": null
+    },
+    "is_quantized": {
+     "get": "bool",
+     "set": null
+    },
+    "max": {
+     "get": "float",
+     "set": null
+    },
+    "min": {
+     "get": "float",
+     "set": null
+    },
+    "name": {
+     "get": "str",
+     "set": null
+    },
+    "original_name": {
+     "get": "str",
+     "set": null
+    },
+    "short_value_items": {
+     "get": "Base.StringVector",
+     "set": null
+    },
+    "state": {
+     "get": "int",
+     "set": null
+    },
+    "value": {
+     "get": "float",
+     "set": "float"
+    },
+    "value_items": {
+     "get": "Base.StringVector",
+     "set": null
+    }
+   }
+  },
+  "Live.DrumPad.DrumPad": {
+   "properties": {
+    "canonical_parent": {
+     "get": "LomObject.LomObject",
+     "set": null
+    },
+    "chains": {
+     "get": "Base.Vector",
+     "set": null
+    },
+    "mute": {
+     "get": "bool",
+     "set": "bool"
+    },
+    "name": {
+     "get": "str",
+     "set": null
+    },
+    "note": {
+     "get": "int",
+     "set": null
+    },
+    "solo": {
+     "get": "bool",
+     "set": "bool"
+    }
+   }
+  },
   "Live.Groove.Groove": {
    "properties": {
     "base": {
@@ -385,6 +533,118 @@
     "velocity_amount": {
      "get": "float",
      "set": "float"
+    }
+   }
+  },
+  "Live.RackDevice.RackDevice": {
+   "properties": {
+    "can_compare_ab": {
+     "get": "bool",
+     "set": null
+    },
+    "can_have_chains": {
+     "get": "bool",
+     "set": null
+    },
+    "can_have_drum_pads": {
+     "get": "bool",
+     "set": null
+    },
+    "can_show_chains": {
+     "get": "bool",
+     "set": null
+    },
+    "canonical_parent": {
+     "get": "LomObject.LomObject",
+     "set": null
+    },
+    "chain_selector": {
+     "get": "DeviceParameter.DeviceParameter",
+     "set": null
+    },
+    "chains": {
+     "get": "Base.Vector",
+     "set": null
+    },
+    "class_display_name": {
+     "get": "str",
+     "set": null
+    },
+    "class_name": {
+     "get": "str",
+     "set": null
+    },
+    "drum_pads": {
+     "get": "Base.Vector",
+     "set": null
+    },
+    "has_drum_pads": {
+     "get": "bool",
+     "set": null
+    },
+    "has_macro_mappings": {
+     "get": "bool",
+     "set": null
+    },
+    "is_active": {
+     "get": "bool",
+     "set": null
+    },
+    "is_showing_chains": {
+     "get": "bool",
+     "set": "bool"
+    },
+    "is_using_compare_preset_b": {
+     "get": "bool",
+     "set": "bool"
+    },
+    "latency_in_ms": {
+     "get": "float",
+     "set": null
+    },
+    "latency_in_samples": {
+     "get": "int",
+     "set": null
+    },
+    "macros_mapped": {
+     "get": "tuple",
+     "set": null
+    },
+    "name": {
+     "get": "str",
+     "set": "object"
+    },
+    "parameters": {
+     "get": "Device.ATimeableValueVector",
+     "set": null
+    },
+    "return_chains": {
+     "get": "Base.Vector",
+     "set": null
+    },
+    "selected_variation_index": {
+     "get": "int",
+     "set": "int"
+    },
+    "type": {
+     "get": "Device.DeviceType",
+     "set": null
+    },
+    "variation_count": {
+     "get": "int",
+     "set": null
+    },
+    "view": {
+     "get": "LomObject.LomObject",
+     "set": null
+    },
+    "visible_drum_pads": {
+     "get": "Base.Vector",
+     "set": null
+    },
+    "visible_macro_count": {
+     "get": "int",
+     "set": null
     }
    }
   },
@@ -963,6 +1223,12 @@
    "recording": 2,
    "started": 1,
    "stopped": 0
+  },
+  "Live.Device.DeviceType": {
+   "audio_effect": 2,
+   "instrument": 1,
+   "midi_effect": 4,
+   "undefined": 0
   },
   "Live.Groove.Base": {
    "count": 6,

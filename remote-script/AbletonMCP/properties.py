@@ -12,8 +12,10 @@ from .helpers import _is_number
 from .registry import BridgeError, command
 
 
-def _spec(type_, rw=True, enum=None, doc="", lo=None, hi=None, get=None, set=None, ref=None):
-    return {"type": type_, "rw": rw, "enum": enum, "doc": doc, "min": lo, "max": hi, "get": get, "set": set, "ref": ref}
+def _spec(type_, rw=True, enum=None, doc="", lo=None, hi=None, get=None, set=None, ref=None, coerce=None):
+    """coerce(obj, value) replaces the standard value checks when a property's valid values depend on the object itself."""
+    return {"type": type_, "rw": rw, "enum": enum, "doc": doc, "min": lo, "max": hi, "get": get, "set": set, "ref": ref,
+            "coerce": coerce}
 
 
 def _volume_get(track):
@@ -30,6 +32,57 @@ def _pan_get(track):
 
 def _pan_set(track, value):
     track.mixer_device.panning.value = value
+
+
+def _device_on_parameter(device):
+    parameters = list(device.parameters)
+    for parameter in parameters:
+        if parameter.name == "Device On":
+            return parameter
+    raise RuntimeError("'{0}' has no on/off switch".format(device.name))
+
+
+def _device_on_get(device):
+    return _device_on_parameter(device).value > 0.5
+
+
+def _device_on_set(device, value):
+    _device_on_parameter(device).value = 1.0 if value else 0.0
+
+
+def _collapsed_get(device):
+    return device.view.is_collapsed
+
+
+def _collapsed_set(device, value):
+    device.view.is_collapsed = value
+
+
+def _display_get(parameter):
+    return parameter.str_for_value(parameter.value)
+
+
+def _value_items_get(parameter):
+    return list(parameter.value_items)
+
+
+def _parameter_value(parameter, value):
+    """A parameter's value: a number inside its range, or for a quantized parameter the label Live shows for it."""
+    if not parameter.is_enabled:
+        raise BridgeError("Parameter '{0}' is not enabled (macro-mapped or switched off by another parameter)".format(parameter.name), "UNAVAILABLE")
+    if isinstance(value, str):
+        if not parameter.is_quantized:
+            raise BridgeError("value must be a number: '{0}' is not a quantized parameter".format(parameter.name), "TYPE_ERROR")
+        items = list(parameter.value_items)
+        if value not in items:
+            raise BridgeError("value must be one of: {0}".format(", ".join(items)), "INVALID_ARGUMENT")
+        return float(parameter.min + items.index(value))
+    if not _is_number(value):
+        raise BridgeError("value must be a number" + (" or a label" if parameter.is_quantized else ""), "TYPE_ERROR")
+    value = float(value)
+    if value < parameter.min or value > parameter.max:
+        raise BridgeError("value {0:g} is outside this parameter's range {1:g} to {2:g}".format(value, parameter.min, parameter.max), "OUT_OF_RANGE")
+    return value
 
 
 RO = False
@@ -194,6 +247,64 @@ PROPERTY_SPECS = {
         "is_take_lane_clip": _spec("bool", RO),
         "will_record_on_start": _spec("bool", RO),
     },
+    "device": {
+        "name": _spec("str"),
+        "class_name": _spec("str", RO),
+        "class_display_name": _spec("str", RO),
+        "type": _spec("enum", RO, enum="Live.Device.DeviceType"),
+        "is_active": _spec("bool", RO, doc="False when the device or something above it is switched off"),
+        "on": _spec("bool", doc="The device's own on/off switch (its 'Device On' parameter)", get=_device_on_get, set=_device_on_set),
+        "collapsed": _spec("bool", doc="Device shown collapsed in the device chain", get=_collapsed_get, set=_collapsed_set),
+        "can_have_chains": _spec("bool", RO, doc="True for racks"),
+        "can_have_drum_pads": _spec("bool", RO, doc="True for Drum Racks"),
+        "can_compare_ab": _spec("bool", RO),
+        "is_using_compare_preset_b": _spec("bool", doc="A/B compare: the B preset is loaded"),
+        "latency_in_ms": _spec("float", RO),
+        "latency_in_samples": _spec("int", RO),
+        "can_show_chains": _spec("bool", RO, doc="Racks only"),
+        "is_showing_chains": _spec("bool", doc="Racks only: chains shown as Session tracks"),
+        "has_drum_pads": _spec("bool", RO, doc="Drum Racks only"),
+        "has_macro_mappings": _spec("bool", RO, doc="Racks only"),
+        "macros_mapped": _spec("list", RO, doc="Racks only: one flag per macro"),
+        "visible_macro_count": _spec("int", RO, doc="Racks only"),
+        "variation_count": _spec("int", RO, doc="Racks only: stored macro variations"),
+        "selected_variation_index": _spec("int", doc="Racks only: the variation recall_variation would recall"),
+    },
+    "chain": {
+        "name": _spec("str"),
+        "color": _spec("int"),
+        "color_index": _spec("int"),
+        "is_auto_colored": _spec("bool"),
+        "mute": _spec("bool"),
+        "solo": _spec("bool"),
+        "muted_via_solo": _spec("bool", RO),
+        "volume": _spec("float", doc="Chain mixer volume (device value, 0..1, 0.85 = 0 dB)", lo=0.0, hi=1.0, get=_volume_get, set=_volume_set),
+        "panning": _spec("float", doc="Chain mixer pan, -1..1", lo=-1.0, hi=1.0, get=_pan_get, set=_pan_set),
+        "has_audio_input": _spec("bool", RO),
+        "has_audio_output": _spec("bool", RO),
+        "has_midi_input": _spec("bool", RO),
+        "has_midi_output": _spec("bool", RO),
+    },
+    "pad": {
+        "name": _spec("str", RO),
+        "note": _spec("int", RO),
+        "mute": _spec("bool"),
+        "solo": _spec("bool"),
+    },
+    "parameter": {
+        "value": _spec("float", doc="Raw value within min..max; a quantized parameter also takes its label (e.g. 'Low-pass')", coerce=_parameter_value),
+        "name": _spec("str", RO),
+        "original_name": _spec("str", RO),
+        "min": _spec("float", RO),
+        "max": _spec("float", RO),
+        "default_value": _spec("float", RO, doc="Not available for quantized parameters"),
+        "is_quantized": _spec("bool", RO),
+        "is_enabled": _spec("bool", RO, doc="False when macro-mapped or disabled by another parameter"),
+        "display": _spec("str", RO, doc="The value as Live shows it ('14.2 kHz')", get=_display_get),
+        "value_items": _spec("list", RO, doc="Labels of a quantized parameter", get=_value_items_get),
+        "automation_state": _spec("int", RO, doc="0 none, 1 automation playing, 2 overridden"),
+        "state": _spec("int", RO),
+    },
     "cue": {
         "name": _spec("str"),
         "time": _spec("float", RO, doc="Position in beats; create a cue point with `create` at a time"),
@@ -327,8 +438,12 @@ class PropertiesMixin(object):
                 raise BridgeError("Unknown {0} property '{1}'. Valid: {2}".format(kind, name, sorted(specs)), "NOT_FOUND")
             if not specs[name]["rw"]:
                 raise BridgeError("{0} is read-only".format(name), "INVALID_ARGUMENT")
-            pending[name] = (self._resolve_ref(name, specs[name], value) if specs[name]["type"] == "ref"
-                             else _coerce(name, specs[name], value))
+            if specs[name]["type"] == "ref":
+                pending[name] = self._resolve_ref(name, specs[name], value)
+            elif specs[name]["coerce"]:
+                pending[name] = specs[name]["coerce"](obj, value)
+            else:
+                pending[name] = _coerce(name, specs[name], value)
         before = dict((name, self._value(obj, name, specs[name])) for name in pending)
         # Apply in passes: Live enforces ordering between properties (e.g. loop_end before loop_start), so retry the
         # writes that raise until a pass makes no progress. On failure, restore what was already written so the call

@@ -123,13 +123,13 @@ Most tools take an **address** (`song`, `tracks/N`, `tracks/N/slots/M/clip`, `gr
 
 | Area | Tools |
 | --- | --- |
-| Discover | `get_health`, `get_capabilities`, `describe_set`, `list_properties`, `get_track_detail`, `get_device_parameters`, `get_browser_tree`, `get_browser_items`, `get_audio_clip_path`, `analyze_audio_clip` |
+| Discover | `get_health`, `get_capabilities`, `describe_set`, `list_properties`, `get_track_detail`, `get_device`, `get_browser_tree`, `get_browser_items`, `get_audio_clip_path`, `analyze_audio_clip` |
 | Read / change any property | `get_properties`, `set_properties` |
 | Structure | `create`, `duplicate`, `delete` (needs `expect`) |
 | Play | `transport`, `launch`, `history` (undo/redo) |
 | Clips and notes | `clip_action`, `get_notes`, `write_notes`, `edit_notes`, `bulk_edit_clips` |
 | Compose | `generate_notes`, `transform_notes` |
-| Devices and sound | `set_device_parameter`, `bulk_set_device_parameters`, `load_browser_item`, `draw_automation`, `clear_automation`, `ramp_parameter`, `cancel_ramps` |
+| Devices and sound | `device_action`, `load_browser_item`, `draw_automation`, `clear_automation`, `ramp_parameter`, `cancel_ramps` (parameters and device properties are written with `set_properties`) |
 | Development | `eval_python` (gated) |
 
 Earlier versions had one tool per property or action. These were folded into the verbs above (their bridge commands still exist, only the MCP tools were retired to keep the tool list small):
@@ -143,11 +143,13 @@ Earlier versions had one tool per property or action. These were folded into the
 | `fire_clip`, `stop_clip`, `fire_scene`, `stop_all_clips` | `launch` |
 | `start_playback`, `stop_playback` | `transport` |
 | `get_clip_notes`, `edit_clip_notes` | `get_notes`, `write_notes`, `edit_notes` |
+| `get_device_parameters` | `get_device` (parameters with addresses, racks with their chains and pads) |
+| `set_device_parameter`, `bulk_set_device_parameters` | `set_properties` on a parameter address (`.../parameters/5`), `items` for many at once |
 
 #### Notes on a few tools
 - `get_track_detail`: clip slots, arrangement clips and devices of a track. `get_audio_clip_path`: an audio clip's source path and warp metadata. `analyze_audio_clip`: codec/format metadata, integrated LUFS, sample and true peak (dBTP), RMS and an approximate six-band frequency profile of the clip's source file. `get_browser_items`: browser items at a category path, paged with `limit` (default 200) and `offset` (`total` and `truncated` in the result).
 - `load_browser_item`: load an instrument, effect or sample onto a track by URI (any URI returned by `get_browser_items`). Samples load into the track's selected clip slot, replacing what is there.
-- `bulk_edit_clips`: batch clip creation and renaming in serial order on Live's main thread. `bulk_set_device_parameters`: update many device parameters in one round trip.
+- `bulk_edit_clips`: batch clip creation and renaming in serial order on Live's main thread.
 
 #### Automation & Ramps
 - `draw_automation`: Draw a Session-clip automation envelope for a device or mixer parameter from `{time, value}` points (times in beats from clip start, values in the parameter's own units). Curves: `linear`, `step`, `smooth`, `ease_in`, `ease_out`, per call or per point. Ramps are drawn as fine staircases (`resolution` beats per step) that start exactly on the first value and end exactly on the last. `mode: "replace"` (default) rebuilds the parameter's envelope, `"merge"` rewrites only the drawn range; `hold` (default) fills the clip edges. The result includes a readback of Live's stored values.
@@ -185,6 +187,15 @@ The music logic is pure TypeScript in `src/music` (no Live needed to test it); t
 - `transform_notes` (`address`, `transform`, `params`, optional selection by range `from_time`/`time_span`/`from_pitch`/`pitch_span` or by `ids`): **in-place** transforms keep note ids and per-note settings (transpose by semitones or scale degrees, fit_to_scale, invert, reverse, stretch, shift, humanize, swing, quantize, legato, gate, velocity_shape, strum, recombine); **rebuilds** replace the selected range in one atomic step (arpeggiate, chop, trill); **additions** keep the notes and add more (stack, grace_notes, repeat). A transform that would push notes outside 0-127 or before beat 0 refuses and changes nothing.
 - The full parameter list of every generator and transform is in the tool descriptions. `npm run test:scenarios` composes, transforms, undoes and cleans up on a scratch track through MCP only.
 
+#### Devices, racks and parameters
+Devices, rack chains, drum pads and parameters have addresses under a track (`tracks/N`, `returns/N` or `master`):
+
+- `tracks/3/devices/0` (or `devices/name:EQ Eight`), then `/parameters/5` (or `parameters/name:Frequency`), `/chains/1/devices/2` (racks nest as deep as they go), `/return_chains/0`, `/drum_pads/36` (by MIDI note) and `/drum_pads/36/chains/0/devices/0`. Mixers are parameters too: `tracks/3/mixer/volume`, `mixer/panning`, `mixer/sends/0`, and `chains/1/mixer/volume`.
+- `get_device` reads a device with every parameter (`index`, `address`, `value`, `min`, `max`, `display`, `default`, labels for quantized ones) and, for racks, chains, return chains, occupied drum pads and macro state.
+- `set_properties` writes a **parameter's `value`**, checked against that parameter's own range (`OUT_OF_RANGE`); a quantized parameter also takes its label (`"value": "Low-pass"`); disabled or macro-mapped parameters refuse (`UNAVAILABLE`); `items` writes many parameters (or anything else) in one call. Devices have `name`, `on` (the Device On switch), `collapsed`, `is_using_compare_preset_b` and rack state; chains have `name`, `color`, `mute`, `solo`, `volume`, `panning`; pads `mute` and `solo` (Live ignores those on an empty pad, and the result shows what Live holds).
+- `device_action`: `insert` (`name` as in Live's browser, `position`; Live's own refusals such as "Insert audio effects after instruments" come through), `delete` (needs `expect: {"name"}`), `duplicate`, `move` (to another track or chain; returns where it landed), `save_ab`, and rack actions `insert_chain`, `add_macro`, `remove_macro`, `randomize_macros`, `store_variation`, `recall_variation` and `delete_variation` (by `index`: Live silently does nothing when no variation is selected, so the tool refuses instead), `copy_pad`, `clear_pad` (needs `expect`). Each call is one undo step. A device chain holds one instrument, and Live refuses to duplicate instruments.
+- Not in Live's API: deleting a rack chain, loading presets by path (use `load_browser_item`), plugin parameters beyond those Live has configured.
+
 #### Set structure, capabilities, transport and history
 - `describe_set`: a compact map of the whole Set (song settings, every track/return/master with address, kind, mixer state, devices and clips, every scene). Each track has a `hash`, and the Set a `fingerprint`, that change only when the Set really changes (playhead, play state and meters are ignored), so a client can detect edits by comparing fingerprints and see which track changed by comparing hashes. `include_clips: false` gives a lighter summary. The live test suite uses the fingerprint as an invariant: it must be identical before and after a run.
 - `get_capabilities`: script version and build id, Live version/variant, unavailable features and feature probes (Max for Live, Conversions, note probabilities, Suite devices such as Meld/Roar). A beta build reports variant `Beta` and edition `unknown` (the edition is not readable), so rely on `features`.
@@ -200,12 +211,12 @@ The music logic is pure TypeScript in `src/music` (no Live needed to test it); t
 - Live renumbers default track names when tracks are inserted or removed ("12-Acid..." becomes "13-Acid..."), so re-read addresses after structural changes instead of caching them.
 
 #### Addressing: track types, racks and parameter details
-Every device-facing tool (`get_track_detail`, `get_device_parameters`, `set_device_parameter`, `bulk_set_device_parameters`, `load_browser_item`, `ramp_parameter`, `cancel_ramps`) takes:
+The automation and browser tools (`get_track_detail`, `load_browser_item`, `draw_automation`, `clear_automation`, `ramp_parameter`, `cancel_ramps`) still name their target with track numbers instead of addresses (they move to addresses when automation is consolidated):
 
 - `track_type`: `"track"` (default), `"return"` (`track_index` counts return tracks) or `"master"` (`track_index` is ignored; pass 0). The master and return tracks can hold devices, so they can be read, loaded onto, set, ramped and mixed like any other. Clip automation is not available on them (they have no clips). Live prefixes return track names with their letter (`A-Reverb`), so write the bare name when renaming.
 - `device_path`: reaches devices inside racks. It alternates device and chain selectors and ends on a device index, e.g. `[0, 2, 1]` is device 1 in chain 2 of the rack at device 0. A chain selector is a chain index, `{"pad": 36}` (or `{"pad": 36, "chain": 1}`) for a drum pad, or `{"return": 0}` for a return chain. Use it instead of `device_index`.
 
-`get_device_parameters` lists, for each parameter: `index`, `name`, `value`, `min`, `max`, `is_quantized`, `is_enabled`, the `display` string Live shows (`"14.2 kHz"`), a `default` for continuous parameters and `value_items` labels for quantized ones (Filter Type `0` is `"Low-pass"`). For a rack it also lists its `chains`, `return_chains` and occupied `drum_pads`, so you can see what a `device_path` can reach.
+`get_device` lists, for each parameter: `index`, `name`, `value`, `min`, `max`, `is_quantized`, `is_enabled`, the `display` string Live shows (`"14.2 kHz"`), a `default` for continuous parameters and `value_items` labels for quantized ones (Filter Type `0` is `"Low-pass"`). For a rack it also lists its `chains`, `return_chains` and occupied `drum_pads`, so you can see what a `device_path` can reach; every entry carries its address.
 
 Not covered: device properties Live keeps outside `parameters` (Wavetable's oscillator wavetable selection, Drift's mod matrix, unison and voice modes), and VST/AU plugin parameters beyond the ones Live has configured.
 

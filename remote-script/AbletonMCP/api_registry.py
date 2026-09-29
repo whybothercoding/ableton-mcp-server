@@ -12,7 +12,9 @@ _DATA = None
 # property engine kinds -> Live classes
 KIND_CLASSES = {"song": "Live.Song.Song", "track": "Live.Track.Track", "scene": "Live.Scene.Scene",
                 "slot": "Live.ClipSlot.ClipSlot", "clip": "Live.Clip.Clip",
-                "groove": "Live.Groove.Groove", "cue": "Live.Song.CuePoint", "app": "Live.Application.Application"}
+                "groove": "Live.Groove.Groove", "cue": "Live.Song.CuePoint", "app": "Live.Application.Application",
+                "device": "Live.RackDevice.RackDevice", "chain": "Live.Chain.Chain", "pad": "Live.DrumPad.DrumPad",
+                "parameter": "Live.DeviceParameter.DeviceParameter"}
 
 
 def data():
@@ -40,7 +42,7 @@ def family(type_name):
         return type_name
     if type_name == "object":
         return "object"  # Live reports TString setters and nullable colour indices as `object`: any scalar fits
-    if type_name and type_name.startswith("Base.") and type_name.endswith("Vector"):
+    if type_name == "tuple" or (type_name and type_name.startswith("Base.") and type_name.endswith("Vector")):
         return "list"
     if type_name and "Live." + type_name in data()["enums"]:
         return "enum"

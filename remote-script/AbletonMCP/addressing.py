@@ -27,8 +27,10 @@ class AddressingMixin(object):
         head = parts[0]
         if head == "song" and len(parts) == 1:
             return "song", self._song, "song"
-        if head == "master" and len(parts) == 1:
-            return "track", self._song.master_track, "master"
+        if head == "master":
+            if len(parts) == 1:
+                return "track", self._song.master_track, "master"
+            return self._resolve_track_tail(self._song.master_track, "master", parts[1:], address)
         if head == "scenes" and len(parts) == 2:
             index = self._select(self._song.scenes, parts[1], "scene", lambda s: s.name)
             return "scene", self._song.scenes[index], "scenes/{0}".format(index)
@@ -49,6 +51,8 @@ class AddressingMixin(object):
             track, canonical = tracks[index], "{0}/{1}".format(head, index)
             if len(parts) == 2:
                 return "track", track, canonical
+            if parts[2] in ("devices", "mixer"):
+                return self._resolve_track_tail(track, canonical, parts[2:], address)
             if head == "tracks" and parts[2] == "slots" and len(parts) in (4, 5):
                 slots = track.clip_slots
                 slot_index = _as_index(self._number(parts[3], address), "slot index")
@@ -63,7 +67,16 @@ class AddressingMixin(object):
                     raise BridgeError("The clip slot in '{0}' is empty".format(address), "NOT_FOUND")
                 return "clip", slot.clip, canonical + "/clip"
         raise BridgeError("Unknown address '{0}'. Use song, master, tracks/N, returns/N, scenes/N, "
-                          "tracks/N/slots/M[/clip], grooves/N, cue_points/N, app, or a name: selector such as tracks/name:Drift".format(address), "NOT_FOUND")
+                          "tracks/N/slots/M[/clip], tracks/N/devices/M[/parameters/P | /chains/C/devices/...], grooves/N, cue_points/N, app, "
+                          "or a name: selector such as tracks/name:Drift".format(address), "NOT_FOUND")
+
+    def _resolve_track_tail(self, track, canonical, rest, address):
+        """Below a track (or the master): its device chain and mixer."""
+        if rest[0] == "devices":
+            return self._resolve_devices(track, canonical, rest, address)
+        if rest[0] == "mixer":
+            return self._resolve_mixer(track, canonical, rest, address)
+        raise BridgeError("Unknown address '{0}'".format(address), "NOT_FOUND")
 
     @staticmethod
     def _number(text, address):
@@ -115,7 +128,7 @@ class AddressingMixin(object):
         for i, cue in enumerate(_safe_attr(song, "cue_points", [])):
             if obj == cue:
                 return "cue_points/{0}".format(i)
-        return None
+        return self._address_of_lom(obj)
 
     def _guard(self, obj, expect, address):
         """Refuse to act on an object that no longer matches what the caller expected (index drift after deletes)."""

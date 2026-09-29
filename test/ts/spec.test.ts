@@ -116,7 +116,8 @@ test('validateArgs: required, types, enums and nested items', () => {
   assert.match(validateArgs(get, { address: 'song', names: ['ok', 3] })!, /names\[1\] must be a string/);
   const list = TOOL_SPEC_BY_NAME.list_properties.inputSchema;
   assert.equal(validateArgs(list, { kind: 'clip' }), null);
-  assert.match(validateArgs(list, { kind: 'device' })!, /must be one of: song, track, scene, slot, clip/);
+  assert.match(validateArgs(list, { kind: 'plugin' })!, /must be one of: song, track, scene, slot, clip/);
+  assert.equal(validateArgs(list, { kind: 'device' }), null);
   assert.equal(validateArgs(schema, {}), null); // either address+properties or items: the bridge decides
   assert.match(validateArgs(schema, { items: [{ address: 'song' }] })!, /items\[0\]: missing required argument 'properties'/);
   assert.match(validateArgs(schema, { address: 'song', properties: [] })!, /must be an object/);
@@ -164,8 +165,21 @@ test('note tools: schemas, required arguments and risk annotations', () => {
 test('tools folded into the verb tools are no longer advertised', () => {
   const retired = ['get_session_info', 'get_track_structure', 'get_bulk_session_structure', 'get_clip_notes', 'edit_clip_notes', 'set_tempo', 'set_track_name',
     'set_track_color', 'set_track_mute', 'set_track_solo', 'set_track_arm', 'set_clip_name', 'set_clip_color', 'set_scene_name', 'create_midi_track', 'create_clip',
-    'delete_clip', 'fire_clip', 'stop_clip', 'fire_scene', 'stop_all_clips', 'start_playback', 'stop_playback'];
+    'delete_clip', 'fire_clip', 'stop_clip', 'fire_scene', 'stop_all_clips', 'start_playback', 'stop_playback', 'get_device_parameters', 'set_device_parameter',
+    'bulk_set_device_parameters'];
   const names = new Set(TOOLS.map((t) => t.name));
   for (const name of retired) assert.ok(!names.has(name), `${name} should be retired`);
   assert.deepEqual(TOOL_SPEC_BY_NAME.create.inputSchema.properties.kind.enum, ['audio_track', 'midi_track', 'return_track', 'scene', 'midi_clip', 'cue_point']);
+});
+
+test('device tools: schemas and risk annotations', () => {
+  const get = TOOL_SPEC_BY_NAME.get_device;
+  const action = TOOL_SPEC_BY_NAME.device_action;
+  assert.equal(get.annotations.readOnlyHint, true);
+  assert.equal(action.annotations.destructiveHint, true);
+  assert.deepEqual(action.inputSchema.required, ['address', 'action']);
+  assert.ok(action.inputSchema.properties.action.enum.includes('insert') && action.inputSchema.properties.action.enum.includes('clear_pad'));
+  assert.equal(validateArgs(action.inputSchema, { address: 'tracks/0', action: 'insert', name: 'Utility' }), null);
+  assert.match(validateArgs(action.inputSchema, { address: 'tracks/0', action: 'explode' }) ?? '', /action must be one of: insert/);
+  assert.match(validateArgs(get.inputSchema, {}) ?? '', /missing required argument 'address'/);
 });

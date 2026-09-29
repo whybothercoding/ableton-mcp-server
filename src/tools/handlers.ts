@@ -99,14 +99,6 @@ export class ToolHandler {
           break;
         }
 
-        case 'get_device_parameters': {
-          this.client.ensureCapability('get_device_parameters');
-          resultData = await this.client.sendCommand('get_device_parameters', {
-            ...pick(args, ['track_index', 'device_index'], ['track_type', 'device_path'])
-          });
-          break;
-        }
-
         case 'get_browser_tree': {
           this.client.ensureCapability('get_browser_tree');
           resultData = await this.client.sendCommand('get_browser_tree', {
@@ -121,14 +113,6 @@ export class ToolHandler {
             path: String(args.path),
             limit: args.limit === undefined ? 200 : Number(args.limit),
             offset: args.offset === undefined ? 0 : Number(args.offset)
-          });
-          break;
-        }
-
-        case 'set_device_parameter': {
-          this.client.ensureCapability('set_device_parameter');
-          resultData = await this.client.sendCommand('set_device_parameter', {
-            ...pick(args, ['track_index', 'device_index', 'parameter_index', 'value'], ['track_type', 'device_path'])
           });
           break;
         }
@@ -208,14 +192,6 @@ export class ToolHandler {
             }
           }
           resultData = results;
-          break;
-        }
-
-        case 'bulk_set_device_parameters': {
-          this.client.ensureCapability('bulk_set_device_parameters');
-          resultData = await this.client.sendCommand('bulk_set_device_parameters', {
-            items: args.parameters || []
-          });
           break;
         }
 

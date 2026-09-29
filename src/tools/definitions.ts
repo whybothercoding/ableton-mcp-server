@@ -24,14 +24,14 @@ const DEVICE_PATH_PROPERTY = {
   description:
     'Address a device inside racks instead of device_index: [device, chain, device, ...], ending in a device index. ' +
     'A chain selector is a chain index, {"pad": note} or {"pad": note, "chain": n} for a drum pad, or {"return": n} for a return chain. ' +
-    "get_device_parameters lists a rack's chains, return chains and occupied drum pads."
+    "get_device lists a rack's chains, return chains and occupied drum pads."
 };
 
 const PARAMETER_TARGET_PROPERTIES = {
   track_type: TRACK_TYPE_PROPERTY,
   device_path: DEVICE_PATH_PROPERTY,
   device_index: { type: 'number', description: '0-indexed top-level device position on the track (use with parameter_index)' },
-  parameter_index: { type: 'number', description: '0-indexed parameter position (see get_device_parameters for indices and min/max)' },
+  parameter_index: { type: 'number', description: '0-indexed parameter position (see get_device for indices and min/max)' },
   mixer_parameter: { type: 'string', description: "Mixer target instead of a device parameter: 'volume', 'pan' or 'send:N' (0-indexed send)" }
 };
 
@@ -86,23 +86,6 @@ const LEGACY_TOOLS: ToolDefinition[] = [
     requiredCapability: 'get_audio_clip_path'
   },
   {
-    name: 'get_device_parameters',
-    description:
-      "Get a device's parameters: index, name, value, min, max, whether it is quantized (with its value_items labels, e.g. Filter Type 0 = Low-pass), the display string, the default and whether it is enabled. " +
-      'Works on regular, return and master tracks and, via device_path, on devices inside racks. Racks also list their chains, return chains and occupied drum pads.',
-    inputSchema: {
-      type: 'object',
-      properties: {
-        track_index: { type: 'number', description: '0-indexed track position' },
-        track_type: TRACK_TYPE_PROPERTY,
-        device_index: { type: 'number', description: '0-indexed top-level device position (or use device_path)' },
-        device_path: DEVICE_PATH_PROPERTY
-      },
-      required: ['track_index']
-    },
-    requiredCapability: 'get_device_parameters'
-  },
-  {
     name: 'get_browser_tree',
     description: 'Explore top-level categories in Live browser (instruments, sounds, drums, audio_effects, midi_effects).',
     inputSchema: {
@@ -132,28 +115,11 @@ const LEGACY_TOOLS: ToolDefinition[] = [
     requiredCapability: 'get_browser_items_at_path'
   },
   {
-    name: 'set_device_parameter',
-    description: 'Set the value of a device parameter (regular, return or master track; use device_path for devices inside racks). Returns the old value, the value Live holds and its display string.',
-    inputSchema: {
-      type: 'object',
-      properties: {
-        track_index: { type: 'number', description: '0-indexed track position' },
-        track_type: TRACK_TYPE_PROPERTY,
-        device_index: { type: 'number', description: '0-indexed top-level device position (or use device_path)' },
-        device_path: DEVICE_PATH_PROPERTY,
-        parameter_index: { type: 'number', description: '0-indexed parameter position' },
-        value: { type: 'number', description: 'Parameter value' }
-      },
-      required: ['track_index', 'parameter_index', 'value']
-    },
-    requiredCapability: 'set_device_parameter'
-  },
-  {
     name: 'draw_automation',
     description:
       "Draw a clip automation envelope for a device or mixer parameter from time/value points. Runs inside Live, so it is tempo-locked and sample-accurate regardless of bridge latency. " +
       "Session clips only (Live's API has no envelopes for arrangement clips), and the parameter must be on the clip's own track. " +
-      "Times are beats from the clip start (0 to the clip length); values are in the parameter's own units (see get_device_parameters min/max). " +
+      "Times are beats from the clip start (0 to the clip length); values are in the parameter's own units (see get_device min/max). " +
       "Ramps are drawn as fine staircases (resolution beats per step) that start exactly on the first value and end exactly on the last. " +
       "mode 'replace' (default) rebuilds the parameter's whole envelope; 'merge' only rewrites the drawn range. With hold (default) the clip edges are filled with the first/last value.",
     inputSchema: {
@@ -281,33 +247,6 @@ const LEGACY_TOOLS: ToolDefinition[] = [
       }
     },
     requiredCapability: 'bulk_set_clip_names'
-  },
-  {
-    name: 'bulk_set_device_parameters',
-    description: 'Batch update multiple device parameters in a single round trip. Each item may name a track_type and a device_path; the result reports the value Live holds and why any item was skipped.',
-    inputSchema: {
-      type: 'object',
-      properties: {
-        parameters: {
-          type: 'array',
-          description: 'Parameters to set',
-          items: {
-            type: 'object',
-            properties: {
-              track_index: { type: 'number' },
-              track_type: TRACK_TYPE_PROPERTY,
-              device_index: { type: 'number' },
-              device_path: DEVICE_PATH_PROPERTY,
-              parameter_index: { type: 'number' },
-              value: { type: 'number' }
-            },
-            required: ['track_index', 'parameter_index', 'value']
-          }
-        }
-      },
-      required: ['parameters']
-    },
-    requiredCapability: 'bulk_set_device_parameters'
   },
   {
     name: 'eval_python',

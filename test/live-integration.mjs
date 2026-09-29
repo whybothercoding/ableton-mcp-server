@@ -922,6 +922,161 @@ try {
     assert(['stopped', 'started', 'recording'].includes(slot.properties.playing_status), JSON.stringify(slot.properties));
   });
 
+  console.log('\nDevices, racks and parameters by address');
+  const deviceTrack = await makeScratchTrack();
+  const dt = `tracks/${deviceTrack}`;
+  const devicesOf = async (address) => (await call('eval', { code: `[d.name for d in self._resolve(${JSON.stringify(address)})[1].devices]` }));
+  const failsWith = async (fn, code, fragment) => {
+    try {
+      await fn();
+    } catch (err) {
+      assert(err.bridgeCode === code, `expected ${code}, got ${err.bridgeCode} (${err.message})`);
+      if (fragment) assert(err.message.includes(fragment), `expected "${fragment}" in "${err.message}"`);
+      return;
+    }
+    throw new Error(`expected the call to fail with ${code}`);
+  };
+  const readParamAt = (address) => call('eval', { code: `(lambda p: {'value': p.value})(self._resolve(${JSON.stringify(address)})[1])` });
+  await check('insert puts devices on a scratch track, returns their addresses, and Live explains a bad placement', async () => {
+    const drift = await call('device_action', { action: 'insert', address: dt, name: 'Drift' });
+    assert(drift.address === `${dt}/devices/0` && drift.name === 'Drift', JSON.stringify(drift));
+    const rack = await call('device_action', { action: 'insert', address: dt, name: 'Audio Effect Rack' });
+    assert(rack.address === `${dt}/devices/1`, JSON.stringify(rack));
+    const eq = await call('device_action', { action: 'insert', address: dt, name: 'EQ Eight', position: 1 });
+    assert(eq.address === `${dt}/devices/1`, 'inserting at a position shifts what follows');
+    assert((await devicesOf(dt)).join() === 'Drift,EQ Eight,Audio Effect Rack', (await devicesOf(dt)).join());
+    await failsWith(() => call('device_action', { action: 'insert', address: dt, name: 'Definitely Not A Device' }), 'NOT_FOUND', 'not found');
+    await failsWith(() => call('device_action', { action: 'insert', address: dt, name: 'EQ Eight', position: 0 }), 'LIVE_ERROR', 'instrument');
+    assert((await devicesOf(dt)).length === 3, 'a refused insert changed the track');
+  });
+  await check('get_device lists parameters with addresses, display strings and labels; racks list chains', async () => {
+    const drift = await call('get_device', { address: `${dt}/devices/0` });
+    assert(drift.device_type === 'instrument' && drift.parameters.length > 20, JSON.stringify(drift).slice(0, 160));
+    assert(drift.parameters.every((p) => p.address === `${dt}/devices/0/parameters/${p.index}` && typeof p.display === 'string'), 'parameter addresses');
+    const quantized = drift.parameters.find((p) => p.is_quantized && p.value_items);
+    assert(quantized && quantized.display === quantized.value_items[quantized.value], 'a quantized parameter shows its label');
+    const rack = await call('get_device', { address: `${dt}/devices/2` });
+    assert(rack.device_type === 'rack' && Array.isArray(rack.chains) && rack.macros.visible === 8, JSON.stringify(rack).slice(0, 200));
+  });
+  await check('parameter values are set by address, by name, with labels, and refused outside the parameter range', async () => {
+    const info = await call('get_device', { address: `${dt}/devices/0` });
+    const cont = info.parameters.find((p) => p.index > 0 && !p.is_quantized && p.is_enabled && p.max > p.min);
+    const address = `${dt}/devices/0/parameters/${cont.index}`;
+    const target = cont.min + 0.37 * (cont.max - cont.min);
+    const set = await call('set_properties', { address, properties: { value: target } });
+    near(set.applied.value.to, target, 1e-4 * (cont.max - cont.min), 'value');
+    near((await readParamAt(address)).value, target, 1e-4 * (cont.max - cont.min), 'Live holds the value');
+    await call('set_properties', { address: `${dt}/devices/0/parameters/name:${cont.name}`, properties: { value: cont.min } }).catch((err) => {
+      assert(err.bridgeCode === 'AMBIGUOUS', `unexpected ${err.bridgeCode}`);
+    });
+    await failsWith(() => call('set_properties', { address, properties: { value: cont.max + 1000 } }), 'OUT_OF_RANGE', 'range');
+    await failsWith(() => call('set_properties', { address, properties: { value: 'Low-pass' } }), 'TYPE_ERROR');
+    const q = info.parameters.find((p) => p.is_quantized && p.value_items && p.value_items.length > 2 && p.is_enabled);
+    if (q) {
+      const qa = `${dt}/devices/0/parameters/${q.index}`;
+      const label = q.value_items[q.value_items.length - 1];
+      await call('set_properties', { address: qa, properties: { value: label } });
+      assert((await call('get_properties', { address: qa, names: ['display'] })).properties.display === label, 'setting by label shows that label');
+      await failsWith(() => call('set_properties', { address: qa, properties: { value: 'No Such Label' } }), 'INVALID_ARGUMENT');
+    }
+    const shown = await call('get_properties', { address, names: ['display', 'min', 'max', 'name', 'is_enabled'] });
+    assert(shown.properties.name === cont.name && shown.properties.max === cont.max, JSON.stringify(shown.properties));
+  });
+  await check('device properties: rename, on/off, collapse; rack-only properties are unavailable on plain devices', async () => {
+    const address = `${dt}/devices/1`;
+    await call('set_properties', { address, properties: { name: 'MCP TEST EQ', on: false, collapsed: true } });
+    const got = await call('get_properties', { address });
+    assert(got.properties.name === 'MCP TEST EQ' && got.properties.on === false && got.properties.collapsed === true, JSON.stringify(got.properties));
+    assert('visible_macro_count' in got.unavailable, 'rack-only properties are unavailable on an EQ');
+    await call('set_properties', { address, properties: { on: true, collapsed: false } });
+    assert((await call('get_properties', { address, names: ['on'] })).properties.on === true, 'switching back on');
+    assert((await devicesOf(dt))[1] === 'MCP TEST EQ', 'the rename reached Live');
+    await call('set_properties', { address: `${dt}/devices/name:MCP TEST EQ`, properties: { name: 'EQ Eight' } });
+  });
+  await check('racks: insert_chain, devices inside chains, nested parameters, chain mixer and macros', async () => {
+    const rack = `${dt}/devices/2`;
+    const chain = await call('device_action', { action: 'insert_chain', address: rack });
+    assert(chain.address === `${rack}/chains/0`, JSON.stringify(chain));
+    const inner = await call('device_action', { action: 'insert', address: chain.address, name: 'Utility' });
+    assert(inner.address === `${chain.address}/devices/0`, JSON.stringify(inner));
+    const info = await call('get_device', { address: rack });
+    assert(info.chains.length === 1 && info.chains[0].devices[0].address === inner.address, JSON.stringify(info.chains).slice(0, 200));
+    const gain = (await call('get_device', { address: inner.address })).parameters.find((p) => p.name === 'Gain' || p.name === 'Output');
+    assert(gain, 'Utility should have a gain-like parameter');
+    const setGain = await call('set_properties', { address: gain.address, properties: { value: gain.min + 0.4 * (gain.max - gain.min) } });
+    near(setGain.applied.value.to, gain.min + 0.4 * (gain.max - gain.min), 1e-4 * (gain.max - gain.min), 'nested parameter');
+    await call('set_properties', { address: chain.address, properties: { name: 'MCP CHAIN', mute: true, volume: 0.5, panning: -0.25 } });
+    const props = await call('get_properties', { address: chain.address, names: ['name', 'mute', 'volume', 'panning'] });
+    assert(props.properties.name === 'MCP CHAIN' && props.properties.mute === true, JSON.stringify(props.properties));
+    near(props.properties.volume, 0.5, 1e-4, 'chain volume'); near(props.properties.panning, -0.25, 1e-4, 'chain pan');
+    await call('set_properties', { address: chain.address, properties: { mute: false } });
+    const mixerParam = await call('get_properties', { address: `${chain.address}/mixer/volume`, names: ['value', 'display'] });
+    near(mixerParam.properties.value, 0.5, 1e-4, 'the chain mixer volume is a parameter too');
+    const macros = await call('device_action', { action: 'add_macro', address: rack });
+    assert(macros.visible_macro_count > 8, `add_macro should show more macros: ${JSON.stringify(macros)}`);
+    assert((await call('device_action', { action: 'remove_macro', address: rack })).visible_macro_count === 8, 'remove_macro goes back to 8');
+    const stored = await call('device_action', { action: 'store_variation', address: rack });
+    assert(stored.variation_count === 1, JSON.stringify(stored));
+    await failsWith(() => call('device_action', { action: 'recall_variation', address: rack }), 'UNAVAILABLE', 'No variation is selected');
+    await call('device_action', { action: 'recall_variation', address: rack, index: 0 });
+    assert((await call('device_action', { action: 'delete_variation', address: rack })).variation_count === 0, 'delete_variation');
+    await failsWith(() => call('device_action', { action: 'recall_variation', address: rack }), 'UNAVAILABLE', 'no stored variations');
+    await failsWith(() => call('device_action', { action: 'add_macro', address: `${dt}/devices/0` }), 'INVALID_ARGUMENT');
+    await call('device_action', { action: 'randomize_macros', address: rack });
+  });
+  await check('duplicate copies an effect next to itself, Live refuses to duplicate an instrument, move relocates a device', async () => {
+    const dup = await call('device_action', { action: 'duplicate', address: `${dt}/devices/1` });
+    assert(dup.address === `${dt}/devices/2` && dup.name === 'EQ Eight', JSON.stringify(dup));
+    await failsWith(() => call('device_action', { action: 'duplicate', address: `${dt}/devices/0` }), 'LIVE_ERROR', 'instrument');
+    const moved = await call('device_action', { action: 'move', address: dup.address, to: `${dt}/devices/3/chains/0` });
+    assert(moved.address === `${dt}/devices/2/chains/0/devices/1` || moved.address.startsWith(`${dt}/devices/`), JSON.stringify(moved));
+    const back = await call('device_action', { action: 'move', address: moved.address, to: dt });
+    assert((await devicesOf(dt)).filter((n) => n === 'EQ Eight').length === 2, `the device should be back on the track: ${await devicesOf(dt)}`);
+    assert(back.position === (await devicesOf(dt)).length - 1, JSON.stringify(back));
+  });
+  await check('a drum rack exposes its pads by MIDI note; pads take mute and solo; clearing needs the guard', async () => {
+    const kitTrack = await makeScratchTrack();       // a device chain holds one instrument, so the kit gets its own track
+    const kit = await call('device_action', { action: 'insert', address: `tracks/${kitTrack}`, name: 'Drum Rack' });
+    const pad = `${kit.address}/drum_pads/36`;
+    const shown = await call('get_properties', { address: pad });
+    assert(shown.properties.note === 36, JSON.stringify(shown.properties));
+    // Live ignores mute and solo on a pad that holds nothing: the tool reports what Live actually holds afterwards
+    const muted = await call('set_properties', { address: pad, properties: { mute: true, solo: false } });
+    assert((await call('get_properties', { address: pad, names: ['mute'] })).properties.mute === muted.applied.mute.to, 'the reported value is the one Live holds');
+    await call('set_properties', { address: pad, properties: { mute: false } });
+    await failsWith(() => call('get_properties', { address: `${kit.address}/drum_pads/300` }), 'OUT_OF_RANGE');
+    await failsWith(() => call('device_action', { action: 'clear_pad', address: pad }), 'INVALID_ARGUMENT');
+    await failsWith(() => call('device_action', { action: 'clear_pad', address: pad, expect: { name: 'Wrong Name' } }), 'GUARD_FAILED');
+    const cleared = await call('device_action', { action: 'clear_pad', address: pad, expect: { name: shown.properties.name } });
+    assert(cleared.cleared_chains === 0, JSON.stringify(cleared));
+    await failsWith(() => call('device_action', { action: 'copy_pad', address: kit.address, from_note: 36, to_note: 400 }), 'INVALID_ARGUMENT');
+  });
+  await check('delete needs the guard; one undo brings a deleted device back and another removes an inserted one', async () => {
+    const names = await devicesOf(dt);
+    const last = names.length - 1;
+    await failsWith(() => call('device_action', { action: 'delete', address: `${dt}/devices/${last}` }), 'INVALID_ARGUMENT');
+    await failsWith(() => call('device_action', { action: 'delete', address: `${dt}/devices/${last}`, expect: { name: 'Wrong Name' } }), 'GUARD_FAILED');
+    assert((await devicesOf(dt)).length === names.length, 'a refused delete removed something');
+    const removed = await call('device_action', { action: 'delete', address: `${dt}/devices/${last}`, expect: { name: names[last] } });
+    assert(removed.remaining === names.length - 1, JSON.stringify(removed));
+    await call('history', { action: 'undo' });
+    assert((await devicesOf(dt)).join() === names.join(), 'one undo should bring the deleted device back');
+    const inserted = await call('device_action', { action: 'insert', address: dt, name: 'Utility' });
+    assert((await devicesOf(dt)).length === names.length + 1 && inserted.address === `${dt}/devices/${names.length}`, 'insert');
+    await call('history', { action: 'undo' });
+    assert((await devicesOf(dt)).length === names.length, 'one undo should remove the inserted device');
+  });
+  await check('save_ab stores a preset in the compare slot of a device that supports it', async () => {
+    const drift = `${dt}/devices/${(await devicesOf(dt)).indexOf('Drift')}`;
+    const can = (await call('get_properties', { address: drift, names: ['can_compare_ab'] })).properties.can_compare_ab;
+    if (!can) {
+      console.log('       this device cannot A/B compare: skipped');
+      return;
+    }
+    const out = await call('device_action', { action: 'save_ab', address: drift });
+    assert(out.is_using_compare_preset_b === false || out.is_using_compare_preset_b === true, JSON.stringify(out));
+  });
+
   console.log('\ndraw_automation');
   await check('linear ramp: readback and independent envelope values match', async () => {
     const lo = pA.min + 0.2 * (pA.max - pA.min);

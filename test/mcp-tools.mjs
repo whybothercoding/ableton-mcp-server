@@ -59,7 +59,7 @@ for (const track of session.tracks) {
   const trackIndex = Number(track.address.split('/')[1]);
   const detail = await ok('get_track_detail', { track_index: trackIndex });
   const free = detail.clip_slots.find((slot) => !slot.has_clip);
-  const params = (await ok('get_device_parameters', { track_index: trackIndex, device_index: 0 })).parameters;
+  const params = (await ok('get_device', { address: `tracks/${trackIndex}/devices/0` })).parameters;
   const p = params.find((x) => x.index > 0 && x.max > x.min && !/\bon\b|type|mode|sync/i.test(x.name) && !Number.isInteger(x.value));
   if (free && p) {
     [T, S, D, P] = [trackIndex, free.index, 0, p];
@@ -129,7 +129,7 @@ try {
     const out = await ok('ramp_parameter', { ...target, to: P.min + 0.9 * span, from: P.min + 0.1 * span, beats: 0.5, curve: 'ease_out' });
     assert(out.curve === 'ease_out' && out.seconds > 0 && out.active_ramps >= 1, JSON.stringify(out));
     await sleep(out.seconds * 1000 + 300);
-    const now = await ok('get_device_parameters', { track_index: T, device_index: D });
+    const now = await ok('get_device', { address: `tracks/${T}/devices/${D}` });
     near(now.parameters.find((x) => x.index === P.index).value, P.min + 0.9 * span, 1e-6 * span, 'landed on target');
   });
   await check('cancel_ramps via MCP with and without arguments', async () => {
@@ -305,7 +305,7 @@ try {
     await fails('get_properties', { address: 5 }, 'address must be a string');
     await fails('get_properties', { address: 'song', names: 'tempo' }, 'names must be an array');
     await fails('set_properties', { items: [{ address: 'song' }] }, "items[0]: missing required argument 'properties'");
-    await fails('list_properties', { kind: 'device' }, 'must be one of: song, track, scene, slot, clip, groove, cue, app');
+    await fails('list_properties', { kind: 'plugin' }, 'must be one of: song, track, scene, slot, clip, groove, cue, app, device, chain, pad, parameter');
   });
   await check('bridge problems come back as tool errors with the reason', async () => {
     await fails('get_properties', { address: 'tracks/999' }, 'out of range');
@@ -317,44 +317,53 @@ try {
 
   console.log('\nTrack types, device paths and parameter details');
   await check('schemas expose track_type and device_path where they apply', async () => {
-    for (const name of ['get_track_detail', 'get_device_parameters', 'set_device_parameter', 'load_browser_item', 'ramp_parameter', 'cancel_ramps', 'draw_automation', 'clear_automation']) {
+    for (const name of ['get_track_detail', 'load_browser_item', 'ramp_parameter', 'cancel_ramps', 'draw_automation', 'clear_automation']) {
       const prop = byName[name].inputSchema.properties.track_type;
       assert(prop && JSON.stringify(prop.enum) === JSON.stringify(['track', 'return', 'master']), `${name} lacks a track_type enum`);
     }
-    for (const name of ['get_device_parameters', 'set_device_parameter', 'ramp_parameter', 'cancel_ramps', 'draw_automation', 'clear_automation']) {
+    for (const name of ['ramp_parameter', 'cancel_ramps', 'draw_automation', 'clear_automation']) {
       assert(byName[name].inputSchema.properties.device_path?.type === 'array', `${name} lacks device_path`);
     }
-    assert(JSON.stringify(byName.get_device_parameters.inputSchema.required) === JSON.stringify(['track_index']), 'get_device_parameters.required');
-    assert(JSON.stringify(byName.set_device_parameter.inputSchema.required) === JSON.stringify(['track_index', 'parameter_index', 'value']), 'set_device_parameter.required');
-    const item = byName.bulk_set_device_parameters.inputSchema.properties.parameters.items.properties;
-    assert(item.track_type && item.device_path, 'bulk items lack track_type/device_path');
   });
-  await check('get_device_parameters returns quantized labels and display strings', async () => {
-    const out = await ok('get_device_parameters', target);
-    assert(out.class_name && out.device_type && out.track_type === 'track', JSON.stringify(out).slice(0, 200));
-    assert(out.parameters.every((p) => typeof p.is_quantized === 'boolean' && typeof p.display === 'string'), 'missing details');
+  await check('get_device returns quantized labels, display strings and parameter addresses', async () => {
+    const out = await ok('get_device', { address: `tracks/${T}/devices/${D}` });
+    assert(out.class_name && out.device_type && out.address === `tracks/${T}/devices/${D}`, JSON.stringify(out).slice(0, 200));
+    assert(out.parameters.every((p) => typeof p.is_quantized === 'boolean' && typeof p.display === 'string' && p.address.startsWith(out.address + '/parameters/')), 'missing details');
     const quantized = out.parameters.find((p) => p.is_quantized && p.value_items);
     if (quantized) assert(quantized.display === quantized.value_items[quantized.value], `${quantized.name} display/label mismatch`);
   });
+  await check('a parameter is set through set_properties by address, in one call for many, and refused outside its range', async () => {
+    const base = `tracks/${T}/devices/${D}/parameters`;
+    const [a, b] = [P, (await ok('get_device', { address: `tracks/${T}/devices/${D}` })).parameters.find((x) => x.index !== P.index && x.index > 0 && x.max > x.min && !x.is_quantized && x.is_enabled)];
+    try {
+      const one = await ok('set_properties', { address: `${base}/${a.index}`, properties: { value: a.min + 0.3 * (a.max - a.min) } });
+      near(one.applied.value.to, a.min + 0.3 * (a.max - a.min), 1e-4 * (a.max - a.min), 'single write');
+      const many = await ok('set_properties', { items: [{ address: `${base}/${a.index}`, properties: { value: a.min + 0.6 * (a.max - a.min) } },
+        { address: `${base}/name:${b.name}`, properties: { value: b.min + 0.4 * (b.max - b.min) } }] });
+      assert(many.results.length === 2, JSON.stringify(many).slice(0, 200));
+      await fails('set_properties', { address: `${base}/${a.index}`, properties: { value: a.max + 1000 } }, "outside this parameter's range");
+      await fails('set_properties', { address: `${base}/${a.index}`, properties: { value: 'loud' } }, 'value must be a number');
+    } finally {
+      await tool('set_properties', { items: [{ address: `${base}/${a.index}`, properties: { value: a.value } }, { address: `${base}/${b.index}`, properties: { value: b.value } }] });
+    }
+  });
   const returnCount = (await ok('describe_set', { include_clips: false })).returns.length;
   if (returnCount > 0) {
-    await check('return tracks work through the tools: read, set, ramp, bulk, track detail', async () => {
-      const dev = await ok('get_device_parameters', { track_index: 0, track_type: 'return', device_index: 0 });
-      assert(dev.track_type === 'return', JSON.stringify(dev).slice(0, 120));
+    await check('return tracks work through the tools: read, set, ramp, track detail', async () => {
+      const dev = await ok('get_device', { address: 'returns/0/devices/0' });
+      assert(dev.address === 'returns/0/devices/0', JSON.stringify(dev).slice(0, 120));
       const prm = dev.parameters.find((p) => p.index > 0 && p.max > p.min && !p.is_quantized && p.is_enabled);
       const rspan = prm.max - prm.min;
       const rt = { track_index: 0, track_type: 'return', device_index: 0, parameter_index: prm.index };
       try {
-        const set = await ok('set_device_parameter', { ...rt, value: prm.min + 0.25 * rspan });
-        near(set.value, prm.min + 0.25 * rspan, 1e-4 * rspan, 'set value');
+        const set = await ok('set_properties', { address: prm.address, properties: { value: prm.min + 0.25 * rspan } });
+        near(set.applied.value.to, prm.min + 0.25 * rspan, 1e-4 * rspan, 'set value');
         await ok('ramp_parameter', { ...rt, to: prm.min + 0.5 * rspan, seconds: 0.2 });
         await sleep(500);
-        const bulk = await ok('bulk_set_device_parameters', { parameters: [{ ...rt, value: prm.min + 0.75 * rspan }, { ...rt, device_index: 99, value: 0 }] });
-        assert(bulk.count === 1 && bulk.skipped.length === 1 && bulk.updated[0].track_type === 'return', JSON.stringify(bulk));
         const detail = await ok('get_track_detail', { track_index: 0, track_type: 'return' });
         assert(detail.track_type === 'return' && detail.devices.length >= 1, JSON.stringify(detail).slice(0, 160));
       } finally {
-        await tool('set_device_parameter', { ...rt, value: prm.value });
+        await tool('set_properties', { address: prm.address, properties: { value: prm.value } });
       }
     });
   }
@@ -370,16 +379,17 @@ try {
     assert(typeof cancelled.cancelled === 'number', JSON.stringify(cancelled));
     await ok('cancel_ramps');
   });
-  await check('device_path errors surface through the tools', async () => {
-    await fails('get_device_parameters', { track_index: T, device_path: [D, 0, 0] }, 'has no chains');
-    await fails('set_device_parameter', { track_index: T, device_path: [99], parameter_index: 1, value: 0 }, 'Device index out of range at device_path[0]');
-    await fails('get_device_parameters', { track_index: T, device_index: D, device_path: [D] }, 'not both');
+  await check('device address errors surface through the tools', async () => {
+    await fails('get_device', { address: `tracks/${T}/devices/${D}/chains/0` }, 'is not a rack');
+    await fails('get_device', { address: `tracks/${T}/devices/99` }, 'Device index 99 out of range');
+    await fails('get_device', { address: `tracks/${T}` }, 'get_device needs the address of a device');
+    await fails('set_properties', { address: `tracks/${T}/devices/99/parameters/1`, properties: { value: 0 } }, 'out of range');
   });
 } finally {
   await tool('cancel_ramps');
   await tool('clear_automation', { track_index: T, clip_index: S });
   await tool('delete', { address: `tracks/${T}/slots/${S}/clip`, expect: { name: 'MCP TOOL TEST' } });
-  await tool('set_device_parameter', { ...target, value: original });
+  await tool('set_properties', { address: `tracks/${T}/devices/${D}/parameters/${P.index}`, properties: { value: original } });
   await client.close();
 }
 

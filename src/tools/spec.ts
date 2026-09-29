@@ -75,14 +75,14 @@ export function validateArgs(schema: ToolSpec['inputSchema'], args: Record<strin
 
 const ADDRESS_HELP =
   "Addresses: 'song', 'master', 'tracks/N', 'returns/N', 'scenes/N', 'tracks/N/slots/M' (clip slot) and " +
-  "'tracks/N/slots/M/clip', 'grooves/N' (groove pool), 'cue_points/N' and 'app' (the Live application). Indices are 0-based. A name selector works anywhere a number does, e.g. 'tracks/name:Drift' " +
+  "'tracks/N/slots/M/clip', 'tracks/N/devices/M' (also returns/N and master; then '/parameters/P', '/chains/C/devices/...', '/drum_pads/NOTE', '/mixer/volume'), 'grooves/N' (groove pool), 'cue_points/N' and 'app' (the Live application). Indices are 0-based. A name selector works anywhere a number does, e.g. 'tracks/name:Drift' " +
   '(exact match; several matches is an error that lists their indices).';
 
 export const TOOL_SPECS: ToolSpec[] = [
   {
     name: 'get_properties',
     description:
-      'Read properties of the Song, a Track, Scene, ClipSlot, Clip, Groove, cue point or the app. ' + ADDRESS_HELP +
+      'Read properties of the Song, a Track, Scene, ClipSlot, Clip, Groove, cue point, the app, or a device, rack chain, drum pad or device parameter. ' + ADDRESS_HELP +
       ' Give `names` for specific properties, or omit it to read every readable property (properties that do not apply to the ' +
       'object, e.g. audio-only ones on a MIDI clip, are listed under `unavailable`). Enum values come back as names. ' +
       'Use list_properties to see what exists.',
@@ -100,7 +100,7 @@ export const TOOL_SPECS: ToolSpec[] = [
   {
     name: 'set_properties',
     description:
-      'Set properties on the Song, a Track, Scene, ClipSlot, Clip, Groove or cue point (its name). A clip\'s `groove` is set to a groove address (grooves/N). ' + ADDRESS_HELP +
+      'Set properties on the Song, a Track, Scene, ClipSlot, Clip, Groove, cue point, device, rack chain, drum pad or device PARAMETER (property `value`, checked against the parameter\'s own range). A clip\'s `groove` is set to a groove address (grooves/N). ' + ADDRESS_HELP +
       ' Values are checked strictly (booleans must be true/false, integers whole numbers, enums given by name; see list_properties). ' +
       'Interdependent properties (e.g. loop_start/loop_end) can be set together in any order, and the call is all-or-nothing: if one ' +
       'write fails, the others are restored. Returns each property\'s previous and new value. Each call is one undo step in Live. ' +
@@ -381,15 +381,60 @@ export const TOOL_SPECS: ToolSpec[] = [
     bridge: { command: 'edit_notes' }
   },
   {
+    name: 'get_device',
+    description:
+      "Read a device with all its parameters (`index`, `address`, `value`, `min`, `max`, `display` as Live shows it, `default`, `value_items` labels for quantized ones, `is_enabled`) and, for racks, its chains, return chains, occupied drum pads " +
+      "(each with the addresses of the devices it holds) and macro state. `address`: 'tracks/2/devices/0', 'returns/0/devices/1', 'master/devices/0' or nested 'tracks/2/devices/0/chains/1/devices/2' (a name selector works too: 'tracks/2/devices/name:EQ Eight'). " +
+      "Device names per track are in describe_set. Change a parameter with set_properties on its address ('.../parameters/5' or '.../parameters/name:Frequency', field `value`; a quantized parameter also takes its label such as 'Low-pass'); " +
+      "many at once with `items`. Devices also have properties (name, `on`, `collapsed`) and racks chains, pads and mixers have theirs: see list_properties.",
+    inputSchema: {
+      type: 'object',
+      properties: { address: { type: 'string', description: "A device, e.g. 'tracks/2/devices/0'" } },
+      required: ['address']
+    },
+    annotations: { readOnlyHint: true, destructiveHint: false, idempotentHint: true },
+    bridge: { command: 'get_device' }
+  },
+  {
+    name: 'device_action',
+    description:
+      "Change device structure. `action`: insert (`address` of a track, return track, master or rack chain; `name` as in Live's browser, e.g. 'EQ Eight', 'Drum Rack', 'Audio Effect Rack'; optional `position`, default end; Live refuses bad placements " +
+      "such as effects before an instrument and says why), delete (`address` of a device; `expect` {name} mandatory), duplicate (a device; the copy goes right after it), move (`address` of a device, `to` a track or chain, optional `position`; returns where it landed), " +
+      "save_ab (store the current preset in the A/B compare slot), and for racks: insert_chain (optional `position`), add_macro, remove_macro, randomize_macros, store_variation, recall_variation (`index` selects the variation first; else the selected one; `which` last = the last recalled), delete_variation (`index` or the selected one; Live does nothing when none is selected, so this refuses), " +
+      "copy_pad (Drum Rack: `from_note` and `to_note`), clear_pad (`address` of a drum pad, e.g. 'tracks/1/devices/0/drum_pads/36'; `expect` {name} mandatory). Returns the new address where one is created. One undo step. DESTRUCTIVE for delete, clear_pad, remove_macro, delete_variation.",
+    inputSchema: {
+      type: 'object',
+      properties: {
+        address: { type: 'string', description: 'Track/chain (insert), device (delete, duplicate, move, save_ab, rack actions) or drum pad (clear_pad)' },
+        action: {
+          type: 'string',
+          enum: ['insert', 'delete', 'duplicate', 'move', 'save_ab', 'insert_chain', 'add_macro', 'remove_macro', 'randomize_macros', 'store_variation', 'recall_variation', 'delete_variation', 'copy_pad', 'clear_pad'],
+          description: 'What to do'
+        },
+        name: { type: 'string', description: 'insert: device name' },
+        position: { type: 'number', description: 'insert, move, insert_chain: index, -1 or omitted = end' },
+        to: { type: 'string', description: 'move: the track or chain to move the device into' },
+        which: { type: 'string', enum: ['selected', 'last'], description: 'recall_variation: default selected' },
+        index: { type: 'number', description: 'recall_variation, delete_variation: variation to select first (0-based)' },
+        from_note: { type: 'number', description: 'copy_pad: source pad note' },
+        to_note: { type: 'number', description: 'copy_pad: destination pad note' },
+        expect: { type: 'object', description: 'Guard for delete and clear_pad: {"name": "..."} must match' }
+      },
+      required: ['address', 'action']
+    },
+    annotations: { readOnlyHint: false, destructiveHint: true, idempotentHint: false },
+    bridge: { command: 'device_action' }
+  },
+  {
     name: 'list_properties',
     description:
       'List the properties get_properties/set_properties know for an object kind: type, whether it is writable, allowed enum values ' +
-      'and ranges. Give an `address` (its kind is used) or a `kind`: song, track, scene, slot, clip, groove, cue or app.',
+      'and ranges. Give an `address` (its kind is used) or a `kind`: song, track, scene, slot, clip, groove, cue, app, device, chain, pad or parameter.',
     inputSchema: {
       type: 'object',
       properties: {
         address: { type: 'string', description: 'Object address; its kind is listed' },
-        kind: { type: 'string', enum: ['song', 'track', 'scene', 'slot', 'clip', 'groove', 'cue', 'app'], description: 'Object kind (when no address is given)' }
+        kind: { type: 'string', enum: ['song', 'track', 'scene', 'slot', 'clip', 'groove', 'cue', 'app', 'device', 'chain', 'pad', 'parameter'], description: 'Object kind (when no address is given)' }
       }
     },
     annotations: { readOnlyHint: true, destructiveHint: false, idempotentHint: true },

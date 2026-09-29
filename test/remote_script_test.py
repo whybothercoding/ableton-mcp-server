@@ -490,6 +490,10 @@ def load_module():
         ClipLaunchQuantization=FakeEnum(q_global=0, q_none=1, q_8_bars=2, q_4_bars=3, q_2_bars=4, q_bar=5, q_half=6),
         WarpMode=FakeEnum(beats=0, tones=1, texture=2, repitch=3, complex=4, rex=5, complex_pro=6, count=7))
     live.ClipSlot = types.SimpleNamespace(ClipSlotPlayingState=FakeEnum(stopped=0, started=1, recording=2))
+    live.Device = types.SimpleNamespace(Device=FakeDevice, DeviceType=FakeEnum(undefined=0, instrument=1, audio_effect=2, midi_effect=4))
+    live.Chain = types.SimpleNamespace(Chain=FakeChain)
+    live.DrumPad = types.SimpleNamespace(DrumPad=FakePad)
+    live.DeviceParameter = types.SimpleNamespace(DeviceParameter=FakeParam)
     live.Song = types.SimpleNamespace(
         SessionRecordStatus=FakeEnum(off=0, on=1, transition=2),
         Quantization=FakeEnum(q_no_q=0, q_8_bars=1, q_4_bars=2, q_2_bars=3, q_bar=4, q_half=5),
@@ -1005,7 +1009,7 @@ class AddressAndPropertyTests(unittest.TestCase):
         self.assertFalse(out["properties"]["length"]["writable"])
         self.assertNotIn("count", out["properties"]["warp_mode"]["values"])
         self.assertEqual(self.script._list_properties("tracks/0")["kind"], "track")
-        self.assertEqual(self.code_of(self.script._list_properties, None, "device"), "INVALID_ARGUMENT")
+        self.assertEqual(self.code_of(self.script._list_properties, None, "nonsense"), "INVALID_ARGUMENT")
 
     # ---- commands
     def test_commands_and_undo_behaviour(self):
@@ -1919,6 +1923,442 @@ class CueTests(unittest.TestCase):
                          {"playing_status": "started", "color_index": 5})
 
 
+# ---------------------------------------------------------------- devices, racks and parameters
+
+class DevHost(object):
+    """Like Live's tracks and rack chains: an ordered device list you can insert into, delete from and duplicate."""
+
+    def _init_host(self):
+        self.devices = []
+
+    def adopt(self, devices):
+        for device in devices:
+            device.canonical_parent = self
+        self.devices.extend(devices)
+        return self
+
+    def insert_device(self, name, index=-1):
+        if name == "Nope":
+            raise RuntimeError("Could not find a device named 'Nope'")
+        if name in ("EQ Eight", "Utility") and self.devices and self.devices[0].type != 1 and index == 0 and any(d.type == 1 for d in self.devices):
+            raise RuntimeError("Insert audio effects after instruments")
+        device = DevDevice(name, dev_type=1 if name in ("Wavetable", "Drift") else 2)
+        device.canonical_parent = self
+        device.link_parameters()
+        if name.endswith("Rack"):
+            device.make_rack(drum=name == "Drum Rack")
+        self.devices.insert(len(self.devices) if index == -1 else index, device)
+        return device
+
+    def delete_device(self, index):
+        self.devices.pop(index)
+
+    def duplicate_device(self, index):
+        source = self.devices[index]
+        if source.type == 1:
+            raise RuntimeError("Can not duplicate instrument.")
+        copy = DevDevice(source.name, dev_type=source.type)
+        copy.canonical_parent = self
+        copy.link_parameters()
+        self.devices.insert(index + 1, copy)
+
+
+class DevChain(FakeChain, DevHost):
+    def __init__(self, name):
+        FakeChain.__init__(self, name, [])
+        self._init_host()
+        self.mute = self.solo = False
+        self.color, self.color_index, self.is_auto_colored = 0, 0, True
+        self.muted_via_solo = False
+        self.has_audio_input = self.has_audio_output = True
+        self.has_midi_input = self.has_midi_output = False
+        self.mixer_device = make_mixer(sends=False)
+        self.mixer_device.canonical_parent = self
+        for prm in (self.mixer_device.volume, self.mixer_device.panning):
+            prm.canonical_parent = self.mixer_device
+
+
+class DevPad(FakePad):
+    def __init__(self, note, name):
+        FakePad.__init__(self, note, name, [])
+        self.mute = self.solo = False
+        self.cleared = 0
+
+    def delete_all_chains(self):
+        self.cleared += 1
+        self.chains = []
+
+
+class DevDevice(FakeDevice):
+    def __init__(self, name, dev_type=2):
+        FakeDevice.__init__(self, name, dev_type=dev_type)
+        self.canonical_parent = None
+        self.class_display_name = name
+        self.can_compare_ab, self.is_using_compare_preset_b, self.is_active = True, False, True
+        self.view = types.SimpleNamespace(is_collapsed=False)
+        self.saved_ab = 0
+        self.rack_calls = []
+
+    def link_parameters(self):
+        for prm in self.parameters:
+            prm.canonical_parent = self
+
+    def save_preset_to_compare_ab_slot(self):
+        self.saved_ab += 1
+
+    def make_rack(self, drum=False):
+        self.can_have_chains, self.can_have_drum_pads = True, drum
+        self.chains, self.return_chains = [], []
+        self.drum_pads = [DevPad(n, "Pad {0}".format(n)) for n in range(128)] if drum else None
+        if not drum:
+            del self.drum_pads
+        self.visible_macro_count, self.variation_count, self.selected_variation_index = 8, 0, -1
+        self.macros_mapped = (False,) * 8
+        self.has_macro_mappings = False
+        self.can_show_chains, self.is_showing_chains = True, False
+
+    def insert_chain(self, index=-1):
+        chain = DevChain("Chain {0}".format(len(self.chains) + 1))
+        chain.canonical_parent = self
+        self.chains.insert(len(self.chains) if index == -1 else index, chain)
+        return chain
+
+    def add_macro(self):
+        self.visible_macro_count += 1
+
+    def remove_macro(self):
+        self.visible_macro_count -= 1
+
+    def randomize_macros(self):
+        self.rack_calls.append("randomize")
+
+    def store_variation(self):
+        self.variation_count += 1
+
+    def recall_selected_variation(self):
+        self.rack_calls.append("recall_selected")
+
+    def recall_last_used_variation(self):
+        self.rack_calls.append("recall_last")
+
+    def delete_selected_variation(self):
+        self.variation_count -= 1
+
+    def copy_pad(self, source, destination):
+        self.rack_calls.append(("copy_pad", source, destination))
+
+
+class DevTrack(FakeTrack, DevHost):
+    def __init__(self, name):
+        FakeTrack.__init__(self, name, with_clips=False)
+        self._init_host()
+        self.mixer_device.canonical_parent = self
+        for prm in [self.mixer_device.volume, self.mixer_device.panning] + list(self.mixer_device.sends):
+            prm.canonical_parent = self.mixer_device
+
+
+class DeviceTests(unittest.TestCase):
+    """Track 'Synth': 0 Wavetable, 1 Audio Effect Rack (chains Wide [Delay, Inner Rack [Deep [Deep Effect]]], Dry []; return FX [Reverb]),
+    2 Drum Rack (pad 36 'Kick' with one chain [Kick Synth]), 3 EQ Eight.  Return track 'Return A' [Return Reverb], master [Limiter]."""
+
+    def setUp(self):
+        self.script = make_script()
+        self.addCleanup(self.script._stop_server)
+        song = make_song()
+        synth = DevTrack("Synth")
+        wavetable = DevDevice("Wavetable", dev_type=1)
+        rack = DevDevice("Audio Effect Rack")
+        rack.make_rack()
+        inner = DevDevice("Inner Rack")
+        inner.make_rack()
+        deep = inner.insert_chain()
+        deep.name = "Deep"
+        deep.adopt([DevDevice("Deep Effect")])
+        wide = rack.insert_chain()
+        wide.name = "Wide"
+        wide.adopt([DevDevice("Delay"), inner])
+        dry = rack.insert_chain()
+        dry.name = "Dry"
+        fx = DevChain("FX")
+        fx.canonical_parent = rack
+        fx.adopt([DevDevice("Reverb")])
+        rack.return_chains.append(fx)
+        kit = DevDevice("Drum Rack", dev_type=1)
+        kit.make_rack(drum=True)
+        kick_chain = DevChain("Kick")
+        kick_chain.canonical_parent = kit.drum_pads[36]
+        kick_chain.adopt([DevDevice("Kick Synth", dev_type=1)])
+        kit.drum_pads[36].name = "Kick"
+        kit.drum_pads[36].chains = [kick_chain]
+        kit.chains = [kick_chain]
+        for pad in kit.drum_pads:
+            pad.canonical_parent = kit
+        synth.adopt([wavetable, rack, kit, DevDevice("EQ Eight")])
+        for device in [wavetable, rack, inner, kit, synth.devices[3]] + list(wide.devices) + list(fx.devices) + list(deep.devices) + list(kick_chain.devices):
+            device.link_parameters()
+        song.tracks = [synth]
+        ret = DevTrack("Return A")
+        ret.adopt([DevDevice("Return Reverb")])
+        song.return_tracks = [ret]
+        master = DevTrack("Master")
+        master.adopt([DevDevice("Limiter")])
+        song.master_track = master
+        for track in (ret, master):
+            track.devices[0].link_parameters()
+        song.move_device = lambda device, target, position: self.move(device, target, position)
+        self.script._song = self.song = song
+        self.synth, self.rack, self.inner, self.kit, self.wide = synth, rack, inner, kit, wide
+
+    def move(self, device, target, position):
+        host = device.canonical_parent
+        host.devices.remove(device)
+        landed = min(position, len(target.devices))
+        target.devices.insert(landed, device)
+        device.canonical_parent = target
+        return landed
+
+    def run_command(self, name, params):
+        return self.script._process_command({"type": name, "params": params})
+
+    def ok(self, command_name, /, **params):
+        response = self.run_command(command_name, params)
+        self.assertEqual(response["status"], "success", response)
+        return response["result"]
+
+    def code(self, command_name, /, **params):
+        response = self.run_command(command_name, params)
+        self.assertEqual(response["status"], "error", response)
+        return response["code"]
+
+    # ---- addresses
+    def test_resolve_devices_parameters_chains_pads_and_mixers(self):
+        r = self.script._resolve
+        self.assertEqual((r("tracks/0/devices/1")[0], r("tracks/0/devices/1")[1].name), ("device", "Audio Effect Rack"))
+        self.assertEqual(r("tracks/0/devices/name:EQ Eight")[2], "tracks/0/devices/3")
+        self.assertEqual(r("tracks/name:Synth/devices/0")[2], "tracks/0/devices/0")
+        self.assertEqual(r("returns/0/devices/0")[1].name, "Return Reverb")
+        self.assertEqual(r("master/devices/0")[1].name, "Limiter")
+        self.assertEqual((r("tracks/0/devices/0/parameters/1")[0], r("tracks/0/devices/0/parameters/1")[1].name), ("parameter", "Freq"))
+        self.assertEqual(r("tracks/0/devices/0/parameters/name:Drive")[2], "tracks/0/devices/0/parameters/2")
+        self.assertEqual((r("tracks/0/devices/1/chains/1")[0], r("tracks/0/devices/1/chains/name:Wide")[2]), ("chain", "tracks/0/devices/1/chains/0"))
+        self.assertEqual(r("tracks/0/devices/1/return_chains/0/devices/0")[1].name, "Reverb")
+        self.assertEqual(r("tracks/0/devices/1/chains/0/devices/1/chains/0/devices/0")[1].name, "Deep Effect")
+        self.assertEqual((r("tracks/0/devices/2/drum_pads/36")[0], r("tracks/0/devices/2/drum_pads/36")[1].name), ("pad", "Kick"))
+        self.assertEqual(r("tracks/0/devices/2/drum_pads/36/chains/0/devices/0")[1].name, "Kick Synth")
+        self.assertEqual(r("tracks/0/mixer/volume")[2], "tracks/0/mixer/volume")
+        self.assertEqual(r("tracks/0/mixer/sends/1")[1].name, "Send B")
+        self.assertEqual(r("master/mixer/panning")[0], "parameter")
+        self.assertEqual(r("tracks/0/devices/1/chains/0/mixer/volume")[2], "tracks/0/devices/1/chains/0/mixer/volume")
+
+    def test_device_address_errors_carry_codes(self):
+        cases = [("tracks/0/devices/9", "OUT_OF_RANGE"), ("tracks/0/devices/name:Nope", "NOT_FOUND"), ("tracks/0/devices/0/parameters/99", "OUT_OF_RANGE"),
+                 ("tracks/0/devices/0/chains/0", "INVALID_ARGUMENT"), ("tracks/0/devices/0/drum_pads/36", "INVALID_ARGUMENT"),
+                 ("tracks/0/devices/1/chains/9", "OUT_OF_RANGE"), ("tracks/0/devices/1/drum_pads/36", "INVALID_ARGUMENT"),
+                 ("tracks/0/devices/2/drum_pads/200", "OUT_OF_RANGE"), ("tracks/0/devices/2/drum_pads/35/chains/0", "NOT_FOUND"),
+                 ("tracks/0/devices/0/bogus", "NOT_FOUND"), ("tracks/0/devices", "NOT_FOUND"), ("tracks/0/mixer/nonsense", "NOT_FOUND"),
+                 ("tracks/0/mixer/sends/5", "OUT_OF_RANGE"), ("tracks/0/bogus/0", "NOT_FOUND"), ("master/bogus", "NOT_FOUND"),
+                 ("tracks/0/devices/1/chains/0/devices/9", "OUT_OF_RANGE")]
+        for address, code in cases:
+            self.assertEqual(self.code("get_properties", address=address), code, address)
+
+    def test_every_device_level_object_can_be_named_again(self):
+        addresses = ["tracks/0/devices/0", "tracks/0/devices/1", "tracks/0/devices/1/chains/0", "tracks/0/devices/1/chains/1", "returns/0/devices/0",
+                     "tracks/0/devices/1/return_chains/0", "tracks/0/devices/1/chains/0/devices/1", "tracks/0/devices/1/chains/0/devices/1/chains/0/devices/0",
+                     "tracks/0/devices/2/drum_pads/36", "tracks/0/devices/2/drum_pads/36/chains/0", "tracks/0/devices/2/drum_pads/36/chains/0/devices/0",
+                     "tracks/0/devices/0/parameters/3", "tracks/0/devices/1/chains/0/devices/0/parameters/2", "master/devices/0/parameters/1",
+                     "tracks/0/mixer/volume", "tracks/0/mixer/panning", "tracks/0/mixer/sends/1", "master/mixer/volume", "returns/0/mixer/volume",
+                     "tracks/0/devices/1/chains/0/mixer/volume", "tracks/0/devices/1/chains/0/mixer/panning", "master/devices/0"]
+        for address in addresses:
+            kind, obj, canonical = self.script._resolve(address)
+            self.assertEqual(self.script._address_of(obj), canonical, address)
+
+    # ---- properties
+    def test_device_properties_read_and_write(self):
+        got = self.ok("get_properties", address="tracks/0/devices/0", names=["name", "class_name", "type", "on", "collapsed", "can_have_chains", "is_active"])["properties"]
+        self.assertEqual(got, {"name": "Wavetable", "class_name": "Wavetable", "type": "instrument", "on": True, "collapsed": False,
+                               "can_have_chains": False, "is_active": True})
+        result = self.ok("set_properties", address="tracks/0/devices/0", properties={"name": "Lead", "on": False, "collapsed": True})["applied"]
+        self.assertEqual((result["name"]["to"], result["on"]["to"], result["collapsed"]["to"]), ("Lead", False, True))
+        self.assertEqual(self.synth.devices[0].parameters[0].value, 0.0)
+        self.assertTrue(self.synth.devices[0].view.is_collapsed)
+        self.assertEqual(self.code("set_properties", address="tracks/0/devices/0", properties={"class_name": "X"}), "INVALID_ARGUMENT")
+        self.assertEqual(self.code("set_properties", address="tracks/0/devices/0", properties={"on": "yes"}), "TYPE_ERROR")
+
+    def test_rack_only_properties_are_unavailable_on_plain_devices(self):
+        plain = self.ok("get_properties", address="tracks/0/devices/0")
+        self.assertIn("visible_macro_count", plain["unavailable"])
+        rack = self.ok("get_properties", address="tracks/0/devices/1")
+        self.assertEqual((rack["properties"]["visible_macro_count"], rack["properties"]["variation_count"]), (8, 0))
+        self.assertNotIn("visible_macro_count", rack.get("unavailable", {}))
+
+    def test_a_device_without_an_on_switch_says_so(self):
+        self.synth.devices[0].parameters = [FakeParam("Freq", 0.5)]
+        self.assertEqual(self.code("set_properties", address="tracks/0/devices/0", properties={"on": True}), "LIVE_ERROR")
+
+    def test_parameter_values_are_checked_against_the_parameters_own_range(self):
+        address = "tracks/0/devices/0/parameters/2"        # Drive: 0..100
+        self.assertEqual(self.ok("set_properties", address=address, properties={"value": 75})["applied"]["value"], {"from": 50, "to": 75.0})
+        self.assertEqual(self.code("set_properties", address=address, properties={"value": 101}), "OUT_OF_RANGE")
+        self.assertEqual(self.code("set_properties", address=address, properties={"value": -1}), "OUT_OF_RANGE")
+        self.assertEqual(self.code("set_properties", address=address, properties={"value": "loud"}), "TYPE_ERROR")
+        self.assertEqual(self.code("set_properties", address=address, properties={"value": True}), "TYPE_ERROR")
+        self.assertEqual(self.synth.devices[0].parameters[2].value, 75.0)
+
+    def test_quantized_parameters_take_their_labels(self):
+        address = "tracks/0/devices/0/parameters/4"        # Mode: A, B, C
+        self.ok("set_properties", address=address, properties={"value": "C"})
+        self.assertEqual(self.synth.devices[0].parameters[4].value, 2.0)
+        self.assertEqual(self.code("set_properties", address=address, properties={"value": "D"}), "INVALID_ARGUMENT")
+        self.assertEqual(self.ok("get_properties", address=address, names=["value_items", "display", "is_quantized"])["properties"],
+                         {"value_items": ["A", "B", "C"], "display": "C", "is_quantized": True})
+
+    def test_disabled_and_macro_mapped_parameters_refuse_writes(self):
+        self.assertEqual(self.code("set_properties", address="tracks/0/devices/0/parameters/3", properties={"value": 1}), "UNAVAILABLE")
+
+    def test_parameter_reads_include_display_and_range(self):
+        got = self.ok("get_properties", address="tracks/0/devices/0/parameters/1", names=["name", "value", "min", "max", "display", "default_value"])["properties"]
+        self.assertEqual(got, {"name": "Freq", "value": 0.5, "min": 0.0, "max": 1.0, "display": "0.5 units", "default_value": 0.0})
+
+    def test_mixer_parameters_are_parameters_too(self):
+        self.ok("set_properties", address="tracks/0/mixer/volume", properties={"value": 0.5})
+        self.assertEqual(self.synth.mixer_device.volume.value, 0.5)
+        self.assertEqual(self.code("set_properties", address="tracks/0/mixer/volume", properties={"value": 2}), "OUT_OF_RANGE")
+
+    def test_chain_and_pad_properties(self):
+        self.ok("set_properties", address="tracks/0/devices/1/chains/0", properties={"name": "Bright", "mute": True, "volume": 0.6, "panning": -0.5})
+        self.assertEqual((self.wide.name, self.wide.mute, self.wide.mixer_device.volume.value, self.wide.mixer_device.panning.value), ("Bright", True, 0.6, -0.5))
+        self.assertEqual(self.code("set_properties", address="tracks/0/devices/1/chains/0", properties={"volume": 3}), "OUT_OF_RANGE")
+        self.ok("set_properties", address="tracks/0/devices/2/drum_pads/36", properties={"mute": True, "solo": True})
+        self.assertEqual((self.kit.drum_pads[36].mute, self.kit.drum_pads[36].solo), (True, True))
+        self.assertEqual(self.code("set_properties", address="tracks/0/devices/2/drum_pads/36", properties={"name": "Snare"}), "INVALID_ARGUMENT")
+        self.assertEqual(self.ok("get_properties", address="tracks/0/devices/2/drum_pads/36", names=["note", "name"])["properties"], {"note": 36, "name": "Kick"})
+
+    # ---- get_device
+    def test_get_device_lists_parameters_children_and_addresses(self):
+        info = self.ok("get_device", address="tracks/0/devices/1")
+        self.assertEqual((info["address"], info["name"], info["device_type"]), ("tracks/0/devices/1", "Audio Effect Rack", "rack"))
+        self.assertEqual([c["name"] for c in info["chains"]], ["Wide", "Dry"])
+        self.assertEqual(info["chains"][0]["devices"], [{"address": "tracks/0/devices/1/chains/0/devices/0", "name": "Delay", "class_name": "Delay"},
+                                                        {"address": "tracks/0/devices/1/chains/0/devices/1", "name": "Inner Rack", "class_name": "InnerRack"}])
+        self.assertEqual(info["return_chains"][0]["address"], "tracks/0/devices/1/return_chains/0")
+        self.assertEqual(info["macros"], {"visible": 8, "variations": 0, "selected_variation": -1})
+        plain = self.ok("get_device", address="tracks/0/devices/0")
+        self.assertEqual(plain["parameters"][1]["address"], "tracks/0/devices/0/parameters/1")
+        self.assertEqual(plain["parameters"][4]["value_items"], ["A", "B", "C"])
+        self.assertNotIn("chains", plain)
+
+    def test_get_device_lists_only_occupied_drum_pads(self):
+        info = self.ok("get_device", address="tracks/0/devices/2")
+        self.assertEqual([(p["note"], p["name"]) for p in info["drum_pads"]], [(36, "Kick")])
+        self.assertEqual(info["drum_pads"][0]["chains"][0]["devices"][0]["address"], "tracks/0/devices/2/drum_pads/36/chains/0/devices/0")
+        self.assertEqual(self.code("get_device", address="tracks/0"), "INVALID_ARGUMENT")
+        self.assertEqual(self.code("get_device", address="tracks/0/devices/9"), "OUT_OF_RANGE")
+
+    # ---- device_action
+    def test_insert_a_device_into_a_track_or_a_chain(self):
+        nested = self.ok("device_action", action="insert", address="tracks/0/devices/2/drum_pads/36/chains/0", name="Utility", position=0)
+        self.assertEqual(nested["address"], "tracks/0/devices/2/drum_pads/36/chains/0/devices/0")
+        master = self.ok("device_action", action="insert", address="master", name="EQ Eight")
+        self.assertEqual(master["address"], "master/devices/1")
+        end = self.ok("device_action", action="insert", address="returns/0", name="Utility")
+        self.assertEqual(end["address"], "returns/0/devices/1")
+        made = self.ok("device_action", action="insert", address="tracks/0", name="Utility", position=1)
+        self.assertEqual((made["address"], made["name"]), ("tracks/0/devices/1", "Utility"))          # everything after it shifts
+        self.assertEqual([d.name for d in self.synth.devices][:3], ["Wavetable", "Utility", "Audio Effect Rack"])
+
+    def test_insert_errors_come_from_live_or_from_validation(self):
+        response = self.run_command("device_action", {"action": "insert", "address": "tracks/0", "name": "Nope"})
+        self.assertEqual((response["code"], "Could not find a device named 'Nope'" in response["message"]), ("LIVE_ERROR", True))
+        for params, code in [({"address": "tracks/0"}, "INVALID_ARGUMENT"), ({"address": "tracks/0", "name": "  "}, "INVALID_ARGUMENT"),
+                             ({"address": "tracks/0", "name": "Utility", "position": -3}, "INVALID_ARGUMENT"),
+                             ({"address": "tracks/0", "name": "Utility", "position": "0"}, "INVALID_ARGUMENT"),
+                             ({"address": "tracks/0/devices/0", "name": "Utility"}, "INVALID_ARGUMENT"),
+                             ({"address": "tracks/0/devices/0/parameters/1", "name": "Utility"}, "INVALID_ARGUMENT")]:
+            self.assertEqual(self.code("device_action", action="insert", **params), code, params)
+        self.assertEqual(len(self.synth.devices), 4)
+
+    def test_delete_needs_the_guard_and_reports_what_remains(self):
+        self.assertEqual(self.code("device_action", action="delete", address="tracks/0/devices/3"), "INVALID_ARGUMENT")
+        self.assertEqual(self.code("device_action", action="delete", address="tracks/0/devices/3", expect={"name": "Nope"}), "GUARD_FAILED")
+        self.assertEqual(len(self.synth.devices), 4)
+        out = self.ok("device_action", action="delete", address="tracks/0/devices/3", expect={"name": "EQ Eight"})
+        self.assertEqual((out["deleted"], out["name"], out["remaining"]), ("tracks/0/devices/3", "EQ Eight", 3))
+        inner = self.ok("device_action", action="delete", address="tracks/0/devices/1/chains/0/devices/0", expect={"name": "Delay"})
+        self.assertEqual(inner["remaining"], 1)
+        self.assertEqual(self.code("device_action", action="delete", address="tracks/0", expect={"name": "Synth"}), "INVALID_ARGUMENT")
+
+    def test_duplicate_puts_the_copy_next_to_the_source_and_live_can_refuse(self):
+        out = self.ok("device_action", action="duplicate", address="tracks/0/devices/3")
+        self.assertEqual((out["source"], out["address"], out["name"]), ("tracks/0/devices/3", "tracks/0/devices/4", "EQ Eight"))
+        response = self.run_command("device_action", {"action": "duplicate", "address": "tracks/0/devices/0"})
+        self.assertEqual((response["code"], "Can not duplicate instrument" in response["message"]), ("LIVE_ERROR", True))
+
+    def test_move_a_device_to_another_track_or_chain(self):
+        out = self.ok("device_action", action="move", address="tracks/0/devices/3", to="returns/0", position=0)
+        self.assertEqual((out["address"], out["position"]), ("returns/0/devices/0", 0))
+        self.assertEqual([d.name for d in self.song.return_tracks[0].devices], ["EQ Eight", "Return Reverb"])
+        end = self.ok("device_action", action="move", address="returns/0/devices/0", to="tracks/0/devices/1/chains/1")
+        self.assertEqual(end["address"], "tracks/0/devices/1/chains/1/devices/0")
+        self.assertEqual(self.wide.devices[0].name, "Delay")
+        clamped = self.ok("device_action", action="move", address="tracks/0/devices/1/chains/1/devices/0", to="tracks/0", position=99)
+        self.assertEqual((clamped["position"], clamped["requested_position"]), (3, 99))
+        for params, code in [({"to": "song"}, "INVALID_ARGUMENT"), ({}, "INVALID_ARGUMENT"), ({"to": "tracks/0", "position": -5}, "INVALID_ARGUMENT"),
+                             ({"to": "tracks/9"}, "OUT_OF_RANGE")]:
+            self.assertEqual(self.code("device_action", action="move", address="tracks/0/devices/3", **params), code, params)
+
+    def test_ab_compare(self):
+        out = self.ok("device_action", action="save_ab", address="tracks/0/devices/0")
+        self.assertEqual((self.synth.devices[0].saved_ab, out["is_using_compare_preset_b"]), (1, False))
+        self.synth.devices[3].can_compare_ab = False
+        self.assertEqual(self.code("device_action", action="save_ab", address="tracks/0/devices/3"), "UNAVAILABLE")
+
+    def test_rack_actions_chains_macros_variations_and_pads(self):
+        chain = self.ok("device_action", action="insert_chain", address="tracks/0/devices/1")
+        self.assertEqual((chain["address"], chain["name"]), ("tracks/0/devices/1/chains/2", "Chain 3"))
+        self.assertEqual(self.ok("device_action", action="add_macro", address="tracks/0/devices/1")["visible_macro_count"], 9)
+        self.assertEqual(self.ok("device_action", action="remove_macro", address="tracks/0/devices/1")["visible_macro_count"], 8)
+        self.ok("device_action", action="randomize_macros", address="tracks/0/devices/1")
+        self.assertEqual(self.code("device_action", action="recall_variation", address="tracks/0/devices/1"), "UNAVAILABLE")     # none stored
+        self.assertEqual(self.code("device_action", action="delete_variation", address="tracks/0/devices/1"), "UNAVAILABLE")
+        self.assertEqual(self.ok("device_action", action="store_variation", address="tracks/0/devices/1")["variation_count"], 1)
+        self.assertEqual(self.code("device_action", action="recall_variation", address="tracks/0/devices/1"), "UNAVAILABLE")     # stored, none selected
+        self.assertEqual(self.code("device_action", action="recall_variation", address="tracks/0/devices/1", index=3), "OUT_OF_RANGE")
+        self.assertEqual(self.code("device_action", action="recall_variation", address="tracks/0/devices/1", index=True), "OUT_OF_RANGE")
+        self.ok("device_action", action="recall_variation", address="tracks/0/devices/1", index=0)
+        self.assertEqual(self.rack.selected_variation_index, 0)
+        self.ok("device_action", action="recall_variation", address="tracks/0/devices/1")          # the selection stays
+        self.ok("device_action", action="recall_variation", address="tracks/0/devices/1", which="last")
+        self.assertEqual(self.rack.rack_calls, ["randomize", "recall_selected", "recall_selected", "recall_last"])
+        self.assertEqual(self.code("device_action", action="recall_variation", address="tracks/0/devices/1", which="newest"), "INVALID_ARGUMENT")
+        self.assertEqual(self.ok("device_action", action="delete_variation", address="tracks/0/devices/1")["variation_count"], 0)
+        for action in ("insert_chain", "add_macro", "store_variation"):
+            self.assertEqual(self.code("device_action", action=action, address="tracks/0/devices/0"), "INVALID_ARGUMENT")
+        self.assertEqual(self.code("device_action", action="insert_chain", address="tracks/0"), "INVALID_ARGUMENT")
+
+    def test_copy_and_clear_drum_pads(self):
+        out = self.ok("device_action", action="copy_pad", address="tracks/0/devices/2", from_note=36, to_note=38)
+        self.assertEqual((out["to"], self.kit.rack_calls), ("tracks/0/devices/2/drum_pads/38", [("copy_pad", 36, 38)]))
+        for params in ({"from_note": 36}, {"from_note": 36, "to_note": 200}, {"from_note": "36", "to_note": 40}, {"from_note": True, "to_note": 40}):
+            self.assertEqual(self.code("device_action", action="copy_pad", address="tracks/0/devices/2", **params), "INVALID_ARGUMENT", params)
+        self.assertEqual(self.code("device_action", action="copy_pad", address="tracks/0/devices/1", from_note=1, to_note=2), "INVALID_ARGUMENT")
+        self.assertEqual(self.code("device_action", action="clear_pad", address="tracks/0/devices/2/drum_pads/36"), "INVALID_ARGUMENT")
+        self.assertEqual(self.code("device_action", action="clear_pad", address="tracks/0/devices/2/drum_pads/36", expect={"name": "Snare"}), "GUARD_FAILED")
+        cleared = self.ok("device_action", action="clear_pad", address="tracks/0/devices/2/drum_pads/36", expect={"name": "Kick"})
+        self.assertEqual((cleared["cleared_chains"], self.kit.drum_pads[36].cleared), (1, 1))
+
+    def test_unknown_actions_and_targets(self):
+        self.assertEqual(self.code("device_action", action="explode", address="tracks/0"), "INVALID_ARGUMENT")
+        self.assertEqual(self.code("device_action", address="tracks/0"), "INVALID_ARGUMENT")
+        self.assertEqual(self.code("device_action", action="delete", address="nowhere", expect={"name": "x"}), "NOT_FOUND")
+
+    def test_device_actions_are_one_undo_step_each(self):
+        self.song.undo_log.clear()
+        self.ok("device_action", action="insert", address="tracks/0", name="Utility")
+        self.ok("get_device", address="tracks/0/devices/0")
+        self.ok("set_properties", address="tracks/0/devices/0/parameters/1", properties={"value": 0.25})
+        self.assertEqual(self.song.undo_log, ["begin", "end", "begin", "end"])
+
+
 # ---------------------------------------------------------------- generated API registry
 
 class RegistryTests(unittest.TestCase):
@@ -2025,11 +2465,19 @@ class RegistryTests(unittest.TestCase):
         master = self.make_fake("track", mixer_device=make_mixer(sends=False))
         groove = self.make_fake("groove")
         cue = self.make_fake("cue")
+        parameter = self.make_fake("parameter", is_enabled=True, min=0.0, max=1.0, is_quantized=False)
+        on_switch = FakeParam("Device On", 1.0, 0.0, 1.0)
+        pad = self.make_fake("pad", note=36)
+        chain = self.make_fake("chain", mixer_device=make_mixer(), devices=[])
+        device = self.make_fake("device", parameters=[on_switch, parameter], chains=[chain], return_chains=[], drum_pads=[pad],
+                                can_have_chains=True, can_have_drum_pads=True, view=types.SimpleNamespace(is_collapsed=False))
+        track.devices = [device]
         song = self.make_fake("song", tracks=[track], return_tracks=[], scenes=[scene], master_track=master,
                               groove_pool=types.SimpleNamespace(grooves=[groove]), cue_points=[cue])
         script._song = song
         addresses = {"song": "song", "track": "tracks/0", "scene": "scenes/0", "slot": "tracks/0/slots/0", "clip": "tracks/0/slots/0/clip",
-                     "groove": "grooves/0", "cue": "cue_points/0", "app": "app"}
+                     "groove": "grooves/0", "cue": "cue_points/0", "app": "app", "device": "tracks/0/devices/0",
+                     "chain": "tracks/0/devices/0/chains/0", "pad": "tracks/0/devices/0/drum_pads/36", "parameter": "tracks/0/devices/0/parameters/1"}
         checked = 0
         for kind, specs in self.specs.items():
             for name, spec in sorted(specs.items()):
