@@ -20,7 +20,7 @@ A Node.js/TypeScript stdio Model Context Protocol (MCP) server for controlling a
 
 ## Requirements
 
-- Ableton Live 10, 11 or 12 (any edition; Remote Scripts are supported everywhere)
+- Ableton Live 12 or newer (any edition; some features depend on the edition, see `get_capabilities`)
 - Node.js 18+ and npm
 - Optional: `ffmpeg` / `ffprobe` for `analyze_audio_clip`
 
@@ -113,45 +113,40 @@ With Live running and the script enabled, call the `get_health` tool. It should 
 
 ## Capabilities & Compatibility
 
-### Supported Live Versions & Python Surface
-- **Python Compatibility**: Supports Python 2 (Live 10) and Python 3 (Live 11/12).
-- **Group Track Safety**: Safely inspects group tracks (`is_foldable`), folded tracks (`is_grouped`), return tracks, and master tracks without throwing `AttributeError` on arm state.
-- **Arrangement & Session Clips**: Exposes both Session View clip slots and Arrangement View clips where available.
+### Supported Live Versions
+- **Live 12 or newer** (developed against 12.4). Live's Python API is undocumented and shifts between versions, so `npm run test:drift` compares the running Live with a committed API dump (see "Live API reference and drift").
+- **Group, return and master tracks** are inspected safely: properties that do not apply to a track type are reported as unavailable instead of failing.
 
 ### Available MCP Tools
 
-#### Health & Discovery
-- `get_health`: Ping Ableton Live Remote Script TCP bridge, report script version, and capability list.
+Most tools take an **address** (`song`, `tracks/N`, `tracks/N/slots/M/clip`, `grooves/N`, ...): see "Properties by address". Tools carry MCP risk annotations (read-only, destructive), and every writing call is one undo step.
 
-#### Read Tools
-- `get_session_info`: Global session metadata (tempo, time signature, track count, master volume/pan).
-- `get_track_structure`: Summary of all tracks including group parent/child relationships and mixer state.
-- `get_track_detail`: Detailed track breakdown (clip slots, arrangement clips, devices).
-- `get_clip_notes`: Read all MIDI notes from a clip slot.
-- `get_audio_clip_path`: Get an audio clip's source path and Live-side sample/warp metadata from Session or Arrangement view.
-- `analyze_audio_clip`: Analyze the source file for codec/format metadata, integrated LUFS, sample peak, true peak (dBTP), RMS, and an approximate six-band frequency profile.
-- `get_device_parameters`: Get parameter list for a device on a track.
-- `get_browser_tree`: Explore top-level categories in Live browser.
-- `get_browser_items`: Retrieve browser items at a category path. Paged with `limit` (default 200) and `offset`; the result includes `total` and `truncated`.
-- `get_bulk_session_structure`: Retrieve session info, scenes, and all tracks with clip summaries in one single round trip.
+| Area | Tools |
+| --- | --- |
+| Discover | `get_health`, `get_capabilities`, `describe_set`, `list_properties`, `get_track_detail`, `get_device_parameters`, `get_browser_tree`, `get_browser_items`, `get_audio_clip_path`, `analyze_audio_clip` |
+| Read / change any property | `get_properties`, `set_properties` |
+| Structure | `create`, `duplicate`, `delete` (needs `expect`) |
+| Play | `transport`, `launch`, `history` (undo/redo) |
+| Clips and notes | `clip_action`, `get_notes`, `write_notes`, `edit_notes`, `bulk_edit_clips` |
+| Devices and sound | `set_device_parameter`, `bulk_set_device_parameters`, `load_browser_item`, `draw_automation`, `clear_automation`, `ramp_parameter`, `cancel_ramps` |
+| Development | `eval_python` (gated) |
 
-#### Mutation / Write Tools
-- `set_tempo`: Modify BPM.
-- `set_track_name` / `set_track_color`: Rename or recolor a track.
-- `set_track_mute` / `set_track_solo` / `set_track_arm`: Control track mixer states.
-- `create_midi_track`: Insert a new MIDI track.
-- `create_clip`: Create a new clip slot clip with specified length and name.
-- `set_clip_name` / `set_clip_color`: Rename or recolor a clip.
-- `set_scene_name`: Rename a scene.
-- `edit_clip_notes`: Add or replace MIDI notes in a clip slot (`mode: "add" | "replace"`). Replacing explicitly clears existing notes before inserting the complete new sequence.
-- `delete_clip`: Remove a clip slot clip.
-- `fire_clip` / `stop_clip`: Transport controls for individual clip slots.
-- `fire_scene` / `stop_all_clips`: Session view scene launching.
-- `start_playback` / `stop_playback`: Global playback transport controls.
-- `set_device_parameter`: Update device parameter values.
-- `load_browser_item`: Load an instrument, effect or sample onto a track by URI (any URI returned by `get_browser_items`). Samples load into the track's selected clip slot, replacing what is there.
-- `bulk_edit_clips`: Batch clip creation and renaming in serial order on Live's main thread.
-- `bulk_set_device_parameters`: Batch update multiple device parameters in a single round trip.
+Earlier versions had one tool per property or action. These were folded into the verbs above (their bridge commands still exist, only the MCP tools were retired to keep the tool list small):
+
+| Retired tool | Use instead |
+| --- | --- |
+| `get_session_info`, `get_track_structure`, `get_bulk_session_structure` | `describe_set` (whole Set), `get_properties` on `song` |
+| `set_tempo`, `set_track_name`/`color`/`mute`/`solo`/`arm`, `set_clip_name`/`color`, `set_scene_name` | `set_properties` (`tempo`, `name`, `color`, `mute`, `solo`, `arm`, ... on `song`, `tracks/N`, `returns/N`, `master`, clips, scenes) |
+| `create_midi_track`, `create_clip` | `create` (`midi_track`, `midi_clip`) |
+| `delete_clip` | `delete` (`expect` guard) |
+| `fire_clip`, `stop_clip`, `fire_scene`, `stop_all_clips` | `launch` |
+| `start_playback`, `stop_playback` | `transport` |
+| `get_clip_notes`, `edit_clip_notes` | `get_notes`, `write_notes`, `edit_notes` |
+
+#### Notes on a few tools
+- `get_track_detail`: clip slots, arrangement clips and devices of a track. `get_audio_clip_path`: an audio clip's source path and warp metadata. `analyze_audio_clip`: codec/format metadata, integrated LUFS, sample and true peak (dBTP), RMS and an approximate six-band frequency profile of the clip's source file. `get_browser_items`: browser items at a category path, paged with `limit` (default 200) and `offset` (`total` and `truncated` in the result).
+- `load_browser_item`: load an instrument, effect or sample onto a track by URI (any URI returned by `get_browser_items`). Samples load into the track's selected clip slot, replacing what is there.
+- `bulk_edit_clips`: batch clip creation and renaming in serial order on Live's main thread. `bulk_set_device_parameters`: update many device parameters in one round trip.
 
 #### Automation & Ramps
 - `draw_automation`: Draw a Session-clip automation envelope for a device or mixer parameter from `{time, value}` points (times in beats from clip start, values in the parameter's own units). Curves: `linear`, `step`, `smooth`, `ease_in`, `ease_out`, per call or per point. Ramps are drawn as fine staircases (`resolution` beats per step) that start exactly on the first value and end exactly on the last. `mode: "replace"` (default) rebuilds the parameter's envelope, `"merge"` rewrites only the drawn range; `hold` (default) fills the clip edges. The result includes a readback of Live's stored values.
@@ -181,7 +176,6 @@ Targets are `device_index` (or `device_path`) + `parameter_index`, or `mixer_par
 - `get_notes`: every field Live stores for each note (`id`, `pitch`, `start_time`, `duration` in beats, `velocity` 1-127, `mute`, `probability` 0-1, `velocity_deviation` -127..127, `release_velocity` 0-127), sorted by time then pitch. Filter by range (`from_time`/`time_span`/`from_pitch`/`pitch_span`), `ids` or `selected`; `limit` (default 2000) caps the answer and `truncated` says if more exist. MIDI clips only.
 - `write_notes`: additive. Every note is validated before anything is written, so one bad note rejects the whole call (max 5000 notes). Returns the new ids and the clip's real `note_count`: Live never lets notes of one pitch overlap, so a new note shortens an earlier note that runs into it and one at exactly the same start time replaces it.
 - `edit_notes` (destructive, one undo step): `modify` (`changes: [{id, ...fields}]` or `ids` + `set`; goes through Live's `apply_note_modifications`, which keeps note ids and per-note events), `remove` (exactly one of `ids`, a range, `all: true`), `replace` (swap the notes in a range, or all, for `notes` in one step; if Live refuses the new notes the old ones are put back), `duplicate` (`ids`, `destination_time`, `transposition`), `duplicate_region`, `select` (`ids`, `all`, `none`). Ids that are not in the clip are refused (`NOT_FOUND`) with nothing changed.
-- The older `get_clip_notes`, `edit_clip_notes` and `bulk_edit_clips` still work but do not expose ids or the extended fields.
 
 #### Set structure, capabilities, transport and history
 - `describe_set`: a compact map of the whole Set (song settings, every track/return/master with address, kind, mixer state, devices and clips, every scene). Each track has a `hash`, and the Set a `fingerprint`, that change only when the Set really changes (playhead, play state and meters are ignored), so a client can detect edits by comparing fingerprints and see which track changed by comparing hashes. `include_clips: false` gives a lighter summary. The live test suite uses the fingerprint as an invariant: it must be identical before and after a run.
@@ -190,18 +184,18 @@ Targets are `device_index` (or `device_path`) + `parameter_index`, or `mixer_par
 - `history`: `undo`/`redo` (`steps` 1-50). It is flagged destructive because undo is global and also reverts edits made by hand.
 
 #### Creating, duplicating and deleting
-- `create`: `kind` is `audio_track`, `midi_track`, `return_track` (always appended) or `scene`; optional `index` (0-based insertion position, -1 appends), `name` and `color`. Returns the new object's `address`. Live snaps colours to its palette, so the result reports the colour it actually applied.
+- `create`: `kind` is `audio_track`, `midi_track`, `return_track` (always appended), `scene` or `midi_clip` (`address` of an empty clip slot, `length` in beats, default 4); optional `index` (0-based insertion position, -1 appends), `name` and `color`. Returns the new object's `address`. Live snaps colours to its palette, so the result reports the colour it actually applied.
 - `duplicate`: a regular track (`tracks/N`, with devices and clips), a scene, or a clip slot (`tracks/N/slots/M`); the copy lands right after the source and the new address is returned. Return tracks and the master cannot be duplicated.
 - `delete` (destructive): a track, return track, scene or clip. **`expect: {"name": ...}` is mandatory**: indices shift after every create/delete, and a stale index is exactly how the wrong object gets removed, so the call is refused (`GUARD_FAILED`) when the object's current name differs. The master cannot be deleted, and a Set always keeps at least one scene. Each call is one undo step, and `history` `undo` brings a deleted object back.
 - Live renumbers default track names when tracks are inserted or removed ("12-Acid..." becomes "13-Acid..."), so re-read addresses after structural changes instead of caching them.
 
 #### Addressing: track types, racks and parameter details
-Every device-facing tool (`get_track_detail`, `get_device_parameters`, `set_device_parameter`, `bulk_set_device_parameters`, `load_browser_item`, `ramp_parameter`, `cancel_ramps`, and the `set_track_*` tools) takes:
+Every device-facing tool (`get_track_detail`, `get_device_parameters`, `set_device_parameter`, `bulk_set_device_parameters`, `load_browser_item`, `ramp_parameter`, `cancel_ramps`) takes:
 
 - `track_type`: `"track"` (default), `"return"` (`track_index` counts return tracks) or `"master"` (`track_index` is ignored; pass 0). The master and return tracks can hold devices, so they can be read, loaded onto, set, ramped and mixed like any other. Clip automation is not available on them (they have no clips). Live prefixes return track names with their letter (`A-Reverb`), so write the bare name when renaming.
 - `device_path`: reaches devices inside racks. It alternates device and chain selectors and ends on a device index, e.g. `[0, 2, 1]` is device 1 in chain 2 of the rack at device 0. A chain selector is a chain index, `{"pad": 36}` (or `{"pad": 36, "chain": 1}`) for a drum pad, or `{"return": 0}` for a return chain. Use it instead of `device_index`.
 
-`get_device_parameters` lists, for each parameter: `index`, `name`, `value`, `min`, `max`, `is_quantized`, `is_enabled`, the `display` string Live shows (`"14.2 kHz"`), a `default` for continuous parameters and `value_items` labels for quantized ones (Filter Type `0` is `"Low-pass"`). For a rack it also lists its `chains`, `return_chains` and occupied `drum_pads`, so you can see what a `device_path` can reach. `get_bulk_session_structure` now includes the return tracks and the master.
+`get_device_parameters` lists, for each parameter: `index`, `name`, `value`, `min`, `max`, `is_quantized`, `is_enabled`, the `display` string Live shows (`"14.2 kHz"`), a `default` for continuous parameters and `value_items` labels for quantized ones (Filter Type `0` is `"Low-pass"`). For a rack it also lists its `chains`, `return_chains` and occupied `drum_pads`, so you can see what a `device_path` can reach.
 
 Not covered: device properties Live keeps outside `parameters` (Wavetable's oscillator wavetable selection, Drift's mod matrix, unison and voice modes), and VST/AU plugin parameters beyond the ones Live has configured.
 

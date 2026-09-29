@@ -52,16 +52,17 @@ async function fails(name, args, fragment) {
 }
 
 // discovery through the public tools
-const session = await ok('get_bulk_session_structure');
+const session = await ok('describe_set');
 let T, S, D, P;
 for (const track of session.tracks) {
-  if (!track.is_midi_track || track.device_count < 1) continue;
-  const detail = await ok('get_track_detail', { track_index: track.index });
+  if (track.kind !== 'midi' || track.devices.length < 1) continue;
+  const trackIndex = Number(track.address.split('/')[1]);
+  const detail = await ok('get_track_detail', { track_index: trackIndex });
   const free = detail.clip_slots.find((slot) => !slot.has_clip);
-  const params = (await ok('get_device_parameters', { track_index: track.index, device_index: 0 })).parameters;
+  const params = (await ok('get_device_parameters', { track_index: trackIndex, device_index: 0 })).parameters;
   const p = params.find((x) => x.index > 0 && x.max > x.min && !/\bon\b|type|mode|sync/i.test(x.name) && !Number.isInteger(x.value));
   if (free && p) {
-    [T, S, D, P] = [track.index, free.index, 0, p];
+    [T, S, D, P] = [trackIndex, free.index, 0, p];
     break;
   }
 }
@@ -72,7 +73,7 @@ const target = { track_index: T, device_index: D, parameter_index: P.index };
 console.log(`Track ${T}, parameter "${P.name}", scratch slot ${S}\n`);
 
 try {
-  await ok('create_clip', { track_index: T, clip_index: S, length: 4, name: 'MCP TOOL TEST' });
+  await ok('create', { kind: 'midi_clip', address: `tracks/${T}/slots/${S}`, length: 4, name: 'MCP TOOL TEST' });
 
   console.log('Tool listing');
   const { tools } = await client.listTools();
@@ -154,8 +155,8 @@ try {
     for (const c of ['draw_automation', 'clear_automation', 'ramp_parameter', 'cancel_ramps']) assert(health.capabilities.includes(c), `${c} missing`);
   });
   await check('an ordinary tool still works after all of that', async () => {
-    const info = await ok('get_session_info');
-    assert(typeof info.tempo === 'number', 'no tempo');
+    const info = await ok('get_properties', { address: 'song', names: ['tempo'] });
+    assert(typeof info.properties.tempo === 'number', 'no tempo');
   });
 
   console.log('\nAddresses and properties');
@@ -235,7 +236,7 @@ try {
       }
     }
     assert((await ok('describe_set', { include_clips: false })).scenes.length === scenes, 'the scratch scenes should be gone');
-    await fails('create', { kind: 'device' }, 'kind must be one of: audio_track, midi_track, return_track, scene');
+    await fails('create', { kind: 'device' }, 'kind must be one of: audio_track, midi_track, return_track, scene, midi_clip');
     await fails('duplicate', { address: 'master' }, 'Only regular tracks, scenes and clip slots can be duplicated');
   });
   await check('launch and clip_action are listed with the right risk annotations and required arguments', async () => {
@@ -298,7 +299,7 @@ try {
 
   console.log('\nTrack types, device paths and parameter details');
   await check('schemas expose track_type and device_path where they apply', async () => {
-    for (const name of ['get_track_detail', 'get_device_parameters', 'set_device_parameter', 'load_browser_item', 'set_track_name', 'set_track_color', 'set_track_mute', 'set_track_solo', 'set_track_arm', 'ramp_parameter', 'cancel_ramps', 'draw_automation', 'clear_automation']) {
+    for (const name of ['get_track_detail', 'get_device_parameters', 'set_device_parameter', 'load_browser_item', 'ramp_parameter', 'cancel_ramps', 'draw_automation', 'clear_automation']) {
       const prop = byName[name].inputSchema.properties.track_type;
       assert(prop && JSON.stringify(prop.enum) === JSON.stringify(['track', 'return', 'master']), `${name} lacks a track_type enum`);
     }
@@ -317,7 +318,7 @@ try {
     const quantized = out.parameters.find((p) => p.is_quantized && p.value_items);
     if (quantized) assert(quantized.display === quantized.value_items[quantized.value], `${quantized.name} display/label mismatch`);
   });
-  const returnCount = (await ok('get_bulk_session_structure')).return_tracks.length;
+  const returnCount = (await ok('describe_set', { include_clips: false })).returns.length;
   if (returnCount > 0) {
     await check('return tracks work through the tools: read, set, ramp, bulk, track detail', async () => {
       const dev = await ok('get_device_parameters', { track_index: 0, track_type: 'return', device_index: 0 });
@@ -342,9 +343,9 @@ try {
   await check('master track works through the tools and guards what it cannot do', async () => {
     const detail = await ok('get_track_detail', { track_index: 0, track_type: 'master' });
     assert(detail.track_type === 'master' && detail.index === null, JSON.stringify(detail).slice(0, 160));
-    await fails('set_track_mute', { track_index: 0, track_type: 'master', mute: true }, 'master track cannot');
+    await fails('set_properties', { address: 'master', properties: { mute: true } }, 'mute');
     await fails('get_track_detail', { track_index: 99, track_type: 'return' }, 'Return track index out of range');
-    const currentVolume = (await ok('get_bulk_session_structure')).master.volume;
+    const currentVolume = (await ok('describe_set', { include_clips: false })).master.volume;
     const volume = await tool('ramp_parameter', { track_index: 0, track_type: 'master', mixer_parameter: 'volume', to: currentVolume, seconds: 0.05 });
     assert(!volume.isError, volume.text);
     const cancelled = await ok('cancel_ramps', { track_index: 0, track_type: 'master', mixer_parameter: 'volume' });
@@ -359,7 +360,7 @@ try {
 } finally {
   await tool('cancel_ramps');
   await tool('clear_automation', { track_index: T, clip_index: S });
-  await tool('delete_clip', { track_index: T, clip_index: S });
+  await tool('delete', { address: `tracks/${T}/slots/${S}/clip`, expect: { name: 'MCP TOOL TEST' } });
   await tool('set_device_parameter', { ...target, value: original });
   await client.close();
 }

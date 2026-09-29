@@ -180,14 +180,16 @@ export const TOOL_SPECS: ToolSpec[] = [
   {
     name: 'create',
     description:
-      "Create a track, return track or scene and get back its address. kind: audio_track, midi_track, return_track (always appended) or scene. " +
-      "`index` is the insertion position (0-based; omit or -1 to append; existing objects shift, so re-read addresses afterwards). " +
+      "Create a track, return track, scene or MIDI clip and get back its address. kind: audio_track, midi_track, return_track (always appended), scene, or midi_clip " +
+      "(`address` of an EMPTY clip slot like 'tracks/2/slots/0', `length` in beats, default 4). For tracks and scenes `index` is the insertion position (0-based; omit or -1 to append; existing objects shift, so re-read addresses afterwards). " +
       "Optional `name` and `color` (RGB integer; Live snaps it to the nearest palette colour and the result reports the colour it applied) are applied immediately. One undo step.",
     inputSchema: {
       type: 'object',
       properties: {
-        kind: { type: 'string', enum: ['audio_track', 'midi_track', 'return_track', 'scene'], description: 'What to create' },
+        kind: { type: 'string', enum: ['audio_track', 'midi_track', 'return_track', 'scene', 'midi_clip'], description: 'What to create' },
         index: { type: 'number', description: 'Insertion position, -1 (default) appends' },
+        address: { type: 'string', description: "midi_clip: the empty clip slot to fill, e.g. 'tracks/2/slots/0'" },
+        length: { type: 'number', description: 'midi_clip: length in beats (default 4)' },
         name: { type: 'string', description: 'Name to give it' },
         color: { type: 'number', description: 'RGB color integer' }
       },

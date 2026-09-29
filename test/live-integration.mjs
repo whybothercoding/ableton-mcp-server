@@ -586,7 +586,7 @@ try {
   const launchTrack = await makeScratchTrack();
   const lt = `tracks/${launchTrack}`;
   const launchClip = `${lt}/slots/0/clip`;
-  await call('create_clip', { track_index: launchTrack, clip_index: 0, length: 4 });
+  const madeClip = await call('create', { kind: 'midi_clip', address: `${lt}/slots/0`, length: 4, name: 'MCP TEST LAUNCH' });
   const noteStarts = async () => (await call('get_clip_notes', { track_index: launchTrack, clip_index: 0 })).notes.map((n) => n.start_time).sort((a, b) => a - b);
   const clipState = (names) => call('get_properties', { address: launchClip, names });
   const waitFor = async (predicate, ms = 3000) => {
@@ -600,6 +600,20 @@ try {
   cleanupsRegistry.push(async () => {
     await call('launch', { address: lt, action: 'stop', quantized: false }).catch(() => {});
     if (!transportWasPlaying) await call('transport', { action: 'stop' }).catch(() => {});
+  });
+  await check('create midi_clip fills an empty slot, returns the clip address, and refuses an occupied slot', async () => {
+    assert(madeClip.address === launchClip && madeClip.name === 'MCP TEST LAUNCH' && madeClip.length === 4 && madeClip.kind === 'midi_clip', JSON.stringify(madeClip));
+    assert((await clipState(['is_midi_clip', 'name'])).properties.name === 'MCP TEST LAUNCH', 'the clip is not what create reported');
+    for (const [params, code] of [[{ kind: 'midi_clip', address: `${lt}/slots/0` }, 'INVALID_ARGUMENT'], [{ kind: 'midi_clip', address: lt }, 'INVALID_ARGUMENT'],
+      [{ kind: 'midi_clip', address: `${lt}/slots/2`, length: 0 }, 'INVALID_ARGUMENT'], [{ kind: 'midi_clip', address: `${lt}/slots/999` }, 'OUT_OF_RANGE']]) {
+      try {
+        await call('create', params);
+      } catch (err) {
+        assert(err.bridgeCode === code, `${JSON.stringify(params)}: expected ${code}, got ${err.bridgeCode} (${err.message})`);
+        continue;
+      }
+      throw new Error(`${JSON.stringify(params)} should have failed`);
+    }
   });
   await check('launch fires a scratch clip through its slot and its clip address, and stops it with the track', async () => {
     for (const address of [`${lt}/slots/0`, launchClip]) {
@@ -730,7 +744,7 @@ try {
   });
 
   console.log('\nNotes: get_notes, write_notes, edit_notes');
-  await call('create_clip', { track_index: launchTrack, clip_index: 1, length: 4 });
+  await call('create', { kind: 'midi_clip', address: `${lt}/slots/1`, length: 4 });
   const nc = `${lt}/slots/1/clip`;
   const notesOf = async (params = {}) => (await call('get_notes', { address: nc, ...params })).notes;
   const byId = (notes) => Object.fromEntries(notes.map((n) => [n.id, n]));

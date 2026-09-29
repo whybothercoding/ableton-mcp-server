@@ -3,9 +3,10 @@
 Everything returns an address the caller can reuse. delete is destructive and demands an `expect` guard, because indices
 shift after every earlier create/delete and a stale index is exactly how the wrong object gets removed.
 """
+from .helpers import _is_number
 from .registry import BridgeError, command
 
-CREATE_KINDS = ("audio_track", "midi_track", "return_track", "scene")
+CREATE_KINDS = ("audio_track", "midi_track", "return_track", "scene", "midi_clip")
 
 
 class LifecycleMixin(object):
@@ -32,10 +33,13 @@ class LifecycleMixin(object):
         if color is not None and (isinstance(color, bool) or not isinstance(color, int)):
             raise BridgeError("color must be an RGB integer", "TYPE_ERROR")
         song = self._song
-        if kind == "return_track":
+        if kind == "midi_clip":
+            created, address = self._create_midi_clip(params)
+        elif kind == "return_track":
             if params.get("index") not in (None, -1):
                 raise BridgeError("return tracks are always appended: leave index out", "INVALID_ARGUMENT")
             created = song.create_return_track()
+            address = self._address_of(created)
         else:
             index = self._position(params)
             limit = len(song.scenes if kind == "scene" else song.tracks)
@@ -43,13 +47,29 @@ class LifecycleMixin(object):
                 raise BridgeError("index {0} is beyond the end (0 to {1})".format(index, limit), "OUT_OF_RANGE")
             created = {"audio_track": song.create_audio_track, "midi_track": song.create_midi_track,
                        "scene": song.create_scene}[kind](index)
+            address = self._address_of(created)
         if name is not None:
             created.name = name
         if color is not None:
             created.color = color
         # Live snaps colors to its palette, so report the color it actually applied
-        return {"address": self._address_of(created), "name": created.name, "kind": kind,
-                "color": getattr(created, "color", None)}
+        result = {"address": address, "name": created.name, "kind": kind, "color": getattr(created, "color", None)}
+        if kind == "midi_clip":
+            result["length"] = created.length
+        return result
+
+    def _create_midi_clip(self, params):
+        """An empty MIDI clip of `length` beats in the empty clip slot at `address`."""
+        slot_kind, slot, canonical = self._resolve(params.get("address"))
+        if slot_kind != "slot":
+            raise BridgeError("midi_clip needs address: the clip slot to fill (tracks/N/slots/M)", "INVALID_ARGUMENT")
+        if slot.has_clip:
+            raise BridgeError("'{0}' already holds a clip: pick an empty slot or delete the clip first".format(canonical), "INVALID_ARGUMENT")
+        length = params.get("length", 4.0)
+        if not _is_number(length) or length <= 0:
+            raise BridgeError("length must be a positive number of beats", "INVALID_ARGUMENT")
+        slot.create_clip(float(length))
+        return slot.clip, canonical + "/clip"
 
     @command("duplicate", writes=True)
     def _cmd_duplicate(self, params):

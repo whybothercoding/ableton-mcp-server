@@ -154,6 +154,9 @@ class FakeSlot(object):
     def stop(self):
         self.calls.append(("stop",))
 
+    def create_clip(self, length):
+        self.clip, self.has_clip = PropClip("", length), True
+
 
 class Typed(object):
     """Setters mimic Boost.Python: exact C++ types (float takes int/bool, int takes bool but not float, str only str)."""
@@ -1287,6 +1290,23 @@ class LifecycleTests(unittest.TestCase):
         self.assertEqual((ret["address"], self.song.return_tracks[-1].name), ("returns/1", "Space"))
         scene = self.run_command("create", {"kind": "scene", "index": 1, "name": "Bridge"})["result"]
         self.assertEqual((scene["address"], self.song.scenes[1].name), ("scenes/1", "Bridge"))
+
+    def test_create_a_midi_clip_in_an_empty_slot(self):
+        made = self.run_command("create", {"kind": "midi_clip", "address": "tracks/0/slots/1", "length": 8, "name": "Riff", "color": 55})["result"]
+        self.assertEqual((made["address"], made["name"], made["length"], made["kind"]), ("tracks/0/slots/1/clip", "Riff", 8.0, "midi_clip"))
+        self.assertEqual((self.song.tracks[0].clip_slots[1].clip.color, made["color"]), (55, 55))
+        default = self.run_command("create", {"kind": "midi_clip", "address": "tracks/0/slots/2"})["result"]
+        self.assertEqual(default["length"], 4.0)
+
+    def test_create_a_midi_clip_errors(self):
+        cases = [({"kind": "midi_clip"}, "INVALID_ARGUMENT"), ({"kind": "midi_clip", "address": "tracks/0"}, "INVALID_ARGUMENT"),
+                 ({"kind": "midi_clip", "address": "tracks/0/slots/0"}, "INVALID_ARGUMENT"),                     # occupied
+                 ({"kind": "midi_clip", "address": "tracks/0/slots/1", "length": 0}, "INVALID_ARGUMENT"),
+                 ({"kind": "midi_clip", "address": "tracks/0/slots/1", "length": "4"}, "INVALID_ARGUMENT"),
+                 ({"kind": "midi_clip", "address": "tracks/0/slots/9"}, "OUT_OF_RANGE")]
+        for params, code in cases:
+            self.assertEqual(self.code_of("create", params), code, str(params))
+        self.assertFalse(self.song.tracks[0].clip_slots[1].has_clip)
 
     def test_create_appends_by_default_and_by_minus_one(self):
         self.assertEqual(self.run_command("create", {"kind": "scene"})["result"]["address"], "scenes/2")
