@@ -311,6 +311,8 @@ npm run test:mcp    # MCP layer: tool schemas, handlers and errors over stdio (n
 npm run test:scenarios  # end-to-end composition scenario through MCP tools only (needs Live)
 ```
 
+The live and MCP suites work on your open Set: everything they create is named `MCP TEST ...` and removed again, and the run fails if the Set's fingerprint or what is playing (transport, tempo, playhead when stopped, playing clips) differs afterwards. They run with the transport stopped or playing. A check that cannot run on your Set (no audio clip, an empty groove pool, ...) or in the current transport state is reported as **skipped**, not passed, and listed at the end; `MCP_TEST_STRICT=1 npm run test:live` turns skips for missing Set content into failures, so you know every check really ran.
+
 ### Live API reference and drift
 
 Live's Python API is undocumented and changes between versions (a beta most of all), so the repo keeps a machine-readable copy and checks it:
