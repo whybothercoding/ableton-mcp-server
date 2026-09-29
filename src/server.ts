@@ -8,6 +8,8 @@ import { AbletonClient } from './client/AbletonClient.js';
 import { TOOLS, isToolEnabled } from './tools/definitions.js';
 import { ToolHandler } from './tools/handlers.js';
 
+const { version } = require('../package.json') as { version: string };
+
 export class AbletonMcpServer {
   private server: Server;
   private client: AbletonClient;
@@ -20,7 +22,7 @@ export class AbletonMcpServer {
     this.server = new Server(
       {
         name: 'ableton-mcp-server',
-        version: '1.0.0'
+        version
       },
       {
         capabilities: {
