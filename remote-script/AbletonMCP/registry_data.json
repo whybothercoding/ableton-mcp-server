@@ -268,6 +268,38 @@
     }
    }
   },
+  "Live.Groove.Groove": {
+   "properties": {
+    "base": {
+     "get": "Groove.Base",
+     "set": "int"
+    },
+    "canonical_parent": {
+     "get": "LomObject.LomObject",
+     "set": null
+    },
+    "name": {
+     "get": "str",
+     "set": "object"
+    },
+    "quantization_amount": {
+     "get": "float",
+     "set": "float"
+    },
+    "random_amount": {
+     "get": "float",
+     "set": "float"
+    },
+    "timing_amount": {
+     "get": "float",
+     "set": "float"
+    },
+    "velocity_amount": {
+     "get": "float",
+     "set": "float"
+    }
+   }
+  },
   "Live.Scene.Scene": {
    "properties": {
     "canonical_parent": {
@@ -822,6 +854,15 @@
    "rex": 5,
    "texture": 2,
    "tones": 1
+  },
+  "Live.Groove.Base": {
+   "count": 6,
+   "gb_eight": 1,
+   "gb_eight_triplet": 2,
+   "gb_four": 0,
+   "gb_sixteen": 3,
+   "gb_sixteen_triplet": 4,
+   "gb_thirtytwo": 5
   },
   "Live.Song.Quantization": {
    "q_2_bars": 3,

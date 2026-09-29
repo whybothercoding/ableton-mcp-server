@@ -64,14 +64,14 @@ export function validateArgs(schema: ToolSpec['inputSchema'], args: Record<strin
 
 const ADDRESS_HELP =
   "Addresses: 'song', 'master', 'tracks/N', 'returns/N', 'scenes/N', 'tracks/N/slots/M' (clip slot) and " +
-  "'tracks/N/slots/M/clip'. Indices are 0-based. A name selector works anywhere a number does, e.g. 'tracks/name:Drift' " +
+  "'tracks/N/slots/M/clip' and 'grooves/N' (groove pool). Indices are 0-based. A name selector works anywhere a number does, e.g. 'tracks/name:Drift' " +
   '(exact match; several matches is an error that lists their indices).';
 
 export const TOOL_SPECS: ToolSpec[] = [
   {
     name: 'get_properties',
     description:
-      'Read properties of a Song, Track, Scene, ClipSlot or Clip. ' + ADDRESS_HELP +
+      'Read properties of a Song, Track, Scene, ClipSlot, Clip or Groove. ' + ADDRESS_HELP +
       ' Give `names` for specific properties, or omit it to read every readable property (properties that do not apply to the ' +
       'object, e.g. audio-only ones on a MIDI clip, are listed under `unavailable`). Enum values come back as names. ' +
       'Use list_properties to see what exists.',
@@ -89,7 +89,7 @@ export const TOOL_SPECS: ToolSpec[] = [
   {
     name: 'set_properties',
     description:
-      'Set properties on a Song, Track, Scene, ClipSlot or Clip. ' + ADDRESS_HELP +
+      'Set properties on a Song, Track, Scene, ClipSlot, Clip or Groove. A clip\'s `groove` is set to a groove address (grooves/N). ' + ADDRESS_HELP +
       ' Values are checked strictly (booleans must be true/false, integers whole numbers, enums given by name; see list_properties). ' +
       'Interdependent properties (e.g. loop_start/loop_end) can be set together in any order, and the call is all-or-nothing: if one ' +
       'write fails, the others are restored. Returns each property\'s previous and new value. Each call is one undo step in Live. ' +
@@ -232,15 +232,62 @@ export const TOOL_SPECS: ToolSpec[] = [
     bridge: { command: 'delete' }
   },
   {
+    name: 'launch',
+    description:
+      "Fire or stop things in the Session view. `address` is a clip slot or clip ('tracks/N/slots/M[/clip]': fire starts the clip, or the slot's stop button when empty; " +
+      "stop stops it), a scene ('scenes/N': fire only) , a track ('tracks/N': stop all its clips) or 'song' (stop all clips, transport keeps running). " +
+      "Options for a slot: `quantization` overrides the launch quantization for this launch (q_no_q, q_bar, q_half...), `legato` starts the clip in sync with the one playing, " +
+      "`record_length` (beats, empty slot only) starts a recording that ends by itself. Scenes take `legato` and `select` (false keeps the selection where it is). " +
+      "Stops take `quantized` (default true; false stops immediately). Launching does not change the Set's content.",
+    inputSchema: {
+      type: 'object',
+      properties: {
+        address: { type: 'string', description: "Slot, clip, scene, track or 'song'" },
+        action: { type: 'string', enum: ['fire', 'stop'], description: 'Default fire' },
+        quantization: { type: 'string', description: 'Song.Quantization name for this launch (slots only), e.g. q_bar' },
+        legato: { type: 'boolean', description: 'Start in sync with the playing clip (slots and scenes)' },
+        record_length: { type: 'number', description: 'Beats to record (empty slots only)' },
+        select: { type: 'boolean', description: 'Scenes: whether launching selects the scene (default true)' },
+        quantized: { type: 'boolean', description: 'Stops: wait for the launch quantization (default true)' }
+      },
+      required: ['address']
+    },
+    annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: false },
+    bridge: { command: 'launch' }
+  },
+  {
+    name: 'clip_action',
+    description:
+      "Edit a clip in place: crop (discard everything outside the loop), duplicate_loop (loop twice as long, notes and envelopes copied; MIDI only), " +
+      "quantize (`grid`: rec_q_quarter, rec_q_eight, rec_q_eight_triplet, rec_q_sixtenth, rec_q_thirtysecond...; `amount` 0-1, default 1; on audio clips it aligns warp markers), " +
+      "quantize_pitch (like quantize for one `pitch`, 0-127; MIDI only), scrub (`position` in beats) / stop_scrub, move_playing_pos (`amount` beats, negative goes back; clip must be playing). " +
+      "`address` must be a clip. crop and quantize rewrite content: one undo step each, and `expect` ({name}) refuses to act on the wrong clip. Returns the clip's length and loop after the action.",
+    inputSchema: {
+      type: 'object',
+      properties: {
+        address: { type: 'string', description: "A clip, e.g. 'tracks/2/slots/0/clip'" },
+        action: { type: 'string', enum: ['crop', 'duplicate_loop', 'quantize', 'quantize_pitch', 'scrub', 'stop_scrub', 'move_playing_pos'], description: 'What to do' },
+        grid: { type: 'string', description: 'Song.RecordingQuantization name (quantize, quantize_pitch)' },
+        amount: { type: 'number', description: 'quantize: 0-1 strength; move_playing_pos: beats' },
+        pitch: { type: 'number', description: 'MIDI note number (quantize_pitch)' },
+        position: { type: 'number', description: 'Beats from the clip start (scrub)' },
+        expect: { type: 'object', description: 'Guard: {"name": "..."} must match the clip' }
+      },
+      required: ['address', 'action']
+    },
+    annotations: { readOnlyHint: false, destructiveHint: true, idempotentHint: false },
+    bridge: { command: 'clip_action' }
+  },
+  {
     name: 'list_properties',
     description:
       'List the properties get_properties/set_properties know for an object kind: type, whether it is writable, allowed enum values ' +
-      'and ranges. Give an `address` (its kind is used) or a `kind`: song, track, scene, slot or clip.',
+      'and ranges. Give an `address` (its kind is used) or a `kind`: song, track, scene, slot, clip or groove.',
     inputSchema: {
       type: 'object',
       properties: {
         address: { type: 'string', description: 'Object address; its kind is listed' },
-        kind: { type: 'string', enum: ['song', 'track', 'scene', 'slot', 'clip'], description: 'Object kind (when no address is given)' }
+        kind: { type: 'string', enum: ['song', 'track', 'scene', 'slot', 'clip', 'groove'], description: 'Object kind (when no address is given)' }
       }
     },
     annotations: { readOnlyHint: true, destructiveHint: false, idempotentHint: true },

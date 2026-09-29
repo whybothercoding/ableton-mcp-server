@@ -238,6 +238,30 @@ try {
     await fails('create', { kind: 'device' }, 'kind must be one of: audio_track, midi_track, return_track, scene');
     await fails('duplicate', { address: 'master' }, 'Only regular tracks, scenes and clip slots can be duplicated');
   });
+  await check('launch and clip_action are listed with the right risk annotations and required arguments', async () => {
+    assert(byName.launch.annotations.destructiveHint === false && byName.launch.annotations.readOnlyHint === false, 'launch changes playback, not content');
+    assert(byName.clip_action.annotations.destructiveHint === true, 'clip_action rewrites clip content: destructive');
+    assert(JSON.stringify(byName.launch.inputSchema.required) === JSON.stringify(['address']), 'launch requires an address');
+    assert(JSON.stringify(byName.clip_action.inputSchema.required) === JSON.stringify(['address', 'action']), 'clip_action requires address and action');
+  });
+  await check('launch and clip_action reject bad calls with readable errors, without touching the Set', async () => {
+    await fails('launch', {}, "missing required argument 'address'");
+    await fails('launch', { address: clipAddress, legato: 'yes' }, 'legato must be true or false');
+    await fails('launch', { address: `tracks/${T}` }, 'A track cannot be fired');
+    await fails('launch', { address: 'song' }, 'The song cannot be fired');
+    await fails('launch', { address: clipAddress, action: 'jump' }, 'action must be one of: fire, stop');
+    await fails('clip_action', { address: clipAddress, action: 'explode' }, 'action must be one of: crop, duplicate_loop');
+    await fails('clip_action', { address: `tracks/${T}`, action: 'crop' }, 'needs the address of a clip');
+    await fails('clip_action', { address: clipAddress, action: 'crop', expect: { name: 'Definitely Not This' } }, 'Guard failed');
+    await fails('clip_action', { address: clipAddress, action: 'quantize', grid: 'sixteenth' }, 'grid must be one of');
+  });
+  await check('a clip_action goes through MCP on the scratch clip, and history undoes it', async () => {
+    const before = await ok('get_properties', { address: clipAddress, names: ['length', 'loop_end'] });
+    const result = await ok('clip_action', { address: clipAddress, action: 'duplicate_loop' });
+    assert(result.length === before.properties.length * 2, JSON.stringify(result));
+    await ok('history', { action: 'undo' });
+    assert((await ok('get_properties', { address: clipAddress, names: ['length'] })).properties.length === before.properties.length, 'undo should restore the length');
+  });
   await check('argument problems are caught in TypeScript with a readable message', async () => {
     await fails('get_properties', {}, "missing required argument 'address'");
     await fails('get_properties', { address: 5 }, 'address must be a string');

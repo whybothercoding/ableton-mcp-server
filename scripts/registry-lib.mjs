@@ -1,12 +1,12 @@
 // Turns an API dump (docs/live-api/<version>.json) into the compact registry the Remote Script ships, and diffs dumps.
 
 /** Classes whose properties the property engine knows about (qualified names as Live.<Module>.<Class>[.<Nested>]). */
-export const INCLUDE_CLASSES = ['Live.Song.Song', 'Live.Track.Track', 'Live.Scene.Scene', 'Live.ClipSlot.ClipSlot', 'Live.Clip.Clip'];
+export const INCLUDE_CLASSES = ['Live.Song.Song', 'Live.Track.Track', 'Live.Scene.Scene', 'Live.ClipSlot.ClipSlot', 'Live.Clip.Clip', 'Live.Groove.Groove'];
 
 /** Enum types referenced by property overlays (an int property has no enum type of its own). */
 export const INCLUDE_ENUMS = [
   'Live.Song.Quantization', 'Live.Song.RecordingQuantization', 'Live.Clip.LaunchMode', 'Live.Clip.ClipLaunchQuantization',
-  'Live.Clip.WarpMode', 'Live.Track.Track.monitoring_states'
+  'Live.Clip.WarpMode', 'Live.Groove.Base', 'Live.Track.Track.monitoring_states'
 ];
 
 function sortKeys(value) {

@@ -579,6 +579,156 @@ try {
     await call('delete', { address: `scenes/${scenes}`, expect: { name: 'MCP TEST UNDO' } });
   });
 
+  console.log('\nLaunch, clip actions and grooves');
+  // Everything runs on a scratch MIDI track with no devices (silent). Scenes are never fired here: a scene launch also
+  // triggers the stop buttons of every other track's empty slots and would stop the user's playing clips.
+  const transportWasPlaying = await call('eval', { code: 'bool(self._song.is_playing)' });
+  const launchTrack = await makeScratchTrack();
+  const lt = `tracks/${launchTrack}`;
+  const launchClip = `${lt}/slots/0/clip`;
+  await call('create_clip', { track_index: launchTrack, clip_index: 0, length: 4 });
+  const noteStarts = async () => (await call('get_clip_notes', { track_index: launchTrack, clip_index: 0 })).notes.map((n) => n.start_time).sort((a, b) => a - b);
+  const clipState = (names) => call('get_properties', { address: launchClip, names });
+  const waitFor = async (predicate, ms = 3000) => {
+    const end = Date.now() + ms;
+    while (Date.now() < end) {
+      if (await predicate()) return true;
+      await sleep(50);
+    }
+    return false;
+  };
+  cleanupsRegistry.push(async () => {
+    await call('launch', { address: lt, action: 'stop', quantized: false }).catch(() => {});
+    if (!transportWasPlaying) await call('transport', { action: 'stop' }).catch(() => {});
+  });
+  await check('launch fires a scratch clip through its slot and its clip address, and stops it with the track', async () => {
+    for (const address of [`${lt}/slots/0`, launchClip]) {
+      const fired = await call('launch', { address, quantization: 'q_no_q' });
+      assert(fired.address === `${lt}/slots/0`, JSON.stringify(fired));
+      assert(await waitFor(async () => (await clipState(['is_playing'])).properties.is_playing), `${address}: the clip never started`);
+      const stopped = await call('launch', { address: lt, action: 'stop', quantized: false });
+      assert(stopped.state && 'playing_slot_index' in stopped.state, JSON.stringify(stopped));
+      assert(await waitFor(async () => !(await clipState(['is_playing'])).properties.is_playing), 'the clip never stopped');
+    }
+  });
+  await check('launch reports errors with codes and does not start anything', async () => {
+    for (const [params, code] of [[{ address: lt }, 'INVALID_ARGUMENT'], [{ address: 'song' }, 'INVALID_ARGUMENT'],
+      [{ address: `${lt}/slots/0`, quantization: 'q_never' }, 'INVALID_ARGUMENT'], [{ address: `${lt}/slots/999` }, 'OUT_OF_RANGE'],
+      [{ address: 'returns/0', action: 'stop' }, 'INVALID_ARGUMENT'], [{ address: 'scenes/0', action: 'stop' }, 'INVALID_ARGUMENT']]) {
+      try {
+        await call('launch', params);
+      } catch (err) {
+        assert(err.bridgeCode === code, `${JSON.stringify(params)}: expected ${code}, got ${err.bridgeCode} (${err.message})`);
+        continue;
+      }
+      throw new Error(`${JSON.stringify(params)} should have failed`);
+    }
+    assert(!(await clipState(['is_playing'])).properties.is_playing, 'a rejected launch started the clip');
+  });
+  await check('record_length is refused by Live for a slot that already holds a clip, and the message comes through', async () => {
+    try {
+      await call('launch', { address: `${lt}/slots/0`, record_length: 4 });
+    } catch (err) {
+      assert(err.bridgeCode === 'LIVE_ERROR' && /empty slots/i.test(err.message), `${err.bridgeCode}: ${err.message}`);
+      await call('launch', { address: lt, action: 'stop', quantized: false });
+      return;
+    }
+    await call('launch', { address: lt, action: 'stop', quantized: false });
+    throw new Error('Live accepted record_length on a slot that owns a clip');
+  });
+  await check('quantize snaps notes to a grid, and one undo restores them', async () => {
+    const original = [0.1, 1.3, 2.62, 3.05];
+    await call('add_notes_to_clip', { track_index: launchTrack, clip_index: 0, notes: original.map((start_time, i) => ({ pitch: 60 + i, start_time, duration: 0.25, velocity: 100 })) });
+    const written = await noteStarts();
+    assert(written.length === 4 && written.every((t, i) => Math.abs(t - original[i]) < 1e-6), `notes were not written as expected: ${written}`);
+    const result = await call('clip_action', { address: launchClip, action: 'quantize', grid: 'rec_q_quarter' });
+    assert(result.address === launchClip && result.length === 4, JSON.stringify(result));
+    const snapped = await noteStarts();
+    assert(snapped.every((t) => Math.abs(t - Math.round(t)) < 1e-6), `not on the quarter grid: ${snapped}`);
+    await call('history', { action: 'undo' });
+    const back = await noteStarts();
+    assert(back.every((t, i) => Math.abs(t - original[i]) < 1e-6), `undo did not restore the notes: ${back}`);
+  });
+  await check('quantize with a partial amount moves notes part of the way; quantize_pitch touches one pitch only', async () => {
+    await call('clip_action', { address: launchClip, action: 'quantize', grid: 'rec_q_quarter', amount: 0.5 });
+    const half = await noteStarts();
+    near(half[0], 0.05, 0.02, 'note at 0.1 quantized 50% to 0');
+    await call('history', { action: 'undo' });
+    await call('clip_action', { address: launchClip, action: 'quantize_pitch', pitch: 61, grid: 'rec_q_quarter' });
+    const notes = (await call('get_clip_notes', { track_index: launchTrack, clip_index: 0 })).notes;
+    const byPitch = Object.fromEntries(notes.map((n) => [n.pitch, n.start_time]));
+    near(byPitch[61], 1.0, 1e-6, 'pitch 61 snapped');
+    near(byPitch[60], 0.1, 1e-6, 'pitch 60 untouched');
+    await call('history', { action: 'undo' });
+    for (const [params, code] of [[{ grid: 'sixteenth' }, 'INVALID_ARGUMENT'], [{ grid: 'rec_q_eight', amount: 3 }, 'OUT_OF_RANGE'], [{}, 'INVALID_ARGUMENT']]) {
+      try {
+        await call('clip_action', { address: launchClip, action: 'quantize', ...params });
+      } catch (err) {
+        assert(err.bridgeCode === code, `${JSON.stringify(params)}: expected ${code}, got ${err.bridgeCode}`);
+        continue;
+      }
+      throw new Error(`${JSON.stringify(params)} should have failed`);
+    }
+  });
+  await check('duplicate_loop doubles the clip and its notes; undo restores it', async () => {
+    const before = (await noteStarts()).length;
+    const result = await call('clip_action', { address: launchClip, action: 'duplicate_loop' });
+    assert(result.length === 8 && result.loop_end === 8, JSON.stringify(result));
+    assert((await noteStarts()).length === before * 2, 'notes were not duplicated');
+    await call('history', { action: 'undo' });
+    assert((await clipState(['length'])).properties.length === 4, 'undo did not restore the length');
+  });
+  await check('crop keeps only the loop; the guard refuses the wrong clip', async () => {
+    await call('set_properties', { address: launchClip, properties: { loop_start: 1, loop_end: 3 } });
+    try {
+      await call('clip_action', { address: launchClip, action: 'crop', expect: { name: 'not this clip' } });
+      throw new Error('crop ignored the guard');
+    } catch (err) {
+      assert(err.bridgeCode === 'GUARD_FAILED', `${err.bridgeCode}: ${err.message}`);
+    }
+    assert((await clipState(['length'])).properties.length === 2, 'a guarded crop changed the clip');
+    const cropped = await call('clip_action', { address: launchClip, action: 'crop' });
+    assert(cropped.length === 2, JSON.stringify(cropped));
+    await call('history', { action: 'undo' });
+    assert((await clipState(['length'])).properties.length === 2, 'undo of a crop should keep the loop-based length');
+  });
+  await check('scrub, stop_scrub and move_playing_pos reach Live', async () => {
+    assert((await call('clip_action', { address: launchClip, action: 'scrub', position: 0.5 })).action === 'scrub', 'scrub');
+    assert((await call('clip_action', { address: launchClip, action: 'stop_scrub' })).action === 'stop_scrub', 'stop_scrub');
+    await call('launch', { address: launchClip, quantization: 'q_no_q' });
+    assert(await waitFor(async () => (await clipState(['is_playing'])).properties.is_playing), 'the clip never started');
+    assert((await call('clip_action', { address: launchClip, action: 'move_playing_pos', amount: 0.25 })).is_playing === true, 'move_playing_pos');
+    await call('launch', { address: lt, action: 'stop', quantized: false });
+  });
+  await check('grooves: a clip always has one, addressed as grooves/N; assignment and parameters round-trip and are restored', async () => {
+    const pool = await call('eval', { code: 'len(self._song.groove_pool.grooves)' });
+    if (pool === 0) {
+      console.log('       the groove pool is empty: skipped (Live cannot create grooves through its API)');
+      return;
+    }
+    const clip = await clipState(['groove', 'has_groove']);
+    assert(/^grooves\/\d+$/.test(clip.properties.groove) && clip.properties.has_groove === true, JSON.stringify(clip.properties));
+    const before = await call('get_properties', { address: 'grooves/0' });
+    assert(before.kind === 'groove' && typeof before.properties.name === 'string', JSON.stringify(before));
+    assert((await call('get_properties', { address: `grooves/name:${before.properties.name}`, names: ['name'] })).address === 'grooves/0', 'name selector');
+    const assigned = await call('set_properties', { address: launchClip, properties: { groove: 'grooves/0' } });
+    assert(assigned.applied.groove.to === 'grooves/0', JSON.stringify(assigned));
+    // the groove object is shared with every clip that uses it: change a parameter, verify, and put the exact value back
+    const original = before.properties.timing_amount;
+    cleanupsRegistry.push(() => call('set_properties', { address: 'grooves/0', properties: { timing_amount: original } }));
+    await call('set_properties', { address: 'grooves/0', properties: { timing_amount: original === 50 ? 60 : 50 } });
+    near((await call('get_properties', { address: 'grooves/0', names: ['timing_amount'] })).properties.timing_amount, original === 50 ? 60 : 50, 1e-6, 'timing_amount');
+    await call('set_properties', { address: 'grooves/0', properties: { timing_amount: original } });
+    const after = await call('get_properties', { address: 'grooves/0' });
+    assert(JSON.stringify(after.properties) === JSON.stringify(before.properties), `the groove was not restored: ${JSON.stringify(after.properties)} vs ${JSON.stringify(before.properties)}`);
+    try {
+      await call('set_properties', { address: launchClip, properties: { groove: `tracks/${T}` } });
+      throw new Error('a track was accepted as a groove');
+    } catch (err) {
+      assert(err.bridgeCode === 'TYPE_ERROR', `${err.bridgeCode}: ${err.message}`);
+    }
+  });
+
   console.log('\ndraw_automation');
   await check('linear ramp: readback and independent envelope values match', async () => {
     const lo = pA.min + 0.2 * (pA.max - pA.min);

@@ -144,6 +144,15 @@ class FakeSlot(object):
     def __init__(self, clip=None):
         self.clip = clip
         self.has_clip = clip is not None
+        self.calls = []
+        self.is_playing = self.is_triggered = self.is_recording = False
+
+    def fire(self, *args):
+        self.calls.append(("fire",) + args)
+        self.is_triggered = True
+
+    def stop(self):
+        self.calls.append(("stop",))
 
 
 class Typed(object):
@@ -175,6 +184,23 @@ class PropClip(Typed, FakeClip):
         self.velocity_amount, self.launch_quantization, self.signature_numerator = 0.0, 0, 4
         self.is_audio_clip, self.is_midi_clip = False, True
         self.scale_intervals = (0, 2, 4)
+        self.calls = []
+        self.groove = None
+        self.has_groove = True
+
+    def _record(name):
+        def method(self, *args):
+            self.calls.append((name,) + args)
+        return method
+
+    crop = _record("crop")
+    duplicate_loop = _record("duplicate_loop")
+    quantize = _record("quantize")
+    quantize_pitch = _record("quantize_pitch")
+    scrub = _record("scrub")
+    stop_scrub = _record("stop_scrub")
+    move_playing_pos = _record("move_playing_pos")
+    del _record
 
     @property
     def loop_start(self):
@@ -218,6 +244,19 @@ class PropScene(Typed):
         self.name, self.color, self.tempo, self.tempo_enabled = name, 0, 120.0, False
         self.time_signature_numerator, self.time_signature_denominator, self.time_signature_enabled = 4, 4, False
         self.is_empty, self.is_triggered = True, False
+        self.calls = []
+
+    def fire(self, *args):
+        self.calls.append(("fire",) + args)
+
+
+class FakeGroove(Typed):
+    _types = {"name": str, "base": int, "timing_amount": float, "quantization_amount": float, "random_amount": float,
+              "velocity_amount": float}
+
+    def __init__(self, name, base=3, timing=100.0):
+        self.name, self.base, self.timing_amount = name, base, timing
+        self.quantization_amount, self.random_amount, self.velocity_amount = 0.0, 0.0, 0.0
 
 
 class FakeDevice(object):
@@ -297,7 +336,9 @@ def make_song():
     del master.mute, master.solo
     song = types.SimpleNamespace(tempo=120.0, signature_numerator=4, signature_denominator=4, scenes=[],
                                  tracks=[FakeTrack("A"), FakeTrack("B"), make_rack_track()],
-                                 return_tracks=[ret], master_track=master, undo_log=[])
+                                 return_tracks=[ret], master_track=master, undo_log=[],
+                                 groove_pool=types.SimpleNamespace(grooves=[]), stops=[])
+    song.stop_all_clips = lambda quantized=True: song.stops.append(("song", quantized))
     song.begin_undo_step = lambda: song.undo_log.append("begin")
     song.end_undo_step = lambda: song.undo_log.append("end")
     return song
@@ -329,7 +370,9 @@ def load_module():
         WarpMode=FakeEnum(beats=0, tones=1, texture=2, repitch=3, complex=4, rex=5, complex_pro=6, count=7))
     live.Song = types.SimpleNamespace(
         Quantization=FakeEnum(q_no_q=0, q_8_bars=1, q_4_bars=2, q_2_bars=3, q_bar=4, q_half=5),
-        RecordingQuantization=FakeEnum(rec_q_no_q=0, quarter=1, eight=2))
+        RecordingQuantization=FakeEnum(rec_q_no_q=0, rec_q_quarter=1, rec_q_eight=2, rec_q_eight_triplet=3,
+                                       rec_q_sixtenth=5, rec_q_thirtysecond=8))
+    live.Groove = types.SimpleNamespace(Base=FakeEnum(gb_four=0, gb_eight=1, gb_eight_triplet=2, gb_sixteen=3, count=6))
     live.Track = types.SimpleNamespace(Track=types.SimpleNamespace(monitoring_states=FakeEnum(IN=0, AUTO=1, OFF=2)))
     live.Application = types.SimpleNamespace(UnavailableFeature=FakeEnum(note_velocity_ranges_and_probabilities=0))
     framework = types.ModuleType("_Framework")
@@ -1213,6 +1256,178 @@ class LifecycleTests(unittest.TestCase):
         self.assertEqual(self.song.undo_log, ["begin", "end"])
 
 
+# ---------------------------------------------------------------- launch, clip actions and grooves
+
+class ClipActionTests(unittest.TestCase):
+    def setUp(self):
+        self.script = make_script()
+        self.addCleanup(self.script._stop_server)
+        song = make_song()
+        self.clip = PropClip("loop", 4.0)
+        song.tracks[0].clip_slots = [FakeSlot(self.clip), FakeSlot()]
+        song.tracks[0].playing_slot_index, song.tracks[0].fired_slot_index = -2, -1
+        song.tracks[0].stop_all_clips = lambda quantized=True: song.stops.append(("track", quantized))
+        song.scenes = [PropScene("Verse"), PropScene("Chorus")]
+        song.groove_pool.grooves = [FakeGroove("Swing"), FakeGroove("MPC", base=1, timing=50.0)]
+        self.script._song = self.song = song
+        self.slot = song.tracks[0].clip_slots[0]
+
+    def run_command(self, command_type, params):
+        return self.script._process_command({"type": command_type, "params": params})
+
+    def code(self, command_type, params):
+        response = self.run_command(command_type, params)
+        self.assertEqual(response["status"], "error", response)
+        return response["code"]
+
+    # ---- launch
+    def test_fire_a_slot_or_its_clip_without_options_takes_no_arguments(self):
+        for address in ("tracks/0/slots/0", "tracks/0/slots/0/clip"):
+            self.slot.calls.clear()
+            response = self.run_command("launch", {"address": address})
+            self.assertEqual(response["status"], "success", response)
+            self.assertEqual(self.slot.calls, [("fire",)])
+            self.assertEqual(response["result"]["address"], "tracks/0/slots/0")
+            self.assertTrue(response["result"]["state"]["is_triggered"])
+
+    def test_fire_options_are_passed_with_lives_not_passed_sentinels(self):
+        self.run_command("launch", {"address": "tracks/0/slots/0", "quantization": "q_bar", "legato": True})
+        self.assertEqual(self.slot.calls[-1], ("fire", 1.7976931348623157e+308, 4, True))
+        self.run_command("launch", {"address": "tracks/0/slots/1", "record_length": 8})
+        self.assertEqual(self.song.tracks[0].clip_slots[1].calls[-1], ("fire", 8.0, -2147483648, False))
+
+    def test_stop_a_slot(self):
+        self.run_command("launch", {"address": "tracks/0/slots/0", "action": "stop"})
+        self.assertEqual(self.slot.calls, [("stop",)])
+
+    def test_scenes_fire_with_legato_and_select_and_cannot_be_stopped(self):
+        self.run_command("launch", {"address": "scenes/1"})
+        self.assertEqual(self.song.scenes[1].calls, [("fire", False, True)])
+        self.run_command("launch", {"address": "scenes/name:Verse", "legato": True, "select": False})
+        self.assertEqual(self.song.scenes[0].calls, [("fire", True, False)])
+        self.assertEqual(self.code("launch", {"address": "scenes/0", "action": "stop"}), "INVALID_ARGUMENT")
+        self.assertEqual(self.code("launch", {"address": "scenes/0", "record_length": 4}), "INVALID_ARGUMENT")
+
+    def test_stopping_a_track_or_the_song(self):
+        self.run_command("launch", {"address": "tracks/0", "action": "stop", "quantized": False})
+        self.run_command("launch", {"address": "song", "action": "stop"})
+        self.assertEqual(self.song.stops, [("track", False), ("song", True)])
+        self.assertEqual(self.code("launch", {"address": "tracks/0"}), "INVALID_ARGUMENT")        # a track cannot be fired
+        self.assertEqual(self.code("launch", {"address": "song"}), "INVALID_ARGUMENT")
+        self.assertEqual(self.code("launch", {"address": "returns/0", "action": "stop"}), "INVALID_ARGUMENT")
+        self.assertEqual(self.code("launch", {"address": "master", "action": "stop"}), "INVALID_ARGUMENT")
+
+    def test_launch_validates_its_arguments(self):
+        cases = [({"address": "tracks/0/slots/0", "action": "jump"}, "INVALID_ARGUMENT"),
+                 ({"address": "tracks/0/slots/0", "legato": "yes"}, "TYPE_ERROR"),
+                 ({"address": "tracks/0/slots/0", "record_length": -1}, "INVALID_ARGUMENT"),
+                 ({"address": "tracks/0/slots/0", "record_length": "4"}, "INVALID_ARGUMENT"),
+                 ({"address": "tracks/0/slots/0", "quantization": "q_never"}, "INVALID_ARGUMENT"),
+                 ({"address": "tracks/0", "action": "stop", "quantized": "no"}, "TYPE_ERROR"),
+                 ({"address": "scenes/0", "select": 1}, "TYPE_ERROR"),
+                 ({"address": "tracks/0/slots/1/clip"}, "NOT_FOUND"), ({"address": "nowhere"}, "NOT_FOUND")]
+        for params, code in cases:
+            self.assertEqual(self.code("launch", params), code, params)
+
+    # ---- clip_action
+    def act(self, action, **params):
+        return self.run_command("clip_action", dict(params, action=action, address="tracks/0/slots/0/clip"))
+
+    def test_crop_and_duplicate_loop(self):
+        self.assertEqual(self.act("crop")["status"], "success")
+        result = self.act("duplicate_loop")["result"]
+        self.assertEqual(self.clip.calls, [("crop",), ("duplicate_loop",)])
+        self.assertEqual((result["address"], result["length"], result["loop_end"]), ("tracks/0/slots/0/clip", 4.0, 4.0))
+
+    def test_quantize_takes_a_named_grid_and_an_amount(self):
+        self.act("quantize", grid="rec_q_sixtenth")
+        self.act("quantize", grid="rec_q_eight", amount=0.5)
+        self.act("quantize_pitch", grid="rec_q_quarter", pitch=36, amount=0.25)
+        self.assertEqual(self.clip.calls, [("quantize", 5, 1.0), ("quantize", 2, 0.5), ("quantize_pitch", 36, 1, 0.25)])
+        for params, code in [({"grid": "sixteenth"}, "INVALID_ARGUMENT"), ({"grid": "rec_q_no_q"}, "INVALID_ARGUMENT"),
+                             ({}, "INVALID_ARGUMENT"), ({"grid": "rec_q_eight", "amount": 2}, "OUT_OF_RANGE"),
+                             ({"grid": "rec_q_eight", "amount": "half"}, "TYPE_ERROR")]:
+            self.assertEqual(self.code("clip_action", dict(params, action="quantize", address="tracks/0/slots/0/clip")), code, params)
+        for pitch in (None, 128, -1, "C3", True):
+            self.assertEqual(self.code("clip_action", {"action": "quantize_pitch", "address": "tracks/0/slots/0/clip",
+                                                       "grid": "rec_q_eight", "pitch": pitch}), "INVALID_ARGUMENT", pitch)
+
+    def test_scrub_and_move_playing_position(self):
+        self.act("scrub", position=1.5)
+        self.act("stop_scrub")
+        self.act("move_playing_pos", amount=-2)
+        self.assertEqual(self.clip.calls, [("scrub", 1.5), ("stop_scrub",), ("move_playing_pos", -2.0)])
+        self.assertEqual(self.code("clip_action", {"action": "scrub", "address": "tracks/0/slots/0/clip"}), "INVALID_ARGUMENT")
+        self.assertEqual(self.code("clip_action", {"action": "scrub", "position": -1, "address": "tracks/0/slots/0/clip"}), "INVALID_ARGUMENT")
+        self.assertEqual(self.code("clip_action", {"action": "move_playing_pos", "address": "tracks/0/slots/0/clip"}), "INVALID_ARGUMENT")
+
+    def test_clip_action_guards_and_addresses(self):
+        self.assertEqual(self.act("crop", expect={"name": "loop"})["status"], "success")
+        self.clip.calls.clear()
+        self.assertEqual(self.code("clip_action", {"action": "crop", "address": "tracks/0/slots/0/clip", "expect": {"name": "other"}}),
+                         "GUARD_FAILED")
+        self.assertEqual(self.clip.calls, [])
+        self.assertEqual(self.code("clip_action", {"action": "crop", "address": "tracks/0/slots/0"}), "INVALID_ARGUMENT")
+        self.assertEqual(self.code("clip_action", {"action": "explode", "address": "tracks/0/slots/0/clip"}), "INVALID_ARGUMENT")
+
+    def test_live_errors_from_a_clip_action_reach_the_caller_with_their_message(self):
+        def refuse(*args):
+            raise RuntimeError("Duplicating a loop is not available for audio clips")
+        self.clip.duplicate_loop = refuse
+        response = self.act("duplicate_loop")
+        self.assertEqual(response["status"], "error")
+        self.assertIn("not available for audio clips", response["message"])
+
+    def test_launch_and_clip_action_run_in_their_own_undo_step(self):
+        self.song.undo_log.clear()
+        self.act("crop")
+        self.run_command("launch", {"address": "tracks/0/slots/0"})
+        self.assertEqual(self.song.undo_log, ["begin", "end", "begin", "end"])
+
+    # ---- grooves
+    def test_grooves_have_addresses(self):
+        kind, groove, canonical = self.script._resolve("grooves/1")
+        self.assertEqual((kind, groove.name, canonical), ("groove", "MPC", "grooves/1"))
+        self.assertEqual(self.script._resolve("grooves/name:Swing")[2], "grooves/0")
+        self.assertEqual(self.script._address_of(self.song.groove_pool.grooves[1]), "grooves/1")
+        self.assertEqual(self.run_command("get_properties", {"address": "grooves/9"})["code"], "OUT_OF_RANGE")
+
+    def test_groove_properties_read_and_write_with_the_usual_checks(self):
+        got = self.run_command("get_properties", {"address": "grooves/1"})["result"]["properties"]
+        self.assertEqual((got["name"], got["base"], got["timing_amount"]), ("MPC", "gb_eight", 50.0))
+        result = self.run_command("set_properties", {"address": "grooves/1", "properties": {"timing_amount": 80, "base": "gb_sixteen"}})
+        self.assertEqual(result["status"], "success", result)
+        self.assertEqual(self.song.groove_pool.grooves[1].timing_amount, 80.0)
+        self.assertEqual(self.song.groove_pool.grooves[1].base, 3)
+        self.assertEqual(self.run_command("set_properties", {"address": "grooves/1", "properties": {"base": "gb_seven"}})["code"], "INVALID_ARGUMENT")
+
+    def test_a_clips_groove_is_read_and_assigned_by_address(self):
+        self.clip.groove = self.song.groove_pool.grooves[0]
+        self.assertEqual(self.run_command("get_properties", {"address": "tracks/0/slots/0/clip", "names": ["groove", "has_groove"]})
+                         ["result"]["properties"], {"groove": "grooves/0", "has_groove": True})
+        result = self.run_command("set_properties", {"address": "tracks/0/slots/0/clip", "properties": {"groove": "grooves/name:MPC"}})
+        self.assertEqual(result["result"]["applied"]["groove"], {"from": "grooves/0", "to": "grooves/1"})
+        self.assertIs(self.clip.groove, self.song.groove_pool.grooves[1])
+
+    def test_groove_assignment_rejects_anything_but_a_groove_address(self):
+        for value, code in [("tracks/0", "TYPE_ERROR"), (3, "TYPE_ERROR"), (None, "TYPE_ERROR"), ("grooves/7", "OUT_OF_RANGE"),
+                            ("nowhere", "NOT_FOUND")]:
+            response = self.run_command("set_properties", {"address": "tracks/0/slots/0/clip", "properties": {"groove": value}})
+            self.assertEqual(response["code"], code, value)
+
+    def test_a_failed_multi_property_write_puts_the_groove_back(self):
+        self.clip.groove = self.song.groove_pool.grooves[0]
+        response = self.run_command("set_properties", {"address": "tracks/0/slots/0/clip",
+                                                       "properties": {"groove": "grooves/1", "loop_start": 100.0}})
+        self.assertEqual(response["status"], "error")
+        self.assertIs(self.clip.groove, self.song.groove_pool.grooves[0])
+
+    def test_list_properties_marks_references(self):
+        listing = self.run_command("list_properties", {"kind": "clip"})["result"]["properties"]
+        self.assertEqual(listing["groove"]["refers_to"], "groove")
+        self.assertIn("base", self.run_command("list_properties", {"kind": "groove"})["result"]["properties"])
+
+
 # ---------------------------------------------------------------- generated API registry
 
 class RegistryTests(unittest.TestCase):
@@ -1235,7 +1450,7 @@ class RegistryTests(unittest.TestCase):
                 info = live[name]
                 got = self.registry.family(info["get"])
                 wanted = {"float": {"float"}, "int": {"int", "object"}, "bool": {"bool"}, "str": {"str", "object"},
-                          "list": {"list"}, "enum": {"int", "enum"}}[spec["type"]]
+                          "list": {"list"}, "enum": {"int", "enum"}, "ref": {"ref"}}[spec["type"]]
                 if got not in wanted:
                     problems.append("{0}.{1}: overlay type {2} but Live's getter returns {3}".format(kind, name, spec["type"], info["get"]))
                 if spec["rw"] and info["set"] is None:
@@ -1266,8 +1481,9 @@ class RegistryTests(unittest.TestCase):
         self.addCleanup(script._stop_server)
         script._song = make_song()
         listing = script._list_properties(kind="clip")
-        self.assertIn("groove", listing["not_exposed"])          # a reference property we do not expose yet
-        self.assertEqual(listing["not_exposed"]["groove"]["writable"], True)
+        self.assertIn("warp_markers", listing["not_exposed"])    # a property we do not expose yet
+        self.assertEqual(listing["not_exposed"]["warp_markers"]["writable"], False)
+        self.assertNotIn("groove", listing["not_exposed"])       # exposed as a reference
         self.assertNotIn("name", listing["not_exposed"])          # exposed properties are not repeated
         for kind in self.specs:
             self.assertIn("not_exposed", script._list_properties(kind=kind))
@@ -1316,13 +1532,16 @@ class RegistryTests(unittest.TestCase):
         scene = self.make_fake("scene")
         track = self.make_fake("track", clip_slots=[slot], mixer_device=make_mixer())
         master = self.make_fake("track", mixer_device=make_mixer(sends=False))
-        song = self.make_fake("song", tracks=[track], return_tracks=[], scenes=[scene], master_track=master)
+        groove = self.make_fake("groove")
+        song = self.make_fake("song", tracks=[track], return_tracks=[], scenes=[scene], master_track=master,
+                              groove_pool=types.SimpleNamespace(grooves=[groove]))
         script._song = song
-        addresses = {"song": "song", "track": "tracks/0", "scene": "scenes/0", "slot": "tracks/0/slots/0", "clip": "tracks/0/slots/0/clip"}
+        addresses = {"song": "song", "track": "tracks/0", "scene": "scenes/0", "slot": "tracks/0/slots/0", "clip": "tracks/0/slots/0/clip",
+                     "groove": "grooves/0"}
         checked = 0
         for kind, specs in self.specs.items():
             for name, spec in sorted(specs.items()):
-                if not spec["rw"]:
+                if not spec["rw"] or spec["type"] == "ref":       # references are covered by the groove tests
                     continue
                 value = self.sample_value(spec)
                 script._set_properties(addresses[kind], {name: value})

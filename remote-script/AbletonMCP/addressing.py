@@ -5,11 +5,12 @@
     returns/0                return track 0                 master              the master track
     scenes/2                 scene 2                        scenes/name:Verse
     tracks/3/slots/1         clip slot 1 of track 3         tracks/3/slots/1/clip   the clip in it
+    grooves/0                groove 0 of the groove pool    grooves/name:Swing 16ths 66
 
 A name selector must match exactly one object: no match is NOT_FOUND, several are AMBIGUOUS (the error lists the
 candidates' indices). Every tool that creates or finds an object returns an address the caller can reuse.
 """
-from .helpers import _as_index
+from .helpers import _as_index, _safe_attr
 from .registry import BridgeError
 
 
@@ -17,7 +18,7 @@ class AddressingMixin(object):
     """Resolve addresses to Live objects and build addresses from objects."""
 
     def _resolve(self, address):
-        """Return (kind, object, canonical_address). kind is song, track, scene, slot or clip."""
+        """Return (kind, object, canonical_address). kind is song, track, scene, slot, clip or groove."""
         if not isinstance(address, str) or not address.strip():
             raise BridgeError("address must be a non-empty string such as 'tracks/0/slots/1/clip'", "INVALID_ARGUMENT")
         parts = [p for p in address.strip().strip("/").split("/") if p != ""]
@@ -29,6 +30,10 @@ class AddressingMixin(object):
         if head == "scenes" and len(parts) == 2:
             index = self._select(self._song.scenes, parts[1], "scene", lambda s: s.name)
             return "scene", self._song.scenes[index], "scenes/{0}".format(index)
+        if head == "grooves" and len(parts) == 2:
+            grooves = list(self._song.groove_pool.grooves)
+            index = self._select(grooves, parts[1], "groove", lambda g: g.name)
+            return "groove", grooves[index], "grooves/{0}".format(index)
         if head in ("tracks", "returns") and len(parts) >= 2:
             tracks = self._song.tracks if head == "tracks" else self._song.return_tracks
             label = "track" if head == "tracks" else "return track"
@@ -50,7 +55,7 @@ class AddressingMixin(object):
                     raise BridgeError("The clip slot in '{0}' is empty".format(address), "NOT_FOUND")
                 return "clip", slot.clip, canonical + "/clip"
         raise BridgeError("Unknown address '{0}'. Use song, master, tracks/N, returns/N, scenes/N, "
-                          "tracks/N/slots/M[/clip], or a name: selector such as tracks/name:Drift".format(address), "NOT_FOUND")
+                          "tracks/N/slots/M[/clip], grooves/N, or a name: selector such as tracks/name:Drift".format(address), "NOT_FOUND")
 
     @staticmethod
     def _number(text, address):
@@ -76,7 +81,7 @@ class AddressingMixin(object):
         return index
 
     def _address_of(self, obj):
-        """The canonical address of a song, track, scene, clip slot or clip (found by identity), or None."""
+        """The canonical address of a song, track, scene, clip slot, clip or groove (found by identity), or None."""
         song = self._song
         if obj == song:
             return "song"
@@ -85,7 +90,7 @@ class AddressingMixin(object):
         for i, track in enumerate(song.tracks):
             if obj == track:
                 return "tracks/{0}".format(i)
-            for j, slot in enumerate(track.clip_slots):
+            for j, slot in enumerate(_safe_attr(track, "clip_slots", [])):
                 if obj == slot:
                     return "tracks/{0}/slots/{1}".format(i, j)
                 if slot.has_clip and obj == slot.clip:
@@ -96,6 +101,9 @@ class AddressingMixin(object):
         for i, scene in enumerate(song.scenes):
             if obj == scene:
                 return "scenes/{0}".format(i)
+        for i, groove in enumerate(song.groove_pool.grooves):
+            if obj == groove:
+                return "grooves/{0}".format(i)
         return None
 
     def _guard(self, obj, expect, address):

@@ -12,8 +12,8 @@ from .helpers import _is_number
 from .registry import BridgeError, command
 
 
-def _spec(type_, rw=True, enum=None, doc="", lo=None, hi=None, get=None, set=None):
-    return {"type": type_, "rw": rw, "enum": enum, "doc": doc, "min": lo, "max": hi, "get": get, "set": set}
+def _spec(type_, rw=True, enum=None, doc="", lo=None, hi=None, get=None, set=None, ref=None):
+    return {"type": type_, "rw": rw, "enum": enum, "doc": doc, "min": lo, "max": hi, "get": get, "set": set, "ref": ref}
 
 
 def _volume_get(track):
@@ -162,6 +162,22 @@ PROPERTY_SPECS = {
         "is_arrangement_clip": _spec("bool", RO),
         "file_path": _spec("str", RO, doc="Audio clips only"),
         "sample_rate": _spec("float", RO, doc="Audio clips only"),
+        "sample_length": _spec("int", RO, doc="Audio clips only, samples"),
+        "gain_display_string": _spec("str", RO, doc="Audio clips only, e.g. '-3.0 dB'"),
+        "available_warp_modes": _spec("list", RO, doc="Audio clips only: the warp_mode values this clip accepts"),
+        "has_envelopes": _spec("bool", RO),
+        "has_groove": _spec("bool", RO),
+        "groove": _spec("ref", ref="groove", doc="Address of a groove in the pool (grooves/N); a clip always has one"),
+        "is_take_lane_clip": _spec("bool", RO),
+        "will_record_on_start": _spec("bool", RO),
+    },
+    "groove": {
+        "name": _spec("str"),
+        "base": _spec("enum", enum="Live.Groove.Base", doc="The grid the groove is laid on"),
+        "timing_amount": _spec("float", doc="percent"),
+        "quantization_amount": _spec("float", doc="percent"),
+        "random_amount": _spec("float", doc="percent"),
+        "velocity_amount": _spec("float", doc="percent"),
     },
 }
 
@@ -227,6 +243,21 @@ def _kind_specs(kind):
 class PropertiesMixin(object):
     """get_properties / set_properties / list_properties over addresses."""
 
+    def _value(self, obj, name, spec):
+        """Read a property as the caller sees it: enums by name, referenced objects by address."""
+        value = _read(obj, name, spec)
+        if spec["type"] == "ref":
+            return None if value is None else self._address_of(value)
+        return value
+
+    def _resolve_ref(self, name, spec, value):
+        if not isinstance(value, str):
+            raise BridgeError("{0} must be the address of a {1} (for example 'grooves/0')".format(name, spec["ref"]), "TYPE_ERROR")
+        kind, target, canonical = self._resolve(value)
+        if kind != spec["ref"]:
+            raise BridgeError("{0} must be the address of a {1}, but '{2}' is a {3}".format(name, spec["ref"], canonical, kind), "TYPE_ERROR")
+        return target
+
     def _get_properties(self, address, names=None):
         kind, obj, canonical = self._resolve(address)
         specs = _kind_specs(kind)
@@ -239,7 +270,7 @@ class PropertiesMixin(object):
         values, unavailable = {}, {}
         for name in (names if names is not None else sorted(specs)):
             try:
-                values[name] = _read(obj, name, specs[name])
+                values[name] = self._value(obj, name, specs[name])
             except Exception as e:
                 if names is not None:
                     raise
@@ -261,8 +292,9 @@ class PropertiesMixin(object):
                 raise BridgeError("Unknown {0} property '{1}'. Valid: {2}".format(kind, name, sorted(specs)), "NOT_FOUND")
             if not specs[name]["rw"]:
                 raise BridgeError("{0} is read-only".format(name), "INVALID_ARGUMENT")
-            pending[name] = _coerce(name, specs[name], value)
-        before = dict((name, _read(obj, name, specs[name])) for name in pending)
+            pending[name] = (self._resolve_ref(name, specs[name], value) if specs[name]["type"] == "ref"
+                             else _coerce(name, specs[name], value))
+        before = dict((name, self._value(obj, name, specs[name])) for name in pending)
         # Apply in passes: Live enforces ordering between properties (e.g. loop_end before loop_start), so retry the
         # writes that raise until a pass makes no progress. On failure, restore what was already written so the call
         # is all-or-nothing.
@@ -293,14 +325,15 @@ class PropertiesMixin(object):
                 raise errors[sorted(pending)[0]]
         applied = {}
         for name in values:
-            applied[name] = {"from": before[name], "to": _read(obj, name, specs[name])}
+            applied[name] = {"from": before[name], "to": self._value(obj, name, specs[name])}
         return {"address": canonical, "kind": kind, "applied": applied}
 
-    @staticmethod
-    def _writable_value(spec, value):
-        """Turn a value read back for the caller (enum name) into what the setter takes (int)."""
+    def _writable_value(self, spec, value):
+        """Turn a value read back for the caller (enum name, object address) into what the setter takes."""
         if spec["type"] == "enum" and isinstance(value, str):
             return _enum_names(spec["enum"])[value]
+        if spec["type"] == "ref" and isinstance(value, str):
+            return self._resolve(value)[1]
         return value
 
     def _list_properties(self, address=None, kind=None):
@@ -313,9 +346,9 @@ class PropertiesMixin(object):
             entry = {"type": spec["type"], "writable": spec["rw"]}
             if spec["enum"]:
                 entry["values"] = sorted(_enum_names(spec["enum"]), key=_enum_names(spec["enum"]).get)
-            for key in ("doc", "min", "max"):
+            for key in ("doc", "min", "max", "ref"):
                 if spec[key] not in (None, ""):
-                    entry[key] = spec[key]
+                    entry["refers_to" if key == "ref" else key] = spec[key]
             listing[name] = entry
         result = {"kind": kind, "properties": listing}
         # What Live exposes that this tool does not (yet): visible gaps instead of hidden ones

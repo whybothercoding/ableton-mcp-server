@@ -130,3 +130,16 @@ test('validateArgs: nulls count as absent, NaN is not a number, unknown keys are
   assert.match(validateArgs(numeric, { n: '3' })!, /must be a number/);
   assert.equal(validateArgs(numeric, { n: 3 }), null);
 });
+
+test('launch and clip_action schemas and risk annotations', () => {
+  const launch = TOOL_SPEC_BY_NAME.launch;
+  const action = TOOL_SPEC_BY_NAME.clip_action;
+  assert.deepEqual(launch.inputSchema.required, ['address']);
+  assert.deepEqual(launch.inputSchema.properties.action.enum, ['fire', 'stop']);
+  assert.equal(launch.annotations.destructiveHint, false);
+  assert.deepEqual(action.inputSchema.required, ['address', 'action']);
+  assert.equal(action.annotations.destructiveHint, true);
+  assert.deepEqual(action.inputSchema.properties.action.enum, ['crop', 'duplicate_loop', 'quantize', 'quantize_pitch', 'scrub', 'stop_scrub', 'move_playing_pos']);
+  assert.equal(validateArgs(launch.inputSchema, { address: 'tracks/0/slots/0', legato: 'yes' }), 'legato must be true or false');
+  assert.equal(validateArgs(action.inputSchema, { address: 'tracks/0/slots/0/clip', action: 'quantize', amount: 0.5 }), null);
+});
