@@ -3545,6 +3545,36 @@ class FollowActionTests(unittest.TestCase):
         self.world.advance(1.1)
         self.assertEqual(self.world.playing(), [1])
 
+    def test_a_song_time_jump_mid_pass_does_not_stall_the_action(self):
+        # the arrangement loop wraps (or the user relocates): song time drops, the Session clip plays on undisturbed
+        self.set(0, actions=["next"])
+        self.world.time = 30.0
+        self.world.start(0)
+        self.world.advance(2.0)
+        self.world.time = 0.0
+        self.world.advance(1.5)
+        self.assertEqual(self.world.playing(), [0])
+        self.world.advance(0.5)
+        self.assertEqual(self.world.playing(), [1])
+
+    def test_a_pass_longer_than_the_clip_counts_across_its_loop(self):
+        self.set(0, actions=["next"], after_beats=6)
+        self.world.start(0)
+        self.world.advance(5.5)
+        self.assertEqual(self.world.playing(), [0])
+        self.world.advance(0.6)
+        self.assertEqual(self.world.playing(), [1])
+
+    def test_a_clip_launched_again_mid_pass_starts_a_new_pass(self):
+        self.set(0, actions=["next"])
+        self.world.start(0)
+        self.world.advance(1.0)
+        self.world.start(0)                                    # launched again: the position goes back to the start
+        self.world.advance(3.5)
+        self.assertEqual(self.world.playing(), [0])
+        self.world.advance(0.5)
+        self.assertEqual(self.world.playing(), [1])
+
     def test_clips_without_a_configuration_are_left_alone(self):
         self.set(1, actions=["next"])
         self.world.start(0)
