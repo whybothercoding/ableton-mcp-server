@@ -1,6 +1,6 @@
 """Settings read at call time (tests patch these)."""
 
-SCRIPT_VERSION = "2.0.1"
+SCRIPT_VERSION = "2.0.2"
 DEFAULT_PORT = 9877
 HOST = "localhost"
 
