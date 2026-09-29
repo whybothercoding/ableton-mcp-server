@@ -325,6 +325,21 @@ try {
     await fails('batch', { ops: [{ tool: 'create', args: { kind: 'nonsense' } }] }, 'ops[0] (create): kind must be one of');
     await ok('delete', { address, expect: { name: 'MCP BATCH RENAMED' } });
   });
+  await check('browse searches the browser through an index, load_item loads what it finds, and a batch can do both with a new track', async () => {
+    assert(byName.browse.annotations.readOnlyHint === true && byName.load_item.annotations.destructiveHint === false, 'annotations');
+    const found = await ok('browse', { action: 'search', query: 'eq eight', roots: ['audio_effects'] });
+    assert(found.total_matches >= 1 && found.results[0].name === 'EQ Eight' && found.results[0].path === 'audio_effects/EQ Eight', JSON.stringify(found).slice(0, 300));
+    const again = await ok('browse', { action: 'search', query: 'utility', roots: ['audio_effects'] });
+    assert(again.results[0].name === 'Utility' && again.indexed_now === undefined, 'the second search reuses the index');
+    const made = await ok('batch', { ops: [
+      { tool: 'create', args: { kind: 'audio_track', name: 'MCP BROWSE TEST' } },
+      { tool: 'load_item', args: { path: found.results[0].path, target: '$0.address' } },
+      { tool: 'get_device', args: { address: '$0.address/devices/0' } }] });
+    assert(made.results[1].result.added[0].name === 'EQ Eight' && made.results[2].result.name === 'EQ Eight', JSON.stringify(made).slice(0, 300));
+    await ok('delete', { address: made.results[0].result.address, expect: { name: 'MCP BROWSE TEST' } });
+    await fails('browse', { action: 'search' }, 'search needs a query');
+    await fails('load_item', { path: 'audio_effects/EQ Eight', target: 'tracks/9999' }, 'out of range');
+  });
   await check('argument problems are caught in TypeScript with a readable message', async () => {
     await fails('get_properties', {}, "missing required argument 'address'");
     await fails('get_properties', { address: 5 }, 'address must be a string');
@@ -342,7 +357,7 @@ try {
 
   console.log('\nTrack types, device paths and parameter details');
   await check('schemas expose track_type and device_path where they apply', async () => {
-    for (const name of ['get_track_detail', 'load_browser_item']) {
+    for (const name of ['get_track_detail']) {
       const prop = byName[name].inputSchema.properties.track_type;
       assert(prop && JSON.stringify(prop.enum) === JSON.stringify(['track', 'return', 'master']), `${name} lacks a track_type enum`);
     }

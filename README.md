@@ -123,7 +123,7 @@ Most tools take an **address** (`song`, `tracks/N`, `tracks/N/slots/M/clip`, `gr
 
 | Area | Tools |
 | --- | --- |
-| Discover | `get_health`, `get_capabilities`, `describe_set`, `list_properties`, `get_track_detail`, `get_device`, `get_browser_tree`, `get_browser_items`, `get_audio_clip_path`, `analyze_audio_clip` |
+| Discover | `get_health`, `get_capabilities`, `describe_set`, `list_properties`, `get_track_detail`, `get_device`, `browse`, `get_audio_clip_path`, `analyze_audio_clip` |
 | Read / change any property | `get_properties`, `set_properties` |
 | Structure | `create`, `duplicate`, `delete` (needs `expect`) |
 | Play | `transport`, `launch`, `history` (undo/redo) |
@@ -131,7 +131,7 @@ Most tools take an **address** (`song`, `tracks/N`, `tracks/N/slots/M/clip`, `gr
 | Clips and notes | `clip_action`, `get_notes`, `write_notes`, `edit_notes` |
 | Many edits at once | `batch` |
 | Compose | `generate_notes`, `transform_notes` |
-| Devices and sound | `device_action`, `load_browser_item`, `draw_automation`, `get_automation`, `clear_automation`, `ramp_parameter`, `cancel_ramps` (parameters and device properties are written with `set_properties`) |
+| Devices and sound | `device_action`, `load_item`, `draw_automation`, `get_automation`, `clear_automation`, `ramp_parameter`, `cancel_ramps` (parameters and device properties are written with `set_properties`) |
 | Development | `eval_python` (gated) |
 
 Earlier versions had one tool per property or action. These were folded into the verbs above (their bridge commands still exist, only the MCP tools were retired to keep the tool list small):
@@ -146,12 +146,13 @@ Earlier versions had one tool per property or action. These were folded into the
 | `start_playback`, `stop_playback` | `transport` |
 | `get_clip_notes`, `edit_clip_notes` | `get_notes`, `write_notes`, `edit_notes` |
 | `bulk_edit_clips` | `batch` (`create` midi_clip + `set_properties` name/color per clip, one undo step) |
+| `get_browser_tree`, `get_browser_items` | `browse` (list, search) |
+| `load_browser_item` | `load_item` (target is an address; loads devices, presets, samples, hot-swaps) |
 | `get_device_parameters` | `get_device` (parameters with addresses, racks with their chains and pads) |
 | `set_device_parameter`, `bulk_set_device_parameters` | `set_properties` on a parameter address (`.../parameters/5`), `items` for many at once |
 
 #### Notes on a few tools
-- `get_track_detail`: clip slots, arrangement clips and devices of a track. `get_audio_clip_path`: an audio clip's source path and warp metadata. `analyze_audio_clip`: codec/format metadata, integrated LUFS, sample and true peak (dBTP), RMS and an approximate six-band frequency profile of the clip's source file. `get_browser_items`: browser items at a category path, paged with `limit` (default 200) and `offset` (`total` and `truncated` in the result).
-- `load_browser_item`: load an instrument, effect or sample onto a track by URI (any URI returned by `get_browser_items`). Samples load into the track's selected clip slot, replacing what is there.
+- `get_track_detail`: clip slots, arrangement clips and devices of a track. `get_audio_clip_path`: an audio clip's source path and warp metadata. `analyze_audio_clip`: codec/format metadata, integrated LUFS, sample and true peak (dBTP), RMS and an approximate six-band frequency profile of the clip's source file. 
 
 #### Automation & Ramps
 Targets are addresses: a Session **clip** (`tracks/2/slots/0/clip`) and a **parameter** (`tracks/2/devices/0/parameters/5`, `tracks/2/mixer/volume`, `.../chains/1/devices/0/parameters/3`, ...).
@@ -199,7 +200,12 @@ Devices, rack chains, drum pads and parameters have addresses under a track (`tr
 - `get_device` reads a device with every parameter (`index`, `address`, `value`, `min`, `max`, `display`, `default`, labels for quantized ones) and, for racks, chains, return chains, occupied drum pads and macro state.
 - `set_properties` writes a **parameter's `value`**, checked against that parameter's own range (`OUT_OF_RANGE`); a quantized parameter also takes its label (`"value": "Low-pass"`); disabled or macro-mapped parameters refuse (`UNAVAILABLE`); `items` writes many parameters (or anything else) in one call. Devices have `name`, `on` (the Device On switch), `collapsed`, `is_using_compare_preset_b` and rack state; chains have `name`, `color`, `mute`, `solo`, `volume`, `panning`; pads `mute` and `solo` (Live ignores those on an empty pad, and the result shows what Live holds).
 - `device_action`: `insert` (`name` as in Live's browser, `position`; Live's own refusals such as "Insert audio effects after instruments" come through), `delete` (needs `expect: {"name"}`), `duplicate`, `move` (to another track or chain; returns where it landed), `save_ab`, and rack actions `insert_chain`, `add_macro`, `remove_macro`, `randomize_macros`, `store_variation`, `recall_variation` and `delete_variation` (by `index`: Live silently does nothing when no variation is selected, so the tool refuses instead), `copy_pad`, `clear_pad` (needs `expect`). Each call is one undo step. A device chain holds one instrument, and Live refuses to duplicate instruments.
-- Not in Live's API: deleting a rack chain, loading presets by path (use `load_browser_item`), plugin parameters beyond those Live has configured.
+- Not in Live's API: deleting a rack chain, loading a preset file from disk by its path (browse to it and use `load_item`), plugin parameters beyond those Live has configured.
+
+#### Browser: browse and load_item
+- `browse` `action: "list"` (default): `path` like `instruments/Drift/Bass` (no path lists the roots), `kind` (`all`, `folders`, `loadable`, `devices`), paged with `limit` and `offset`; every item carries its `path`, `uri` and flags. Names ignore case and the path is returned canonically; a wrong name lists similar ones.
+- `action: "search"`: Live has no browser search, so the MCP server builds an **index** the first time (a few seconds: the Remote Script's `browser_walk` visits the browser in ~20 ms slices, so Live stays responsive) and keeps it until `refresh: true` or a restart. `query` words must all appear in an item's path (`drift bass sub`); results are ranked with exact and prefix name matches first. Default roots: instruments, audio_effects, midi_effects, drums, sounds, max_for_live, user_library, packs. The big sample libraries and a few other roots (`samples`, `clips`, `plugins`, `current_project`) are not in the default set: name them in `roots` to index them. `action: "index"` builds it explicitly.
+- `load_item`: `path` (or `uri`: fast when the index knows it, otherwise a slow walk) and `target`: a track/return/master (loads an instrument, effect or preset and returns the addresses of the devices it added), a clip slot (loads a sample), or a device (**hot-swap**: replaces it). Loading selects the target in Live's window and is one undo step; it is batchable. `action: "preview"` plays an item on the preview channel (audible) and `"stop_preview"` stops it. Paths can repeat when Live has two items with one name in a folder (the first wins): use the `uri` from the result for those.
 
 #### Mixing and routing
 - **Mixer parameters** are addressable like any parameter: `tracks/N/mixer/volume`, `mixer/panning`, `mixer/sends/M`, `mixer/track_activator`, `mixer/left_split_stereo` and `right_split_stereo`, and on the master `master/mixer/crossfader`, `cue_volume` and `song_tempo`; chains have their own (`.../chains/1/mixer/volume`). Tracks also take `volume` and `panning` directly, plus `crossfade_assign` (`A`, `NONE`, `B`), `panning_mode` (`stereo`, `stereo_split`) and `current_monitoring_state`.
@@ -224,7 +230,7 @@ Devices, rack chains, drum pads and parameters have addresses under a track (`tr
 - Live renumbers default track names when tracks are inserted or removed ("12-Acid..." becomes "13-Acid..."), so re-read addresses after structural changes instead of caching them.
 
 #### Addressing: track types, racks and parameter details
-`get_track_detail` and `load_browser_item` still name their target with track numbers instead of addresses (they move when the browser tools are consolidated):
+`get_track_detail` still names its target with track numbers instead of an address (it is the last such tool):
 
 - `track_type`: `"track"` (default), `"return"` (`track_index` counts return tracks) or `"master"` (`track_index` is ignored; pass 0). The master and return tracks can hold devices, so they can be read, loaded onto, set, ramped and mixed like any other. Clip automation is not available on them (they have no clips). Live prefixes return track names with their letter (`A-Reverb`), so write the bare name when renaming.
 - `device_path`: reaches devices inside racks. It alternates device and chain selectors and ends on a device index, e.g. `[0, 2, 1]` is device 1 in chain 2 of the rack at device 0. A chain selector is a chain index, `{"pad": 36}` (or `{"pad": 36, "chain": 1}`) for a drum pad, or `{"return": 0}` for a return chain. Use it instead of `device_index`.

@@ -1243,6 +1243,63 @@ try {
     assert((await call('get_properties', { address: 'master/mixer/song_tempo', names: ['name'] })).properties.name.length > 0, 'the song tempo is a parameter of the master mixer');
   });
 
+  console.log('\nBrowser: browse, browser_walk, load_item');
+  await check('browse lists the roots, pages a folder, and gives every item a path that browses deeper', async () => {
+    const roots = await call('browse');
+    assert(roots.roots.some((r) => r.name === 'instruments' && r.child_count > 5) && roots.roots.some((r) => r.name === 'audio_effects'), JSON.stringify(roots).slice(0, 300));
+    const page = await call('browse', { path: 'instruments', limit: 5 });
+    assert(page.items.length === 5 && page.total > 5 && page.truncated === true, JSON.stringify(page).slice(0, 200));
+    const drift = (await call('browse', { path: 'instruments', kind: 'devices', limit: 200 })).items.find((i) => i.name === 'Drift');
+    assert(drift && drift.is_loadable && drift.path === 'instruments/Drift' && drift.uri, JSON.stringify(drift));
+    const presets = await call('browse', { path: 'instruments/Drift', limit: 10 });
+    assert(presets.items.length > 0 && presets.items.every((i) => i.path.startsWith('instruments/Drift/')), JSON.stringify(presets).slice(0, 200));
+    assert((await call('browse', { path: 'INSTRUMENTS/drift' })).path === 'instruments/Drift', 'names ignore case and the path comes back canonical');
+    await failsCode(() => call('browse', { path: 'instruments/Drif' }), 'NOT_FOUND', 'Similar');
+    await failsCode(() => call('browse', { path: 'nowhere' }), 'NOT_FOUND', 'Roots:');
+  });
+  await check('browser_walk covers a root in short slices and a resumed walk sees exactly what one big walk sees', async () => {
+    const walkAll = async (params) => {
+      const seen = []; let token; let calls = 0;
+      for (;;) {
+        const r = await call('browser_walk', token ? { token, ...params } : { roots: ['audio_effects'], ...params });
+        seen.push(...r.items.map((i) => i.path)); token = r.token; calls += 1;
+        if (r.done) return { seen, calls };
+        assert(calls < 500, 'the walk never finished');
+      }
+    };
+    const chunked = await walkAll({ budget_ms: 1, max_items: 50 });
+    const whole = await walkAll({ budget_ms: 200, max_items: 5000 });
+    assert(chunked.calls > whole.calls && chunked.calls > 5, `chunked ${chunked.calls} calls vs ${whole.calls}`);
+    assert(JSON.stringify(chunked.seen) === JSON.stringify(whole.seen) && whole.seen.length > 100, `${chunked.seen.length} vs ${whole.seen.length}`);
+    assert(whole.seen.includes('audio_effects/EQ Eight'), 'EQ Eight is in the walk');
+    await failsCode(() => call('browser_walk', { token: 'walk-that-never-existed' }), 'NOT_FOUND');
+  });
+  const loadTrack = await makeScratchTrack();
+  const lt2 = `tracks/${loadTrack}`;
+  await check('load_item puts a device on a track by path and reports the devices it added', async () => {
+    const loaded = await call('load_item', { path: 'audio_effects/Utility', target: lt2 });
+    assert(loaded.added.length === 1 && loaded.added[0].name === 'Utility' && loaded.added[0].address === `${lt2}/devices/0`, JSON.stringify(loaded));
+    assert((await devicesOf(lt2)).join() === 'Utility', (await devicesOf(lt2)).join());
+    await failsCode(() => call('load_item', { path: 'audio_effects', target: lt2 }), 'INVALID_ARGUMENT', 'cannot be loaded');
+    await failsCode(() => call('load_item', { path: 'audio_effects/Nonexistent Effect', target: lt2 }), 'NOT_FOUND');
+    await failsCode(() => call('load_item', { path: 'audio_effects/Utility', target: 'song' }), 'INVALID_ARGUMENT');
+    await failsCode(() => call('load_item', { path: 'audio_effects/Utility' }), 'INVALID_ARGUMENT');
+    assert((await devicesOf(lt2)).length === 1, 'a refused load changed the track');
+  });
+  await check('hot-swap replaces a device with another item, in place', async () => {
+    const swapped = await call('load_item', { path: 'audio_effects/EQ Eight', target: `${lt2}/devices/0` });
+    assert(swapped.hotswapped === true && swapped.devices_before.join() === 'Utility', JSON.stringify(swapped));
+    assert((await devicesOf(lt2)).join() === 'EQ Eight', `the device should have been replaced: ${await devicesOf(lt2)}`);
+    assert((await call('eval', { code: 'self.application().browser.hotswap_target is None' })) === true, 'hot-swap mode should be left');
+  });
+  await check('loading is one undo step; stop_preview is harmless when nothing plays', async () => {
+    await call('load_item', { path: 'audio_effects/Utility', target: lt2 });
+    assert((await devicesOf(lt2)).length === 2, 'loaded');
+    await call('history', { action: 'undo' });
+    assert((await devicesOf(lt2)).length === 1, 'one undo should remove the loaded device');
+    await call('load_item', { action: 'stop_preview' });
+  });
+
   console.log('\ndraw_automation');
   await check('linear ramp: readback and independent envelope values match', async () => {
     const lo = pA.min + 0.2 * (pA.max - pA.min);

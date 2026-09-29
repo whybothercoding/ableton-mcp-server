@@ -99,34 +99,6 @@ export class ToolHandler {
           break;
         }
 
-        case 'get_browser_tree': {
-          this.client.ensureCapability('get_browser_tree');
-          resultData = await this.client.sendCommand('get_browser_tree', {
-            category_type: args.category_type || 'all'
-          });
-          break;
-        }
-
-        case 'get_browser_items': {
-          this.client.ensureCapability('get_browser_items_at_path');
-          resultData = await this.client.sendCommand('get_browser_items_at_path', {
-            path: String(args.path),
-            limit: args.limit === undefined ? 200 : Number(args.limit),
-            offset: args.offset === undefined ? 0 : Number(args.offset)
-          });
-          break;
-        }
-
-        case 'load_browser_item': {
-          this.client.ensureCapability('load_browser_item');
-          resultData = await this.client.sendCommand('load_browser_item', {
-            track_index: Number(args.track_index),
-            item_uri: String(args.item_uri),
-            ...pick(args, [], ['track_type'])
-          });
-          break;
-        }
-
         case 'eval_python': {
           this.client.ensureCapability('eval');
           resultData = await this.client.sendCommand('eval', {

@@ -2655,6 +2655,223 @@ class AutomationAddressTests(unittest.TestCase):
         self.assertEqual(self.code("ramp_parameter", parameter="tracks/0", to=0.9, seconds=1), "INVALID_ARGUMENT")
 
 
+# ---------------------------------------------------------------- browser
+
+class FakeBrowserItem(object):
+    def __init__(self, name, children=(), uri=None, loadable=False, device=False, folder=None):
+        self.name, self.children = name, list(children)
+        self.uri = uri or "query:{0}".format(name.replace(" ", ""))
+        self.is_loadable, self.is_device = loadable, device
+        self.is_folder = bool(self.children) if folder is None else folder
+
+
+class FakeBrowser(object):
+    def __init__(self):
+        drift = FakeBrowserItem("Drift", [FakeBrowserItem("Bass", [FakeBrowserItem("Sub Pulse", uri="query:Synths#Drift:Sub", loadable=True),
+                                                                  FakeBrowserItem("Deep Wobble", uri="query:Synths#Drift:Wobble", loadable=True)]),
+                                          FakeBrowserItem("Lead", [FakeBrowserItem("Glass", uri="query:Synths#Drift:Glass", loadable=True)])],
+                                uri="query:Synths#Drift", loadable=True, device=True)
+        self.instruments = FakeBrowserItem("Instruments", [drift, FakeBrowserItem("Wavetable", uri="query:Synths#Wavetable", loadable=True, device=True)], uri="query:Synths")
+        self.audio_effects = FakeBrowserItem("Audio Effects", [FakeBrowserItem("EQ Eight", uri="query:AudioFx#EQ8", loadable=True, device=True),
+                                                               FakeBrowserItem("Utility", uri="query:AudioFx#Utility", loadable=True, device=True)], uri="query:AudioFx")
+        self.samples = FakeBrowserItem("Samples", [FakeBrowserItem("Kick 01", uri="query:Samples#Kick01", loadable=True)], uri="query:Samples")
+        self.loaded, self.previewed, self.stopped, self.hotswap_target = [], [], 0, None
+        self.on_load = None
+
+    def load_item(self, item):
+        self.loaded.append((item.name, self.hotswap_target))
+        if self.on_load:
+            self.on_load(item)
+
+    def preview_item(self, item):
+        self.previewed.append(item.name)
+
+    def stop_preview(self):
+        self.stopped += 1
+
+
+class BrowserTests(unittest.TestCase):
+    def setUp(self):
+        self.script = make_script()
+        self.addCleanup(self.script._stop_server)
+        song = make_song()
+        song.tracks = [DevTrack("Synth"), DevTrack("Vox")]
+        song.tracks[0].adopt([DevDevice("Wavetable", dev_type=1)])
+        song.tracks[0].clip_slots = [FakeSlot(), FakeSlot()]
+        song.view = types.SimpleNamespace(selected_track=None, highlighted_clip_slot=None)
+        self.browser = FakeBrowser()
+        self.script._c_instance.app.browser = self.browser
+        self.script._song = self.song = song
+
+        def load(item):
+            track = self.song.view.selected_track
+            if item.name == "Kick 01":
+                self.song.view.highlighted_clip_slot.clip = PropClip("Kick 01", 1.0)
+                self.song.view.highlighted_clip_slot.has_clip = True
+            elif self.browser.hotswap_target is not None:
+                host = self.browser.hotswap_target.canonical_parent
+                index = host.devices.index(self.browser.hotswap_target)
+                host.devices[index] = DevDevice(item.name)
+                host.devices[index].canonical_parent = host
+            else:
+                track.insert_device(item.name)
+        self.browser.on_load = load
+
+    def run_command(self, name, params):
+        return self.script._process_command({"type": name, "params": params})
+
+    def ok(self, command_name, /, **params):
+        response = self.run_command(command_name, params)
+        self.assertEqual(response["status"], "success", response)
+        return response["result"]
+
+    def code(self, command_name, /, **params):
+        response = self.run_command(command_name, params)
+        self.assertEqual(response["status"], "error", response)
+        return response["code"]
+
+    # ---- browse
+    def test_no_path_lists_the_roots_that_exist(self):
+        roots = self.ok("browse")["roots"]
+        self.assertEqual([r["name"] for r in roots], ["instruments", "audio_effects", "samples"])
+        self.assertEqual(roots[0]["child_count"], 2)
+
+    def test_browse_lists_children_with_paths_and_flags(self):
+        out = self.ok("browse", path="instruments/Drift")
+        self.assertEqual((out["path"], out["total"], out["truncated"]), ("instruments/Drift", 2, False))
+        self.assertEqual([(i["name"], i["path"], i["has_children"], i["is_loadable"]) for i in out["items"]],
+                         [("Bass", "instruments/Drift/Bass", True, False), ("Lead", "instruments/Drift/Lead", True, False)])
+        leaf = self.ok("browse", path="instruments/Drift/Bass")["items"]
+        self.assertEqual([(i["name"], i["uri"], i["is_loadable"], i["has_children"]) for i in leaf],
+                         [("Sub Pulse", "query:Synths#Drift:Sub", True, False), ("Deep Wobble", "query:Synths#Drift:Wobble", True, False)])
+
+    def test_paths_ignore_case_and_are_reported_canonically(self):
+        self.assertEqual(self.ok("browse", path="INSTRUMENTS/drift/bass")["path"], "instruments/Drift/Bass")
+
+    def test_paging_and_kind_filters(self):
+        first = self.ok("browse", path="instruments", limit=1)
+        self.assertEqual((len(first["items"]), first["total"], first["truncated"]), (1, 2, True))
+        second = self.ok("browse", path="instruments", limit=1, offset=1)
+        self.assertEqual((second["items"][0]["name"], second["truncated"]), ("Wavetable", False))
+        self.assertEqual([i["name"] for i in self.ok("browse", path="instruments", kind="folders")["items"]], ["Drift"])
+        self.assertEqual([i["name"] for i in self.ok("browse", path="instruments/Drift/Bass", kind="loadable")["items"]], ["Sub Pulse", "Deep Wobble"])
+        self.assertEqual([i["name"] for i in self.ok("browse", path="instruments", kind="devices")["items"]], ["Drift", "Wavetable"])
+
+    def test_browse_errors_say_what_exists(self):
+        response = self.run_command("browse", {"path": "instruments/Drfit"})
+        self.assertEqual(response["code"], "NOT_FOUND")
+        self.assertIn("not found in 'instruments'", response["message"])
+        self.assertIn("Similar: ['Drift']", self.run_command("browse", {"path": "instruments/rift"})["message"])
+        self.assertEqual(self.run_command("browse", {"path": "nothing"})["code"], "NOT_FOUND")
+        self.assertIn("Roots: audio_effects, instruments, samples", self.run_command("browse", {"path": "nothing"})["message"])
+        for params in ({"path": "instruments", "limit": 0}, {"path": "instruments", "offset": -1}, {"path": "instruments", "kind": "presets"}, {"path": "instruments", "limit": "5"}):
+            self.assertEqual(self.run_command("browse", params)["code"], "INVALID_ARGUMENT", params)
+
+    # ---- browser_walk
+    def walk_all(self, **params):
+        seen, token = [], None
+        for _ in range(500):
+            response = self.ok("browser_walk", **dict(params, **({"token": token} if token else {})))
+            seen.extend(response["items"])
+            token = response["token"]
+            if response["done"]:
+                return seen
+        self.fail("the walk never finished")
+
+    def test_a_walk_visits_every_node_of_the_chosen_roots_depth_first_with_paths(self):
+        items = self.walk_all(roots=["instruments", "audio_effects"])
+        paths = [i["path"] for i in items]
+        self.assertEqual(paths[:4], ["instruments", "instruments/Drift", "instruments/Drift/Bass", "instruments/Drift/Bass/Sub Pulse"])
+        self.assertIn("audio_effects/EQ Eight", paths)
+        self.assertNotIn("samples/Kick 01", paths)
+        self.assertEqual(len(paths), len(set(paths)))
+        sub = [i for i in items if i["name"] == "Sub Pulse"][0]
+        self.assertEqual((sub["uri"], sub["is_loadable"], sub["is_folder"]), ("query:Synths#Drift:Sub", True, False))
+
+    def test_a_walk_is_chunked_by_item_count_and_can_be_resumed(self):
+        first = self.ok("browser_walk", roots=["instruments"], max_items=10)
+        self.assertEqual(len(first["items"]), 8)                 # the whole small tree fits: 8 nodes
+        big = self.ok("browser_walk", roots=["instruments", "audio_effects", "samples"], max_items=10, budget_ms=200)
+        self.assertLessEqual(len(big["items"]), 10)
+        self.assertFalse(big["done"])
+        rest = self.ok("browser_walk", token=big["token"], max_items=100)
+        self.assertTrue(rest["done"])
+        self.assertEqual(len(big["items"]) + len(rest["items"]), 8 + 3 + 2)
+
+    def test_a_walk_stops_at_the_time_budget(self):
+        ticks = iter(range(0, 10000))
+        original = mod.clock.now
+        mod.clock.now = lambda: next(ticks) * 0.002                          # each read of the clock is 2 ms later
+        try:
+            partial = self.ok("browser_walk", roots=["instruments"], budget_ms=5)
+        finally:
+            mod.clock.now = original
+        self.assertFalse(partial["done"])
+        self.assertLess(len(partial["items"]), 8)
+        self.assertGreater(partial["pending"], 0)
+
+    def test_max_depth_limits_the_descent(self):
+        items = self.walk_all(roots=["instruments"], max_depth=2)
+        self.assertEqual([i["path"] for i in items], ["instruments", "instruments/Drift", "instruments/Wavetable"])
+
+    def test_walk_validation_and_expiry(self):
+        for params, code in [({"roots": ["nowhere"]}, "INVALID_ARGUMENT"), ({"roots": "instruments"}, "INVALID_ARGUMENT"), ({"max_depth": 0}, "INVALID_ARGUMENT"),
+                             ({"max_depth": 99}, "INVALID_ARGUMENT"), ({"budget_ms": 0}, "INVALID_ARGUMENT"), ({"max_items": 3}, "INVALID_ARGUMENT"),
+                             ({"token": "walk-never-issued"}, "NOT_FOUND")]:
+            self.assertEqual(self.code("browser_walk", **params), code, params)
+
+    # ---- load_item
+    def test_load_a_device_onto_a_track_reports_what_was_added(self):
+        out = self.ok("load_item", path="audio_effects/EQ Eight", target="tracks/0")
+        self.assertEqual((out["name"], out["target"], out["devices"]), ("EQ Eight", "tracks/0", ["Wavetable", "EQ Eight"]))
+        self.assertEqual(out["added"], [{"address": "tracks/0/devices/1", "name": "EQ Eight"}])
+        self.assertIs(self.song.view.selected_track, self.song.tracks[0])
+        self.assertEqual(self.browser.loaded, [("EQ Eight", None)])
+
+    def test_load_a_sample_into_a_clip_slot(self):
+        self.song.tracks[1].clip_slots = [FakeSlot(), FakeSlot()]
+        out = self.ok("load_item", path="samples/Kick 01", target="tracks/1/slots/0")
+        self.assertEqual((out["has_clip"], out["clip"]), (True, "tracks/1/slots/0/clip"))
+        self.assertIs(self.song.view.highlighted_clip_slot, self.song.tracks[1].clip_slots[0])
+
+    def test_hot_swap_replaces_a_device_and_leaves_hot_swap_mode(self):
+        out = self.ok("load_item", path="instruments/Wavetable", target="tracks/0/devices/0")
+        self.assertEqual((out["hotswapped"], out["devices_before"], out["devices"]), (True, ["Wavetable"], ["Wavetable"]))
+        self.assertEqual(self.browser.loaded[-1][1] is not None, True)
+        self.assertIsNone(self.browser.hotswap_target)
+        self.assertEqual(self.song.tracks[0].devices[0].name, "Wavetable")
+
+    def test_load_by_uri_and_by_path_are_alternatives(self):
+        out = self.ok("load_item", uri="query:AudioFx#Utility", target="tracks/1")
+        self.assertEqual(out["added"][0]["name"], "Utility")
+        self.assertEqual(self.code("load_item", target="tracks/0"), "INVALID_ARGUMENT")
+        self.assertEqual(self.code("load_item", path="audio_effects/Utility", uri="query:AudioFx#Utility", target="tracks/0"), "INVALID_ARGUMENT")
+        response = self.run_command("load_item", {"uri": "query:Nope", "target": "tracks/0"})
+        self.assertEqual(response["code"], "NOT_FOUND")
+        self.assertIn("slow", response["message"])
+
+    def test_folders_cannot_be_loaded_and_targets_are_checked(self):
+        self.assertEqual(self.code("load_item", path="instruments/Drift/Bass", target="tracks/0"), "INVALID_ARGUMENT")
+        self.assertEqual(self.code("load_item", path="audio_effects/EQ Eight", target="song"), "INVALID_ARGUMENT")
+        self.assertEqual(self.code("load_item", path="audio_effects/EQ Eight"), "INVALID_ARGUMENT")
+        self.assertEqual(self.code("load_item", path="audio_effects/EQ Eight", target="tracks/9"), "OUT_OF_RANGE")
+        self.assertEqual(self.browser.loaded, [])
+
+    def test_preview_and_stop_preview(self):
+        self.assertEqual(self.ok("load_item", action="preview", path="instruments/Drift/Bass/Sub Pulse")["name"], "Sub Pulse")
+        self.assertEqual(self.browser.previewed, ["Sub Pulse"])
+        self.ok("load_item", action="stop_preview")
+        self.assertEqual(self.browser.stopped, 1)
+        self.assertEqual(self.code("load_item", action="rewind"), "INVALID_ARGUMENT")
+
+    def test_loading_is_one_undo_step_and_browsing_is_not(self):
+        self.song.undo_log.clear()
+        self.ok("browse", path="instruments")
+        self.assertEqual(self.song.undo_log, [])
+        self.ok("load_item", path="audio_effects/Utility", target="tracks/0")
+        self.assertEqual(self.song.undo_log, ["begin", "end"])
+
+
 # ---------------------------------------------------------------- routing and mixer state
 
 class FakeRoutingType(object):

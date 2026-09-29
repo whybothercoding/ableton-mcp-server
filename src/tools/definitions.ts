@@ -86,49 +86,6 @@ const LEGACY_TOOLS: ToolDefinition[] = [
     requiredCapability: 'get_audio_clip_path'
   },
   {
-    name: 'get_browser_tree',
-    description: 'Explore top-level categories in Live browser (instruments, sounds, drums, audio_effects, midi_effects).',
-    inputSchema: {
-      type: 'object',
-      properties: {
-        category_type: {
-          type: 'string',
-          description: 'Category filter',
-          enum: ['all', 'instruments', 'sounds', 'drums', 'audio_effects', 'midi_effects']
-        }
-      }
-    },
-    requiredCapability: 'get_browser_tree'
-  },
-  {
-    name: 'get_browser_items',
-    description: 'Get browser items at a given category path (e.g. "instruments/Simpler").',
-    inputSchema: {
-      type: 'object',
-      properties: {
-        path: { type: 'string', description: 'Path in browser tree e.g. "instruments/Simpler"' },
-        limit: { type: 'number', description: 'Maximum items to return (default 200)' },
-        offset: { type: 'number', description: 'Number of items to skip, for paging through large folders (default 0)' }
-      },
-      required: ['path']
-    },
-    requiredCapability: 'get_browser_items_at_path'
-  },
-  {
-    name: 'load_browser_item',
-    description: 'Load a browser item onto a track by URI.',
-    inputSchema: {
-      type: 'object',
-      properties: {
-        track_index: { type: 'number', description: '0-indexed track position' },
-        track_type: TRACK_TYPE_PROPERTY,
-        item_uri: { type: 'string', description: 'URI of browser item' }
-      },
-      required: ['track_index', 'item_uri']
-    },
-    requiredCapability: 'load_browser_item'
-  },
-  {
     name: 'eval_python',
     description: 'Evaluate raw Python code on the Ableton Remote Script instance (for development and advanced debugging).',
     inputSchema: {

@@ -1,4 +1,5 @@
 import { BATCH_SPECS } from './batch.js';
+import { BROWSE_SPECS } from './browse.js';
 import { COMPOSITION_SPECS } from './composition.js';
 
 /**
@@ -526,6 +527,6 @@ export const TOOL_SPECS: ToolSpec[] = [
   ...COMPOSITION_SPECS
 ];
 
-TOOL_SPECS.push(...BATCH_SPECS);
+TOOL_SPECS.push(...BATCH_SPECS, ...BROWSE_SPECS);
 
 export const TOOL_SPEC_BY_NAME: Record<string, ToolSpec> = Object.fromEntries(TOOL_SPECS.map((s) => [s.name, s]));

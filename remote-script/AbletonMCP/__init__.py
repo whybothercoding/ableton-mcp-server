@@ -26,6 +26,7 @@ from .routing import RoutingMixin
 from .device_actions import DeviceActionsMixin
 from .automation import AutomationMixin
 from .browser import BrowserMixin
+from .browse import BrowseMixin
 
 
 def _compute_build_id():
@@ -46,7 +47,7 @@ def create_instance(c_instance):
     return AbletonMCP(c_instance)
 
 
-class AbletonMCP(ServerMixin, BatchMixin, AddressingMixin, DeviceAddressingMixin, PropertiesMixin, StructureMixin, LifecycleMixin, ClipActionsMixin, NotesMixin, IntrospectMixin, SessionMixin, TracksMixin, ClipsMixin, DevicesMixin, DeviceActionsMixin, RoutingMixin, AutomationMixin, BrowserMixin,
+class AbletonMCP(ServerMixin, BatchMixin, AddressingMixin, DeviceAddressingMixin, PropertiesMixin, StructureMixin, LifecycleMixin, ClipActionsMixin, NotesMixin, IntrospectMixin, SessionMixin, TracksMixin, ClipsMixin, DevicesMixin, DeviceActionsMixin, RoutingMixin, AutomationMixin, BrowserMixin, BrowseMixin,
                  ControlSurface):
     """AbletonMCP Remote Script for Ableton Live"""
 
