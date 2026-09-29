@@ -5,6 +5,9 @@ It is deliberately small and contained: it only acts on clips with a configurati
 plays, triggers once per pass, and launches through Live's normal clip launch (so Live's launch quantization decides the exact
 moment; the trigger fires slightly early to catch the next grid point). Configurations live in memory: they are lost when Live
 restarts or the script reloads, and `clear` (or removing the clip) stops them at once.
+
+A pass is timed from the clip's own playing position, never from the song time: the song time jumps back whenever the arrangement
+loop wraps (or the user relocates), while a Session clip plays on undisturbed.
 """
 import random
 
@@ -52,7 +55,7 @@ class FollowActionsMixin(object):
         track_address, slot_index = canonical.split("/slots/")[0], int(canonical.split("/slots/")[1].split("/")[0])
         track = self._resolve(track_address)[1]
         self._follow_entries()[self._clip_key(clip)] = {"clip": clip, "track": track, "slot": track.clip_slots[slot_index], "config": config,
-                                                        "started_at": None, "fired": False, "pending": False,
+                                                        "elapsed": None, "fired": False, "pending": False,
                                                         "last_position": None}
         return {"address": canonical, "config": config, "active": len(self._follow_entries())}
 
@@ -103,17 +106,17 @@ class FollowActionsMixin(object):
         song = self._song
         if not song.is_playing:
             for entry in entries.values():
-                entry["started_at"], entry["fired"] = None, False
+                entry["elapsed"], entry["fired"], entry["last_position"] = None, False, None
             return
-        now, tempo = song.current_song_time, float(song.tempo)
+        tempo = float(song.tempo)
         for key, entry in list(entries.items()):
             try:
-                self._tick_follow_entry(entry, now, tempo)
+                self._tick_follow_entry(entry, tempo)
             except Exception as e:
                 self.log_message("Follow action on '{0}' stopped: {1}".format(_safe_attr(entry["clip"], "name", "?"), e))
                 entries.pop(key, None)
 
-    def _tick_follow_entry(self, entry, now, tempo):
+    def _tick_follow_entry(self, entry, tempo):
         slot, clip = entry["slot"], entry["clip"]
         if not slot.has_clip or slot.clip != clip:                                # the clip was deleted or replaced
             raise RuntimeError("the clip is gone")
@@ -121,18 +124,25 @@ class FollowActionsMixin(object):
             entry["pending"] = True
             return
         if entry["pending"]:
-            entry["pending"], entry["started_at"], entry["fired"] = False, None, False
+            entry["pending"], entry["elapsed"], entry["fired"], entry["last_position"] = False, None, False, None
         if not clip.is_playing:
-            entry["started_at"], entry["fired"], entry["last_position"] = None, False, None
+            entry["elapsed"], entry["fired"], entry["last_position"] = None, False, None
             return
-        position, last = clip.playing_position, entry.get("last_position")
+        position, last = clip.playing_position, entry["last_position"]
         entry["last_position"] = position
-        if entry["fired"] and last is not None and position < last - 0.001:    # the clip restarted or looped: a new pass begins
-            entry["started_at"], entry["fired"] = None, False
-        if entry["started_at"] is None:
-            entry["started_at"] = now - max(0.0, position - clip.start_marker)
+        if entry["elapsed"] is None or last is None:
+            entry["elapsed"] = max(0.0, position - clip.start_marker)
+        elif position < last - 0.001:                                             # the position went back: the clip looped, or was launched again
+            length = float(clip.loop_end - clip.loop_start)
+            looped = clip.loop_end - last <= min(1.0, 0.5 * length)               # it was about to reach the loop end
+            if entry["fired"] or not looped:
+                entry["elapsed"], entry["fired"] = max(0.0, position - clip.start_marker), False     # a new pass begins
+            else:
+                entry["elapsed"] += (clip.loop_end - last) + (position - clip.loop_start)            # the same pass, past one loop
+        else:
+            entry["elapsed"] += position - last
         lead = LEAD_SECONDS * tempo / 60.0
-        if not entry["fired"] and now - entry["started_at"] >= entry["config"]["after_beats"] - lead:
+        if not entry["fired"] and entry["elapsed"] >= entry["config"]["after_beats"] - lead:
             entry["fired"] = True
             self._perform_follow_action(entry)
 
