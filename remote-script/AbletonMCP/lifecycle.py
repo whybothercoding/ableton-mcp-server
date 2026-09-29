@@ -8,7 +8,8 @@ import os
 from .helpers import _is_number
 from .registry import BridgeError, command
 
-CREATE_KINDS = ("audio_track", "midi_track", "return_track", "scene", "midi_clip", "audio_clip", "cue_point")
+CREATE_KINDS = ("audio_track", "midi_track", "return_track", "scene", "midi_clip", "audio_clip", "arrangement_midi_clip", "arrangement_audio_clip",
+                "take_lane", "cue_point")
 
 
 class LifecycleMixin(object):
@@ -41,6 +42,10 @@ class LifecycleMixin(object):
             created, address = self._create_midi_clip(params)
         elif kind == "audio_clip":
             created, address = self._create_audio_clip(params)
+        elif kind in ("arrangement_midi_clip", "arrangement_audio_clip"):
+            created, address = self._create_arrangement_clip(params, kind == "arrangement_audio_clip")
+        elif kind == "take_lane":
+            created, address = self._create_take_lane(params)
         elif kind == "cue_point":
             created, address = self._create_cue_point(params)
         elif kind == "return_track":
@@ -62,9 +67,11 @@ class LifecycleMixin(object):
             created.color = color
         # Live snaps colors to its palette, so report the color it actually applied
         result = {"address": address, "name": created.name, "kind": kind, "color": getattr(created, "color", None)}
-        if kind in ("midi_clip", "audio_clip"):
+        if kind in ("midi_clip", "audio_clip", "arrangement_midi_clip", "arrangement_audio_clip"):
             result["length"] = created.length
-        if kind == "audio_clip":
+        if kind in ("arrangement_midi_clip", "arrangement_audio_clip"):
+            result["start_time"] = created.start_time
+        if kind in ("audio_clip", "arrangement_audio_clip"):
             result.update({"file_path": created.file_path, "warping": created.warping})
         if kind == "cue_point":
             result["time"] = created.time
@@ -86,6 +93,43 @@ class LifecycleMixin(object):
             raise BridgeError("No file at '{0}'".format(path), "NOT_FOUND")
         clip = slot.create_audio_clip(path)
         return clip, canonical + "/clip"
+
+    def _arrangement_owner(self, params, what):
+        kind, owner, canonical = self._resolve(params.get("address"))
+        if kind == "lane":
+            return owner, canonical
+        if kind != "track" or not canonical.startswith("tracks/") or canonical.count("/") != 1:
+            raise BridgeError("{0} needs address: a regular track ('tracks/N') or one of its take lanes ('tracks/N/take_lanes/K'), got '{1}'".format(
+                what, canonical), "INVALID_ARGUMENT")
+        return owner, canonical
+
+    def _create_arrangement_clip(self, params, audio):
+        """A clip on the arrangement timeline of a track (or take lane) at `time` beats."""
+        what = "arrangement_audio_clip" if audio else "arrangement_midi_clip"
+        owner, _canonical = self._arrangement_owner(params, what)
+        time = params.get("time")
+        if not _is_number(time) or time < 0:
+            raise BridgeError("{0} needs time: the start position in beats from 0".format(what), "INVALID_ARGUMENT")
+        if audio:
+            path = params.get("path")
+            if not isinstance(path, str) or not os.path.isabs(path):
+                raise BridgeError("{0} needs path: the absolute path of an audio file".format(what), "INVALID_ARGUMENT")
+            if not os.path.isfile(path):
+                raise BridgeError("No file at '{0}'".format(path), "NOT_FOUND")
+            clip = owner.create_audio_clip(path, float(time))
+        else:
+            length = params.get("length", 4.0)
+            if not _is_number(length) or length <= 0:
+                raise BridgeError("length must be a positive number of beats", "INVALID_ARGUMENT")
+            clip = owner.create_midi_clip(float(time), float(length))
+        return clip, self._address_of(clip)
+
+    def _create_take_lane(self, params):
+        kind, track, canonical = self._resolve(params.get("address"))
+        if kind != "track" or canonical.count("/") != 1 or not canonical.startswith("tracks/"):
+            raise BridgeError("take_lane needs address: a regular track ('tracks/N')", "INVALID_ARGUMENT")
+        lane = track.create_take_lane()
+        return lane, self._address_of(lane)
 
     def _at_playhead(self, time, action):
         """Run `action` with the playhead at `time` (cue points can only be set or removed at the playhead), then put it back."""
@@ -168,6 +212,9 @@ class LifecycleMixin(object):
             song.delete_return_track(int(canonical.split("/")[1]))
         elif kind == "scene":
             song.delete_scene(int(canonical.split("/")[1]))
+        elif kind == "clip" and "/arrangement/" in canonical:
+            track = self._resolve(canonical.split("/arrangement/")[0].split("/take_lanes/")[0])[1]
+            track.delete_clip(obj)
         elif kind == "clip":
             slot = self._resolve(canonical[: -len("/clip")])[1]
             slot.delete_clip()

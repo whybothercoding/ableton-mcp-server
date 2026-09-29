@@ -1370,6 +1370,86 @@ try {
     });
   }
 
+  console.log('\nArrangement: timeline clips, take lanes, Session to arrangement, recording status');
+  const arrTrack = await makeScratchTrack();
+  const at = `tracks/${arrTrack}`;
+  const timeline = async (address) => (await call('describe_set')).tracks.find((t) => t.address === address).arrangement;
+  await check('arrangement MIDI clips are created at a time, listed in time order, addressed, edited with the ordinary clip tools, and deleted with the guard', async () => {
+    const late = await call('create', { kind: 'arrangement_midi_clip', address: at, time: 16, length: 4, name: 'MCP TEST LATE' });
+    const early = await call('create', { kind: 'arrangement_midi_clip', address: at, time: 4, length: 2, name: 'MCP TEST EARLY' });
+    assert(late.start_time === 16 && early.start_time === 4 && early.length === 2, JSON.stringify([late, early]));
+    const listed = await timeline(at);
+    assert(listed.map((c) => c.name).join() === 'MCP TEST EARLY,MCP TEST LATE' && listed[1].start === 16 && listed.every((c) => c.kind === 'midi'), JSON.stringify(listed));
+    const first = `${at}/arrangement/0`;
+    const props = await call('get_properties', { address: first, names: ['name', 'start_time', 'end_time', 'length', 'is_arrangement_clip'] });
+    assert(props.properties.start_time === 4 && props.properties.end_time === 6 && props.properties.is_arrangement_clip === true, JSON.stringify(props.properties));
+    await call('set_properties', { address: first, properties: { name: 'MCP TEST RENAMED', muted: true } });
+    assert((await timeline(at))[0].name === 'MCP TEST RENAMED', 'renamed');
+    await call('write_notes', { address: first, notes: [{ pitch: 60, start_time: 0, duration: 1 }] });
+    assert((await call('get_notes', { address: first })).count === 1, 'notes go into an arrangement clip like any MIDI clip');
+    await failsCode(() => call('launch', { address: first }), 'INVALID_ARGUMENT', 'arrangement timeline');
+    await failsCode(() => call('delete', { address: first, expect: { name: 'Wrong' } }), 'GUARD_FAILED');
+    await call('delete', { address: first, expect: { name: 'MCP TEST RENAMED' } });
+    assert((await timeline(at)).map((c) => c.name).join() === 'MCP TEST LATE', 'the early clip is gone');
+    await call('history', { action: 'undo' });
+    assert((await timeline(at)).length === 2, 'one undo brings the deleted arrangement clip back');
+    await call('delete', { address: `${at}/arrangement/0`, expect: { name: 'MCP TEST RENAMED' } });
+    for (const [params, code] of [[{ time: -1 }, 'INVALID_ARGUMENT'], [{ time: 0, length: 0 }, 'INVALID_ARGUMENT'], [{ address: 'song', time: 0 }, 'INVALID_ARGUMENT']]) {
+      await failsCode(() => call('create', { kind: 'arrangement_midi_clip', address: at, ...params }), code);
+    }
+  });
+  await check('the timeline is part of the Set fingerprint, so a change to it is seen', async () => {
+    const before = (await call('describe_set')).fingerprint;
+    const made = await call('create', { kind: 'arrangement_midi_clip', address: at, time: 40, length: 1, name: 'MCP TEST FP' });
+    assert((await call('describe_set')).fingerprint !== before, 'the fingerprint must change when a clip is added to the arrangement');
+    await call('delete', { address: made.address, expect: { name: 'MCP TEST FP' } });
+    assert((await call('describe_set')).fingerprint === before, 'and change back when it is removed');
+  });
+  await check('a take lane is created and addressable, and holds arrangement clips', async () => {
+    const lane = await call('create', { kind: 'take_lane', address: at, name: 'MCP TEST LANE' });
+    assert(lane.address === `${at}/take_lanes/0`, JSON.stringify(lane));
+    assert((await call('get_properties', { address: lane.address })).properties.name.length > 0, 'the lane has a name');
+    const clip = await call('create', { kind: 'arrangement_midi_clip', address: lane.address, time: 8, length: 2, name: 'MCP TEST TAKE' });
+    assert(clip.address.startsWith(`${at}/`) && clip.address.includes('arrangement'), JSON.stringify(clip));
+    assert((await call('get_properties', { address: clip.address, names: ['is_take_lane_clip'] })).properties.is_take_lane_clip === true || clip.address.includes('take_lanes'), 'a lane clip');
+  });
+  await check('a Session clip is copied to the arrangement; its automation comes along as track automation (the spike result, re-proven)', async () => {
+    const session = `${at}/slots/0`;
+    await call('create', { kind: 'midi_clip', address: session, length: 4, name: 'MCP TEST SRC' });
+    const sessionClip = `${session}/clip`;
+    await call('device_action', { action: 'insert', address: at, name: 'Drift' });
+    const cutoff = (await call('get_device', { address: `${at}/devices/0` })).parameters.find((p) => !p.is_quantized && p.is_enabled && p.max > p.min && p.index > 0);
+    await call('draw_automation', { clip: sessionClip, parameter: cutoff.address, points: [{ time: 0, value: cutoff.min + 0.2 * (cutoff.max - cutoff.min) }, { time: 4, value: cutoff.min + 0.8 * (cutoff.max - cutoff.min) }] });
+    const copied = await call('clip_action', { address: sessionClip, action: 'to_arrangement', time: 64 });
+    assert(copied.address.startsWith(`${at}/arrangement/`) && copied.start_time === 64 && copied.length === 4, JSON.stringify(copied));
+    assert(copied.automation.length === 1 && copied.automation[0].parameter === cutoff.address, `the result names the parameter that is now automated: ${JSON.stringify(copied.automation)}`);
+    const state = (await call('get_properties', { address: cutoff.address, names: ['automation_state'] })).properties.automation_state;
+    assert(state === 1 && copied.automation[0].automation_state === 1, `the envelope became the track's arrangement automation (automation_state ${state}); it does not stay on the copy`);
+    await failsCode(() => call('clip_action', { address: copied.address, action: 'to_arrangement', time: 0 }), 'INVALID_ARGUMENT');
+    await failsCode(() => call('clip_action', { address: sessionClip, action: 'to_arrangement' }), 'INVALID_ARGUMENT');
+  });
+  await check('an arrangement audio clip is created from a file path on an audio track', async () => {
+    const file = (await call('eval', { code: "[sl.clip.file_path for t in self._song.tracks for sl in getattr(t, 'clip_slots', []) if sl.has_clip and sl.clip.is_audio_clip][:1]" }))[0];
+    if (!file) {
+      console.log('       no audio clip in the Set to borrow a file from: skipped');
+      return;
+    }
+    const audioTrack = await call('create', { kind: 'audio_track', name: 'MCP TEST ARR AUDIO' });
+    await trackPtr(audioTrack.address, 'tracks');
+    const made = await call('create', { kind: 'arrangement_audio_clip', address: audioTrack.address, time: 8, path: file });
+    assert(made.start_time === 8 && made.file_path === file && made.address === `${audioTrack.address}/arrangement/0`, JSON.stringify(made));
+    assert((await call('get_properties', { address: made.address, names: ['warping'] })).properties.warping === true, 'the audio clip is warped');
+    await failsCode(() => call('create', { kind: 'arrangement_audio_clip', address: audioTrack.address, time: 0, path: '/no/such.wav' }), 'NOT_FOUND');
+  });
+  await check('record status is readable (recording itself is gated and never started by the tests)', async () => {
+    const status = await call('record', { action: 'status' });
+    for (const key of ['record_mode', 'session_record', 'arrangement_overdub', 'punch_in', 'punch_out', 'is_playing']) assert(typeof status[key] === 'boolean', `${key}: ${JSON.stringify(status)}`);
+    assert(Array.isArray(status.armed_tracks), 'armed tracks are listed');
+    assert(status.record_mode === false && status.session_record === false, 'the test run must not be recording');
+    await failsCode(() => call('record', { action: 'rewind' }), 'INVALID_ARGUMENT');
+    await failsCode(() => call('record', { action: 'overdub' }), 'INVALID_ARGUMENT');
+  });
+
   console.log('\ndraw_automation');
   await check('linear ramp: readback and independent envelope values match', async () => {
     const lo = pA.min + 0.2 * (pA.max - pA.min);

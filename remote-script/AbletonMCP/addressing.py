@@ -5,6 +5,8 @@
     returns/0                return track 0                 master              the master track
     scenes/2                 scene 2                        scenes/name:Verse
     tracks/3/slots/1         clip slot 1 of track 3         tracks/3/slots/1/clip   the clip in it
+    tracks/3/arrangement/2   arrangement clip 2 of track 3 (in time order)
+    tracks/3/take_lanes/0    a take lane;  tracks/3/take_lanes/0/arrangement/1  a clip in it
     grooves/0                groove 0 of the groove pool    grooves/name:Swing 16ths 66
     cue_points/0             cue point 0 (by time order)    cue_points/name:Chorus
     app                      the Live application (CPU load, dialogs)
@@ -20,7 +22,7 @@ class AddressingMixin(object):
     """Resolve addresses to Live objects and build addresses from objects."""
 
     def _resolve(self, address):
-        """Return (kind, object, canonical_address). kind is song, track, scene, slot, clip, groove, cue or app."""
+        """Return (kind, object, canonical_address). kind is song, track, scene, slot, clip, lane, groove, cue, app, device, chain, pad or parameter."""
         if not isinstance(address, str) or not address.strip():
             raise BridgeError("address must be a non-empty string such as 'tracks/0/slots/1/clip'", "INVALID_ARGUMENT")
         parts = [p for p in address.strip().strip("/").split("/") if p != ""]
@@ -53,6 +55,17 @@ class AddressingMixin(object):
                 return "track", track, canonical
             if parts[2] in ("devices", "mixer"):
                 return self._resolve_track_tail(track, canonical, parts[2:], address)
+            if head == "tracks" and parts[2] == "arrangement" and len(parts) == 4:
+                return self._resolve_arrangement_clip(track, canonical, parts[3], address)
+            if head == "tracks" and parts[2] == "take_lanes" and len(parts) in (4, 6):
+                lanes = list(_safe_attr(track, "take_lanes", []))
+                index = self._select(lanes, parts[3], "take lane", lambda l: l.name)
+                lane, lane_address = lanes[index], "{0}/take_lanes/{1}".format(canonical, index)
+                if len(parts) == 4:
+                    return "lane", lane, lane_address
+                if parts[4] != "arrangement":
+                    raise BridgeError("Unknown address '{0}'".format(address), "NOT_FOUND")
+                return self._resolve_arrangement_clip(lane, lane_address, parts[5], address)
             if head == "tracks" and parts[2] == "slots" and len(parts) in (4, 5):
                 slots = track.clip_slots
                 slot_index = _as_index(self._number(parts[3], address), "slot index")
@@ -69,6 +82,12 @@ class AddressingMixin(object):
         raise BridgeError("Unknown address '{0}'. Use song, master, tracks/N, returns/N, scenes/N, "
                           "tracks/N/slots/M[/clip], tracks/N/devices/M[/parameters/P | /chains/C/devices/...], grooves/N, cue_points/N, app, "
                           "or a name: selector such as tracks/name:Drift".format(address), "NOT_FOUND")
+
+    def _resolve_arrangement_clip(self, owner, canonical, token, address):
+        """A clip on the arrangement timeline of a track or take lane, by position in time order."""
+        clips = list(_safe_attr(owner, "arrangement_clips", []))
+        index = self._select(clips, token, "arrangement clip", lambda c: c.name)
+        return "clip", clips[index], "{0}/arrangement/{1}".format(canonical, index)
 
     def _resolve_track_tail(self, track, canonical, rest, address):
         """Below a track (or the master): its device chain and mixer."""
@@ -111,6 +130,15 @@ class AddressingMixin(object):
         for i, track in enumerate(song.tracks):
             if obj == track:
                 return "tracks/{0}".format(i)
+            for j, clip in enumerate(_safe_attr(track, "arrangement_clips", [])):
+                if obj == clip:
+                    return "tracks/{0}/arrangement/{1}".format(i, j)
+            for k, lane in enumerate(_safe_attr(track, "take_lanes", [])):
+                if obj == lane:
+                    return "tracks/{0}/take_lanes/{1}".format(i, k)
+                for j, clip in enumerate(_safe_attr(lane, "arrangement_clips", [])):
+                    if obj == clip:
+                        return "tracks/{0}/take_lanes/{1}/arrangement/{2}".format(i, k, j)
             for j, slot in enumerate(_safe_attr(track, "clip_slots", [])):
                 if obj == slot:
                     return "tracks/{0}/slots/{1}".format(i, j)

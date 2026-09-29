@@ -38,7 +38,8 @@ const LEGACY_TOOLS: ToolDefinition[] = [
 
 /** Tools that are hidden and refused unless the named environment variable is "1" in the MCP server's environment. */
 export const GATED_TOOLS: Record<string, string> = {
-  eval_python: 'ABLETON_MCP_ALLOW_EVAL'
+  eval_python: 'ABLETON_MCP_ALLOW_EVAL',
+  record: 'ABLETON_MCP_ALLOW_RECORD'
 };
 
 export function isToolEnabled(name: string, env: NodeJS.ProcessEnv = process.env): boolean {

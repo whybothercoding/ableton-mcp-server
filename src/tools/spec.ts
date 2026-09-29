@@ -41,7 +41,7 @@ export { validateArgs, BATCH_REFERENCE } from './schema.js';
 
 const ADDRESS_HELP =
   "Addresses: 'song', 'master', 'tracks/N', 'returns/N', 'scenes/N', 'tracks/N/slots/M' (clip slot) and " +
-  "'tracks/N/slots/M/clip', 'tracks/N/devices/M' (also returns/N and master; then '/parameters/P', '/chains/C/devices/...', '/drum_pads/NOTE', '/mixer/volume'), 'grooves/N' (groove pool), 'cue_points/N' and 'app' (the Live application). Indices are 0-based. A name selector works anywhere a number does, e.g. 'tracks/name:Drift' " +
+  "'tracks/N/slots/M/clip', 'tracks/N/arrangement/M' (arrangement clips in time order), 'tracks/N/take_lanes/K', 'tracks/N/devices/M' (also returns/N and master; then '/parameters/P', '/chains/C/devices/...', '/drum_pads/NOTE', '/mixer/volume'), 'grooves/N' (groove pool), 'cue_points/N' and 'app' (the Live application). Indices are 0-based. A name selector works anywhere a number does, e.g. 'tracks/name:Drift' " +
   '(exact match; several matches is an error that lists their indices).';
 
 export const TOOL_SPECS: ToolSpec[] = [
@@ -157,18 +157,19 @@ export const TOOL_SPECS: ToolSpec[] = [
   {
     name: 'create',
     description:
-      "Create a track, return track, scene, MIDI clip, audio clip or cue point and get back its address. kind: audio_track, midi_track, return_track (always appended), scene, audio_clip (`address` of an EMPTY slot on an audio track and `path`: an absolute path to an audio file; it is auto-warped by Live's settings and the result reports its length), midi_clip " +
+      "Create a track, return track, scene, MIDI clip, audio clip or cue point and get back its address. kind: audio_track, midi_track, return_track (always appended), scene, audio_clip (`address` of an EMPTY slot on an audio track and `path`: an absolute path to an audio file; it is auto-warped by Live's settings and the result reports its length), " +
+      "arrangement_midi_clip (`address` of a track or take lane, `time` in beats on the timeline, `length` default 4) and arrangement_audio_clip (`address`, `time`, `path`), take_lane (`address` of a track), midi_clip " +
       "(`address` of an EMPTY clip slot like 'tracks/2/slots/0', `length` in beats, default 4) or cue_point (`time` in beats; the transport must be stopped: Live sets cue points at the playhead, which is put back afterwards). For tracks and scenes `index` is the insertion position (0-based; omit or -1 to append; existing objects shift, so re-read addresses afterwards). " +
       "Optional `name` and `color` (RGB integer; Live snaps it to the nearest palette colour and the result reports the colour it applied) are applied immediately. One undo step.",
     inputSchema: {
       type: 'object',
       properties: {
-        kind: { type: 'string', enum: ['audio_track', 'midi_track', 'return_track', 'scene', 'midi_clip', 'audio_clip', 'cue_point'], description: 'What to create' },
+        kind: { type: 'string', enum: ['audio_track', 'midi_track', 'return_track', 'scene', 'midi_clip', 'audio_clip', 'arrangement_midi_clip', 'arrangement_audio_clip', 'take_lane', 'cue_point'], description: 'What to create' },
         index: { type: 'number', description: 'Insertion position, -1 (default) appends' },
         address: { type: 'string', description: "midi_clip, audio_clip: the empty clip slot to fill, e.g. 'tracks/2/slots/0'" },
         path: { type: 'string', description: 'audio_clip: absolute path of the audio file' },
         length: { type: 'number', description: 'midi_clip: length in beats (default 4)' },
-        time: { type: 'number', description: 'cue_point: position in beats' },
+        time: { type: 'number', description: 'cue_point and arrangement clips: position in beats' },
         name: { type: 'string', description: 'Name to give it' },
         color: { type: 'number', description: 'RGB color integer' }
       },
@@ -193,7 +194,7 @@ export const TOOL_SPECS: ToolSpec[] = [
   {
     name: 'delete',
     description:
-      "Delete a track ('tracks/N'), return track ('returns/N'), scene ('scenes/N'), clip ('tracks/N/slots/M/clip') or cue point ('cue_points/N'; transport must be stopped). DESTRUCTIVE (one undo step brings it back). " +
+      "Delete a track ('tracks/N'), return track ('returns/N'), scene ('scenes/N'), clip ('tracks/N/slots/M/clip' or an arrangement clip 'tracks/N/arrangement/M') or cue point ('cue_points/N'; transport must be stopped). DESTRUCTIVE (one undo step brings it back). " +
       "`expect` is mandatory: {\"name\": <the object's current name>}. Indices shift after every create/delete, so read the object first; if its name no longer matches, " +
       "nothing is deleted (GUARD_FAILED). The master track cannot be deleted, and a Set always keeps at least one scene.",
     inputSchema: {
@@ -219,7 +220,7 @@ export const TOOL_SPECS: ToolSpec[] = [
       "stop stops it), a scene ('scenes/N': fire only) , a track ('tracks/N': stop all its clips), a cue point ('cue_points/N': jump there) or 'song' (stop all clips, transport keeps running). " +
       "Options for a slot: `quantization` overrides the launch quantization for this launch (q_no_q, q_bar, q_half...), `legato` starts the clip in sync with the one playing, " +
       "`record_length` (beats, empty slot only) starts a recording that ends by itself. Scenes take `legato` and `select` (false keeps the selection where it is). " +
-      "Stops take `quantized` (default true; false stops immediately). Launching does not change the Set's content.",
+      "Stops take `quantized` (default true; false stops immediately). Launching does not change the Set's content. Arrangement clips cannot be launched (use transport).",
     inputSchema: {
       type: 'object',
       properties: {
@@ -243,12 +244,14 @@ export const TOOL_SPECS: ToolSpec[] = [
       "quantize (`grid`: rec_q_quarter, rec_q_eight, rec_q_eight_triplet, rec_q_sixtenth, rec_q_thirtysecond...; `amount` 0-1, default 1; on audio clips it aligns warp markers), " +
       "quantize_pitch (like quantize for one `pitch`, 0-127; MIDI only), scrub (`position` in beats) / stop_scrub, move_playing_pos (`amount` beats, negative goes back; clip must be playing), and on AUDIO clips add_warp_marker (`beat_time`; `sample_time` = seconds in the file, default: where it changes nothing), " +
       "move_warp_marker (`beat_time` of an existing marker, `distance` in beats: this is how audio is retimed) and remove_warp_marker (`beat_time`); current markers are the clip's `warp_markers` property. " +
+      "to_arrangement copies a SESSION clip onto its track's arrangement timeline at `time` (beats) and returns the new clip's address; a clip that carries automation envelopes turns them into arrangement track automation (the envelopes do not stay on the copy; the result lists the parameters now automated), which is how arrangement automation is written: draw_automation on the Session clip first. " +
       "`address` must be a clip. crop and quantize rewrite content: one undo step each, and `expect` ({name}) refuses to act on the wrong clip. Returns the clip's length and loop after the action.",
     inputSchema: {
       type: 'object',
       properties: {
         address: { type: 'string', description: "A clip, e.g. 'tracks/2/slots/0/clip'" },
-        action: { type: 'string', enum: ['crop', 'duplicate_loop', 'quantize', 'quantize_pitch', 'scrub', 'stop_scrub', 'move_playing_pos', 'add_warp_marker', 'move_warp_marker', 'remove_warp_marker'], description: 'What to do' },
+        action: { type: 'string', enum: ['crop', 'duplicate_loop', 'quantize', 'quantize_pitch', 'scrub', 'stop_scrub', 'move_playing_pos', 'add_warp_marker', 'move_warp_marker', 'remove_warp_marker', 'to_arrangement'], description: 'What to do' },
+        time: { type: 'number', description: 'to_arrangement: destination position in beats on the arrangement' },
         beat_time: { type: 'number', description: 'Warp marker actions: the marker position in beats' },
         distance: { type: 'number', description: 'move_warp_marker: beats to move by' },
         sample_time: { type: 'number', description: 'add_warp_marker: position in the file in seconds' },
@@ -516,15 +519,38 @@ export const TOOL_SPECS: ToolSpec[] = [
     bridge: { command: 'cancel_ramps' }
   },
   {
+    name: 'record',
+    description:
+      "GATED (set ABLETON_MCP_ALLOW_RECORD=1 in the MCP server's environment): recording can overwrite what is on the timeline or in clip slots. `action`: status (default; state of recording and armed tracks), " +
+      "arrangement_start (needs an armed track; optional `from_time` beats, `play` default true), arrangement_stop (`stop_transport` optional), session_start (records into the armed tracks' next free slots; optional `record_length` beats), " +
+      "session_stop, overdub (`enabled`), punch (`punch_in`/`punch_out`) and automation (`enabled`: automation recording). Starting refuses when nothing is armed or recording is already on. Arm tracks with set_properties `arm`. " +
+      "Recorded clips are ordinary clips afterwards. Not undoable step by step and not batchable.",
+    inputSchema: {
+      type: 'object',
+      properties: {
+        action: { type: 'string', enum: ['status', 'arrangement_start', 'arrangement_stop', 'session_start', 'session_stop', 'overdub', 'punch', 'automation'], description: 'Default status' },
+        from_time: { type: 'number', description: 'arrangement_start: playhead position in beats' },
+        play: { type: 'boolean', description: 'arrangement_start: start playback too (default true)' },
+        stop_transport: { type: 'boolean', description: 'arrangement_stop: stop playback too' },
+        record_length: { type: 'number', description: 'session_start: beats to record' },
+        enabled: { type: 'boolean', description: 'overdub, automation' },
+        punch_in: { type: 'boolean', description: 'punch' },
+        punch_out: { type: 'boolean', description: 'punch' }
+      }
+    },
+    annotations: { readOnlyHint: false, destructiveHint: true, idempotentHint: false },
+    bridge: { command: 'record' }
+  },
+  {
     name: 'list_properties',
     description:
       'List the properties get_properties/set_properties know for an object kind: type, whether it is writable, allowed enum values ' +
-      'and ranges. Give an `address` (its kind is used) or a `kind`: song, track, scene, slot, clip, groove, cue, app, device, chain, pad or parameter.',
+      'and ranges. Give an `address` (its kind is used) or a `kind`: song, track, scene, slot, clip, lane, groove, cue, app, device, chain, pad or parameter.',
     inputSchema: {
       type: 'object',
       properties: {
         address: { type: 'string', description: 'Object address; its kind is listed' },
-        kind: { type: 'string', enum: ['song', 'track', 'scene', 'slot', 'clip', 'groove', 'cue', 'app', 'device', 'chain', 'pad', 'parameter'], description: 'Object kind (when no address is given)' }
+        kind: { type: 'string', enum: ['song', 'track', 'scene', 'slot', 'clip', 'lane', 'groove', 'cue', 'app', 'device', 'chain', 'pad', 'parameter'], description: 'Object kind (when no address is given)' }
       }
     },
     annotations: { readOnlyHint: true, destructiveHint: false, idempotentHint: true },

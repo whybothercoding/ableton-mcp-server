@@ -6,7 +6,7 @@ its own undo step and accepts an `expect` guard like the other writing commands.
 import Live
 
 from . import properties
-from .helpers import _is_number
+from .helpers import _is_number, _safe_attr
 from .registry import BridgeError, command
 
 # ClipSlot.fire takes positional optionals; these are Live's "not passed" values (see its docstring)
@@ -15,7 +15,7 @@ _NO_QUANTIZATION = -2147483648
 
 LAUNCH_ACTIONS = ("fire", "stop")
 CLIP_ACTIONS = ("crop", "duplicate_loop", "quantize", "quantize_pitch", "scrub", "stop_scrub", "move_playing_pos", "add_warp_marker",
-                "move_warp_marker", "remove_warp_marker")
+                "move_warp_marker", "remove_warp_marker", "to_arrangement")
 
 
 def _grid(value):
@@ -91,6 +91,9 @@ class ClipActionsMixin(object):
         if not isinstance(select, bool):
             raise BridgeError("select must be true or false", "TYPE_ERROR")
 
+        if kind == "clip" and "/arrangement/" in canonical:
+            raise BridgeError("'{0}' is on the arrangement timeline: only Session clips launch (playback of the arrangement is transport play)".format(canonical),
+                              "INVALID_ARGUMENT")
         if kind == "clip":                       # a clip is launched through the slot that owns it
             canonical = canonical[: -len("/clip")]
             kind, obj = "slot", self._resolve(canonical)[1]
@@ -156,6 +159,8 @@ class ClipActionsMixin(object):
             clip.scrub(float(position))
         elif action == "stop_scrub":
             clip.stop_scrub()
+        elif action == "to_arrangement":
+            return self._to_arrangement(clip, canonical, params)
         elif action in ("add_warp_marker", "move_warp_marker", "remove_warp_marker"):
             self._warp_marker_action(clip, action, params)
         elif action == "move_playing_pos":
@@ -168,6 +173,24 @@ class ClipActionsMixin(object):
         if action.endswith("warp_marker"):
             result["warp_markers"] = _warp_markers(clip)
         return result
+
+    def _to_arrangement(self, clip, canonical, params):
+        """Copy a Session clip onto the arrangement timeline of its track. A clip with automation envelopes brings them along as
+        track automation, which is how arrangement automation is written (Live has no envelope API for arrangement clips)."""
+        if "/arrangement/" in canonical:
+            raise BridgeError("'{0}' is already on the arrangement: give a Session clip".format(canonical), "INVALID_ARGUMENT")
+        time = params.get("time")
+        if not _is_number(time) or time < 0:
+            raise BridgeError("to_arrangement needs time: the start position in beats on the arrangement", "INVALID_ARGUMENT")
+        track_address = canonical.split("/slots/")[0]
+        track = self._resolve(track_address)[1]
+        automated = [envelope.parameter for envelope in _safe_attr(clip, "automation_envelopes", [])]
+        copy = track.duplicate_clip_to_arrangement(clip, float(time))
+        # The envelopes do not stay on the copy: Live turns them into the track's arrangement automation, which shows as the
+        # parameters' automation_state (1 = automation is playing).
+        return {"address": self._address_of(copy), "source": canonical, "action": "to_arrangement", "start_time": copy.start_time,
+                "length": copy.length,
+                "automation": [{"parameter": self._address_of(p), "name": p.name, "automation_state": p.automation_state} for p in automated]}
 
     def _warp_marker_action(self, clip, action, params):
         if not clip.is_audio_clip:

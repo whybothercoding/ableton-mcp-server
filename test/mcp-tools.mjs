@@ -248,7 +248,7 @@ try {
       }
     }
     assert((await ok('describe_set', { include_clips: false })).scenes.length === scenes, 'the scratch scenes should be gone');
-    await fails('create', { kind: 'device' }, 'kind must be one of: audio_track, midi_track, return_track, scene, midi_clip, audio_clip, cue_point');
+    await fails('create', { kind: 'device' }, 'kind must be one of: audio_track, midi_track, return_track, scene, midi_clip, audio_clip, arrangement_midi_clip');
     await fails('duplicate', { address: 'master' }, 'Only regular tracks, scenes and clip slots can be duplicated');
   });
   await check('launch and clip_action are listed with the right risk annotations and required arguments', async () => {
@@ -357,7 +357,7 @@ try {
     await fails('get_properties', { address: 5 }, 'address must be a string');
     await fails('get_properties', { address: 'song', names: 'tempo' }, 'names must be an array');
     await fails('set_properties', { items: [{ address: 'song' }] }, "items[0]: missing required argument 'properties'");
-    await fails('list_properties', { kind: 'plugin' }, 'must be one of: song, track, scene, slot, clip, groove, cue, app, device, chain, pad, parameter');
+    await fails('list_properties', { kind: 'plugin' }, 'must be one of: song, track, scene, slot, clip, lane, groove, cue, app, device, chain, pad, parameter');
   });
   await check('bridge problems come back as tool errors with the reason', async () => {
     await fails('get_properties', { address: 'tracks/999' }, 'out of range');

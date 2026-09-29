@@ -952,6 +952,22 @@
     }
    }
   },
+  "Live.TakeLane.TakeLane": {
+   "properties": {
+    "arrangement_clips": {
+     "get": "Base.Vector",
+     "set": null
+    },
+    "canonical_parent": {
+     "get": "Track.Track",
+     "set": null
+    },
+    "name": {
+     "get": "str",
+     "set": "object"
+    }
+   }
+  },
   "Live.Track.Track": {
    "properties": {
     "arm": {

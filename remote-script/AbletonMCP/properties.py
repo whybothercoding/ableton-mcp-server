@@ -322,6 +322,9 @@ PROPERTY_SPECS = {
         "automation_state": _spec("int", RO, doc="0 none, 1 automation playing, 2 overridden"),
         "state": _spec("int", RO),
     },
+    "lane": {
+        "name": _spec("str"),
+    },
     "cue": {
         "name": _spec("str"),
         "time": _spec("float", RO, doc="Position in beats; create a cue point with `create` at a time"),

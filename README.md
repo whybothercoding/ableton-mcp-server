@@ -126,13 +126,13 @@ Most tools take an **address** (`song`, `tracks/N`, `tracks/N/slots/M/clip`, `gr
 | Discover | `get_health`, `get_capabilities`, `describe_set`, `list_properties`, `get_device`, `browse`, `analyze_audio_clip` |
 | Read / change any property | `get_properties`, `set_properties` |
 | Structure | `create`, `duplicate`, `delete` (needs `expect`) |
-| Play | `transport`, `launch`, `history` (undo/redo) |
+| Play and record | `transport`, `launch`, `history` (undo/redo), `record` (gated) |
 | Mixing and routing | `routing` (plus `set_properties` on mixer parameters and track properties) |
 | Clips and notes | `clip_action`, `get_notes`, `write_notes`, `edit_notes`, `convert` |
 | Many edits at once | `batch` |
 | Compose | `generate_notes`, `transform_notes` |
 | Devices and sound | `device_action`, `load_item`, `draw_automation`, `get_automation`, `clear_automation`, `ramp_parameter`, `cancel_ramps` (parameters and device properties are written with `set_properties`) |
-| Development | `eval_python` (gated) |
+| Development | `eval_python` (gated by `ABLETON_MCP_ALLOW_EVAL=1`) |
 
 Earlier versions had one tool per property or action. These were folded into the verbs above (their bridge commands still exist, only the MCP tools were retired to keep the tool list small):
 
@@ -152,6 +152,12 @@ Earlier versions had one tool per property or action. These were folded into the
 | `get_audio_clip_path` | `get_properties` on the clip (`file_path`, `sample_rate`, `warping`, ...) |
 | `get_device_parameters` | `get_device` (parameters with addresses, racks with their chains and pads) |
 | `set_device_parameter`, `bulk_set_device_parameters` | `set_properties` on a parameter address (`.../parameters/5`), `items` for many at once |
+
+#### Arrangement and recording
+- **Timeline clips** have addresses like Session clips: `tracks/N/arrangement/M` in time order (a take lane's clips are `tracks/N/take_lanes/K/arrangement/M`), so `get_properties`, `set_properties` (`name`, `muted`, `start_time` and `end_time` are readable), `get_notes`/`write_notes`/`edit_notes`, `clip_action` and `delete` (with `expect`) all work on them. `describe_set` lists each track's timeline (`arrangement`: index, name, start, length, kind) and it is part of the fingerprint.
+- `create`: `arrangement_midi_clip` (`address` of a track or take lane, `time` in beats, `length` default 4), `arrangement_audio_clip` (`address`, `time`, `path`), `take_lane` (`address` of a track). `clip_action` `to_arrangement` copies a Session clip onto its track's timeline at `time`. `launch` refuses timeline clips (arrangement playback is `transport`).
+- **Arrangement automation** is written through Session clips: `draw_automation` on a Session clip, then `clip_action` `to_arrangement`. Live turns the envelopes into the track's arrangement automation: they do not stay on the copy (its `has_envelopes` is false), and the result lists the parameters that are now automated (`automation_state` 1). The copy is also a normal arrangement clip, so use an otherwise empty scratch clip if you only want the automation. Not in Live's API: splitting, consolidating, moving or resizing timeline clips, comp editing, and time signature or tempo changes on the timeline.
+- `record` is **gated**: it needs `ABLETON_MCP_ALLOW_RECORD=1` in the MCP server's environment, because recording can overwrite the timeline or clip slots. `status` (default) shows the recording flags and armed tracks; `arrangement_start` / `arrangement_stop`, `session_start` (`record_length`) / `session_stop`, `overdub`, `punch` and `automation` change them. Starting refuses unless a track is armed (arm with `set_properties` `arm`) and when recording is already on. Recording is not undoable step by step and cannot run in a batch; the test suites only ever read `status`.
 
 #### Audio clips, warp markers and conversions
 - `create` `kind: "audio_clip"`: `address` of an empty slot on an audio track and `path`, an absolute path to an audio file. Live warps it according to its own settings; the result reports `length`, `file_path` and `warping`. Bad or relative paths are refused.

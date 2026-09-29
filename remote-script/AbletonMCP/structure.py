@@ -57,7 +57,15 @@ class StructureMixin(object):
             if include_clips:
                 info["clips"] = clips
             info["clips_hash"] = _digest(clips)
-        info["hash"] = _digest(dict((k, v) for k, v in info.items() if k != "clips"))
+        arrangement = _safe_attr(track, "arrangement_clips")
+        if arrangement is not None:
+            timeline = [{"index": i, "name": c.name, "start": c.start_time, "length": c.length,
+                         "kind": "midi" if _safe_attr(c, "is_midi_clip", False) else "audio"} for i, c in enumerate(arrangement)]
+            info["arrangement_count"] = len(timeline)
+            if include_clips:
+                info["arrangement"] = timeline
+            info["arrangement_hash"] = _digest(timeline)
+        info["hash"] = _digest(dict((k, v) for k, v in info.items() if k not in ("clips", "arrangement")))
         return info
 
     def _track_kind(self, track):

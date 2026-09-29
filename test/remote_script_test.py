@@ -3082,6 +3082,249 @@ class AudioTests(unittest.TestCase):
         self.assertEqual(self.song.undo_log, ["begin", "end"])
 
 
+# ---------------------------------------------------------------- arrangement and recording
+
+class ArrClip(PropClip):
+    def __init__(self, name, start, length, audio=False):
+        PropClip.__init__(self, name, length)
+        self.start_time, self.end_time = start, start + length
+        if audio:
+            self.is_audio_clip, self.is_midi_clip, self.warping, self.file_path = True, False, True, "/x/" + name
+
+
+class FakeLane(object):
+    def __init__(self, name, track):
+        self.name, self.arrangement_clips, self.canonical_parent, self._track = name, [], track, track
+
+    def create_midi_clip(self, time, length):
+        clip = ArrClip("lane clip", time, length)
+        self.arrangement_clips.append(clip)
+        return clip
+
+
+class ArrTrack(FakeTrack):
+    def __init__(self, name):
+        FakeTrack.__init__(self, name)
+        self.arrangement_clips, self.take_lanes = [], []
+        self.arm = False
+
+    def _sorted(self):
+        self.arrangement_clips.sort(key=lambda c: c.start_time)
+
+    def create_midi_clip(self, time, length):
+        clip = ArrClip("MIDI", time, length)
+        self.arrangement_clips.append(clip)
+        self._sorted()
+        return clip
+
+    def create_audio_clip(self, path, time):
+        clip = ArrClip(os.path.basename(path), time, 4.0, audio=True)
+        clip.file_path = path
+        self.arrangement_clips.append(clip)
+        self._sorted()
+        return clip
+
+    def create_take_lane(self):
+        lane = FakeLane("Lane {0}".format(len(self.take_lanes) + 1), self)
+        self.take_lanes.append(lane)
+        return lane
+
+    def duplicate_clip_to_arrangement(self, clip, time):
+        copy = ArrClip(clip.name, time, clip.length)
+        self.arrangement_clips.append(copy)
+        self._sorted()
+        return copy
+
+    def delete_clip(self, clip):
+        self.arrangement_clips.remove(clip)
+
+
+class ArrangementTests(unittest.TestCase):
+    def setUp(self):
+        self.script = make_script()
+        self.addCleanup(self.script._stop_server)
+        song = make_song()
+        self.track = ArrTrack("Timeline")
+        self.track.clip_slots = [FakeSlot(PropClip("loop", 4.0)), FakeSlot()]
+        self.other = ArrTrack("Other")
+        song.tracks = [self.track, self.other]
+        song.scenes = [PropScene("S")]
+        self.script._song = self.song = song
+
+    def run_command(self, name, params):
+        return self.script._process_command({"type": name, "params": params})
+
+    def ok(self, command_name, /, **params):
+        response = self.run_command(command_name, params)
+        self.assertEqual(response["status"], "success", response)
+        return response["result"]
+
+    def code(self, command_name, /, **params):
+        response = self.run_command(command_name, params)
+        self.assertEqual(response["status"], "error", response)
+        return response["code"]
+
+    def test_arrangement_clips_are_addressed_in_time_order_and_resolve_back(self):
+        self.ok("create", kind="arrangement_midi_clip", address="tracks/0", time=16, length=4)
+        self.ok("create", kind="arrangement_midi_clip", address="tracks/0", time=0, length=8)
+        self.assertEqual(self.script._resolve("tracks/0/arrangement/0")[2:], (self.track.arrangement_clips[0], "tracks/0/arrangement/0")[1:])
+        kind, clip, canonical = self.script._resolve("tracks/0/arrangement/1")
+        self.assertEqual((kind, clip.start_time, canonical), ("clip", 16, "tracks/0/arrangement/1"))
+        self.assertEqual(self.script._address_of(clip), "tracks/0/arrangement/1")
+        for address, code in [("tracks/0/arrangement/5", "OUT_OF_RANGE"), ("tracks/0/arrangement", "NOT_FOUND"), ("returns/0/arrangement/0", "NOT_FOUND")]:
+            self.assertEqual(self.code("get_properties", address=address), code, address)
+
+    def test_create_a_midi_clip_on_the_timeline(self):
+        made = self.ok("create", kind="arrangement_midi_clip", address="tracks/0", time=8, length=2, name="Fill", color=5)
+        self.assertEqual((made["address"], made["name"], made["length"], made["start_time"]), ("tracks/0/arrangement/0", "Fill", 2.0, 8))
+        self.assertEqual(self.ok("create", kind="arrangement_midi_clip", address="tracks/0", time=0)["length"], 4.0)
+        for params, code in [({"address": "tracks/0"}, "INVALID_ARGUMENT"), ({"address": "tracks/0", "time": -1}, "INVALID_ARGUMENT"),
+                             ({"address": "tracks/0", "time": 0, "length": 0}, "INVALID_ARGUMENT"), ({"address": "song", "time": 0}, "INVALID_ARGUMENT"),
+                             ({"address": "tracks/0/slots/0", "time": 0}, "INVALID_ARGUMENT"), ({"address": "returns/0", "time": 0}, "INVALID_ARGUMENT")]:
+            self.assertEqual(self.code("create", kind="arrangement_midi_clip", **params), code, params)
+
+    def test_create_an_audio_clip_on_the_timeline(self):
+        good = os.path.abspath(__file__)
+        made = self.ok("create", kind="arrangement_audio_clip", address="tracks/1", time=4, path=good)
+        self.assertEqual((made["address"], made["start_time"], made["file_path"]), ("tracks/1/arrangement/0", 4, good))
+        for params, code in [({"time": 0}, "INVALID_ARGUMENT"), ({"time": 0, "path": "x.wav"}, "INVALID_ARGUMENT"), ({"time": 0, "path": "/no/file.wav"}, "NOT_FOUND"),
+                             ({"path": good}, "INVALID_ARGUMENT")]:
+            self.assertEqual(self.code("create", kind="arrangement_audio_clip", address="tracks/1", **params), code, params)
+
+    def test_take_lanes_can_be_created_addressed_and_hold_clips(self):
+        lane = self.ok("create", kind="take_lane", address="tracks/0", name="Take A")
+        self.assertEqual((lane["address"], lane["name"]), ("tracks/0/take_lanes/0", "Take A"))
+        self.assertEqual(self.ok("get_properties", address="tracks/0/take_lanes/0")["properties"], {"name": "Take A"})
+        made = self.ok("create", kind="arrangement_midi_clip", address="tracks/0/take_lanes/0", time=2, length=2)
+        self.assertEqual(made["address"], "tracks/0/take_lanes/0/arrangement/0")
+        self.assertEqual(self.code("create", kind="take_lane", address="master"), "INVALID_ARGUMENT")
+        self.assertEqual(self.code("get_properties", address="tracks/0/take_lanes/4"), "OUT_OF_RANGE")
+
+    def test_arrangement_clips_take_the_ordinary_clip_tools(self):
+        self.ok("create", kind="arrangement_midi_clip", address="tracks/0", time=8, length=4, name="Fill")
+        address = "tracks/0/arrangement/0"
+        self.ok("set_properties", address=address, properties={"name": "Renamed", "muted": True})
+        self.assertEqual((self.track.arrangement_clips[0].name, self.track.arrangement_clips[0].muted), ("Renamed", True))
+        got = self.ok("get_properties", address=address, names=["start_time", "end_time", "length"])["properties"]
+        self.assertEqual(got, {"start_time": 8, "end_time": 12, "length": 4.0})
+
+    def test_delete_an_arrangement_clip_needs_the_guard(self):
+        self.ok("create", kind="arrangement_midi_clip", address="tracks/0", time=0, length=4, name="Gone")
+        self.assertEqual(self.code("delete", address="tracks/0/arrangement/0", expect={"name": "Other"}), "GUARD_FAILED")
+        out = self.ok("delete", address="tracks/0/arrangement/0", expect={"name": "Gone"})
+        self.assertEqual(out["deleted"], "tracks/0/arrangement/0")
+        self.assertEqual(self.track.arrangement_clips, [])
+        self.assertEqual(len(self.track.clip_slots), 2)                          # the Session slots are untouched
+
+    def test_a_session_clip_is_copied_to_the_arrangement_and_arrangement_clips_do_not_launch(self):
+        out = self.ok("clip_action", address="tracks/0/slots/0/clip", action="to_arrangement", time=32)
+        self.assertEqual((out["address"], out["start_time"], out["length"], out["automation"]), ("tracks/0/arrangement/0", 32, 4.0, []))
+        self.assertEqual(self.code("clip_action", address="tracks/0/arrangement/0", action="to_arrangement", time=0), "INVALID_ARGUMENT")
+        self.assertEqual(self.code("clip_action", address="tracks/0/slots/0/clip", action="to_arrangement"), "INVALID_ARGUMENT")
+        self.assertEqual(self.code("clip_action", address="tracks/0/slots/0/clip", action="to_arrangement", time=-2), "INVALID_ARGUMENT")
+        response = self.run_command("launch", {"address": "tracks/0/arrangement/0"})
+        self.assertEqual(response["code"], "INVALID_ARGUMENT")
+        self.assertIn("arrangement timeline", response["message"])
+
+    def test_describe_set_lists_the_timeline_and_it_is_part_of_the_fingerprint(self):
+        before = self.ok("describe_set")
+        self.assertEqual(before["tracks"][0]["arrangement"], [])
+        self.ok("create", kind="arrangement_midi_clip", address="tracks/0", time=8, length=2, name="Fill")
+        after = self.ok("describe_set")
+        self.assertEqual(after["tracks"][0]["arrangement"], [{"index": 0, "name": "Fill", "start": 8, "length": 2.0, "kind": "midi"}])
+        self.assertEqual(after["tracks"][0]["arrangement_count"], 1)
+        self.assertNotEqual(before["fingerprint"], after["fingerprint"])
+        self.assertNotEqual(before["tracks"][0]["hash"], after["tracks"][0]["hash"])
+        self.assertNotIn("arrangement", self.ok("describe_set", include_clips=False)["tracks"][0])
+
+    def test_arrangement_edits_are_one_undo_step(self):
+        self.song.undo_log.clear()
+        self.ok("create", kind="arrangement_midi_clip", address="tracks/0", time=0, length=4)
+        self.assertEqual(self.song.undo_log, ["begin", "end"])
+
+
+class RecordingTests(unittest.TestCase):
+    def setUp(self):
+        self.script = make_script()
+        self.addCleanup(self.script._stop_server)
+        song = make_song()
+        song.tracks = [ArrTrack("Take"), ArrTrack("Other")]
+        song.record_mode = song.session_record = song.arrangement_overdub = song.punch_in = song.punch_out = False
+        song.session_automation_record = song.is_playing = False
+        song.current_song_time = 0.0
+        song.calls = []
+        song.start_playing = lambda: (song.calls.append("play"), setattr(song, "is_playing", True))
+        song.stop_playing = lambda: (song.calls.append("stop"), setattr(song, "is_playing", False))
+        song.trigger_session_record = lambda *args: (song.calls.append(("trigger",) + args), setattr(song, "session_record", True))
+        self.script._song = self.song = song
+
+    def call(self, **params):
+        return self.script._process_command({"type": "record", "params": params})
+
+    def ok(self, **params):
+        response = self.call(**params)
+        self.assertEqual(response["status"], "success", response)
+        return response["result"]
+
+    def code(self, **params):
+        response = self.call(**params)
+        self.assertEqual(response["status"], "error", response)
+        return response["code"]
+
+    def test_status_reports_the_recording_state_and_armed_tracks(self):
+        self.song.tracks[1].arm = True
+        status = self.ok()
+        self.assertEqual((status["record_mode"], status["session_record"], status["armed_tracks"], status["is_playing"]), (False, False, ["tracks/1"], False))
+
+    def test_starting_needs_an_armed_track_and_refuses_double_starts(self):
+        self.assertEqual(self.code(action="arrangement_start"), "UNAVAILABLE")
+        self.assertEqual(self.code(action="session_start"), "UNAVAILABLE")
+        self.assertEqual(self.song.calls, [])
+        self.song.tracks[0].arm = True
+        started = self.ok(action="arrangement_start", from_time=16)
+        self.assertEqual((started["record_mode"], started["is_playing"], started["recording_into"], self.song.current_song_time), (True, True, ["tracks/0"], 16.0))
+        self.assertEqual(self.code(action="arrangement_start"), "UNAVAILABLE")
+
+    def test_stop_ends_recording_and_optionally_the_transport(self):
+        self.song.tracks[0].arm = True
+        self.ok(action="arrangement_start", play=False)
+        self.assertEqual(self.song.calls, [])
+        stopped = self.ok(action="arrangement_stop")
+        self.assertEqual((stopped["record_mode"], self.song.calls), (False, []))
+        self.song.is_playing = True
+        self.ok(action="arrangement_stop", stop_transport=True)
+        self.assertEqual(self.song.calls, ["stop"])
+
+    def test_session_recording_with_and_without_a_length(self):
+        self.song.tracks[0].arm = True
+        self.ok(action="session_start", record_length=4)
+        self.assertEqual(self.song.calls[-1], ("trigger", 4.0))
+        self.assertEqual(self.code(action="session_start"), "UNAVAILABLE")
+        self.assertEqual(self.ok(action="session_stop")["session_record"], False)
+        self.ok(action="session_start")
+        self.assertEqual(self.song.calls[-1], ("trigger",))
+        for length in (0, -1, "4"):
+            self.song.session_record = False
+            self.assertEqual(self.code(action="session_start", record_length=length), "INVALID_ARGUMENT")
+
+    def test_overdub_punch_and_automation_recording_are_flags(self):
+        self.assertEqual(self.ok(action="overdub", enabled=True)["arrangement_overdub"], True)
+        both = self.ok(action="punch", punch_in=True, punch_out=True)
+        self.assertEqual((both["punch_in"], both["punch_out"]), (True, True))
+        self.assertEqual(self.ok(action="punch", punch_out=False)["punch_in"], True)
+        self.assertEqual(self.ok(action="automation", enabled=True)["session_automation_record"], True)
+        for params, code in [({"action": "overdub"}, "INVALID_ARGUMENT"), ({"action": "overdub", "enabled": "yes"}, "TYPE_ERROR"), ({"action": "punch"}, "INVALID_ARGUMENT"),
+                             ({"action": "automation"}, "INVALID_ARGUMENT"), ({"action": "rewind"}, "INVALID_ARGUMENT")]:
+            self.assertEqual(self.code(**params), code, params)
+
+    def test_bad_start_arguments(self):
+        self.song.tracks[0].arm = True
+        for params in ({"from_time": -1}, {"from_time": "start"}):
+            self.assertEqual(self.code(action="arrangement_start", **params), "INVALID_ARGUMENT", params)
+        self.assertEqual(self.code(action="arrangement_start", play="yes"), "TYPE_ERROR")
+        self.assertFalse(self.song.record_mode)
+
+
 # ---------------------------------------------------------------- routing and mixer state
 
 class FakeRoutingType(object):
@@ -3320,12 +3563,14 @@ class RegistryTests(unittest.TestCase):
         device = self.make_fake("device", parameters=[on_switch, parameter], chains=[chain], return_chains=[], drum_pads=[pad],
                                 can_have_chains=True, can_have_drum_pads=True, view=types.SimpleNamespace(is_collapsed=False))
         track.devices = [device]
+        lane = self.make_fake("lane")
+        track.take_lanes = [lane]
         song = self.make_fake("song", tracks=[track], return_tracks=[], scenes=[scene], master_track=master,
                               groove_pool=types.SimpleNamespace(grooves=[groove]), cue_points=[cue])
         script._song = song
         addresses = {"song": "song", "track": "tracks/0", "scene": "scenes/0", "slot": "tracks/0/slots/0", "clip": "tracks/0/slots/0/clip",
                      "groove": "grooves/0", "cue": "cue_points/0", "app": "app", "device": "tracks/0/devices/0",
-                     "chain": "tracks/0/devices/0/chains/0", "pad": "tracks/0/devices/0/drum_pads/36", "parameter": "tracks/0/devices/0/parameters/1"}
+                     "chain": "tracks/0/devices/0/chains/0", "pad": "tracks/0/devices/0/drum_pads/36", "parameter": "tracks/0/devices/0/parameters/1", "lane": "tracks/0/take_lanes/0"}
         checked = 0
         for kind, specs in self.specs.items():
             for name, spec in sorted(specs.items()):

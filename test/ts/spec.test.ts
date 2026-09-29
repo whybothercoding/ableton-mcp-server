@@ -142,7 +142,7 @@ test('launch and clip_action schemas and risk annotations', () => {
   assert.equal(launch.annotations.destructiveHint, false);
   assert.deepEqual(action.inputSchema.required, ['address', 'action']);
   assert.equal(action.annotations.destructiveHint, true);
-  assert.deepEqual(action.inputSchema.properties.action.enum, ['crop', 'duplicate_loop', 'quantize', 'quantize_pitch', 'scrub', 'stop_scrub', 'move_playing_pos', 'add_warp_marker', 'move_warp_marker', 'remove_warp_marker']);
+  assert.deepEqual(action.inputSchema.properties.action.enum, ['crop', 'duplicate_loop', 'quantize', 'quantize_pitch', 'scrub', 'stop_scrub', 'move_playing_pos', 'add_warp_marker', 'move_warp_marker', 'remove_warp_marker', 'to_arrangement']);
   assert.equal(validateArgs(launch.inputSchema, { address: 'tracks/0/slots/0', legato: 'yes' }), 'legato must be true or false');
   assert.equal(validateArgs(action.inputSchema, { address: 'tracks/0/slots/0/clip', action: 'quantize', amount: 0.5 }), null);
 });
@@ -169,7 +169,7 @@ test('tools folded into the verb tools are no longer advertised', () => {
     'bulk_set_device_parameters', 'bulk_edit_clips', 'load_browser_item', 'get_browser_tree', 'get_browser_items', 'get_audio_clip_path', 'get_track_detail'];
   const names = new Set(TOOLS.map((t) => t.name));
   for (const name of retired) assert.ok(!names.has(name), `${name} should be retired`);
-  assert.deepEqual(TOOL_SPEC_BY_NAME.create.inputSchema.properties.kind.enum, ['audio_track', 'midi_track', 'return_track', 'scene', 'midi_clip', 'audio_clip', 'cue_point']);
+  assert.deepEqual(TOOL_SPEC_BY_NAME.create.inputSchema.properties.kind.enum, ['audio_track', 'midi_track', 'return_track', 'scene', 'midi_clip', 'audio_clip', 'arrangement_midi_clip', 'arrangement_audio_clip', 'take_lane', 'cue_point']);
 });
 
 test('device tools: schemas and risk annotations', () => {
@@ -214,4 +214,14 @@ test('audio tools: convert, warp marker actions and audio_clip creation are decl
   assert.deepEqual(TOOL_SPEC_BY_NAME.analyze_audio_clip.inputSchema.required, ['address']);
   assert.equal(TOOL_SPEC_BY_NAME.analyze_audio_clip.annotations.readOnlyHint, true);
   assert.ok(TOOL_SPEC_BY_NAME.convert.run, 'convert waits for Live to finish, so it is a composed tool');
+});
+
+test('record is gated like eval_python and destructive; arrangement kinds are declared', () => {
+  assert.equal(isToolEnabled('record', {}), false);
+  assert.equal(isToolEnabled('record', { ABLETON_MCP_ALLOW_RECORD: '1' }), true);
+  assert.equal(TOOL_SPEC_BY_NAME.record.annotations.destructiveHint, true);
+  assert.ok(TOOL_SPEC_BY_NAME.record.description.startsWith('GATED'));
+  assert.ok(!TOOLS.filter((t) => isToolEnabled(t.name, {})).some((t) => t.name === 'record'));
+  assert.ok(TOOL_SPEC_BY_NAME.create.inputSchema.properties.time);
+  assert.ok(TOOL_SPEC_BY_NAME.clip_action.inputSchema.properties.time);
 });
