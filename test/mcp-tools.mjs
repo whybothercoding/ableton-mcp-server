@@ -182,6 +182,35 @@ try {
     const back = await ok('set_properties', { address: clipAddress, properties: { muted: false, launch_mode: 'trigger' } });
     assert(back.applied.muted.to === false, JSON.stringify(back));
   });
+  await check('capabilities, set description, transport and history are listed with the right risk annotations', async () => {
+    for (const [name, readOnly, destructive] of [['get_capabilities', true, false], ['describe_set', true, false], ['transport', false, false], ['history', false, true]]) {
+      const tool = byName[name];
+      assert(tool, `${name} missing`);
+      assert(tool.annotations?.readOnlyHint === readOnly && tool.annotations?.destructiveHint === destructive, `${name}: ${JSON.stringify(tool.annotations)}`);
+    }
+  });
+  await check('get_capabilities and describe_set return usable data', async () => {
+    const caps = await ok('get_capabilities');
+    assert(caps.script.build_id && caps.live.version && caps.commands.includes('history'), JSON.stringify(caps).slice(0, 200));
+    const set = await ok('describe_set', { include_clips: false });
+    assert(set.fingerprint.length === 12 && set.tracks.length > 0 && set.master.address === 'master', JSON.stringify(set).slice(0, 200));
+  });
+  await check('history undoes exactly the last write and redo reapplies it', async () => {
+    await ok('set_properties', { address: clipAddress, properties: { muted: true } });
+    const undone = await ok('history', { action: 'undo' });
+    assert(undone.performed === 1, JSON.stringify(undone));
+    assert((await ok('get_properties', { address: clipAddress, names: ['muted'] })).properties.muted === false, 'undo should revert the write');
+    await ok('history', { action: 'redo' });
+    assert((await ok('get_properties', { address: clipAddress, names: ['muted'] })).properties.muted === true, 'redo should reapply it');
+    await ok('set_properties', { address: clipAddress, properties: { muted: false } });
+  });
+  await check('transport and history reject bad arguments before reaching Live', async () => {
+    await fails('transport', {}, "missing required argument 'action'");
+    await fails('transport', { action: 'rewind' }, 'action must be one of: play, continue, stop');
+    await fails('transport', { action: 'jump_by' }, 'jump_by needs amount');
+    await fails('history', { action: 'rewind' }, 'action must be one of: undo, redo');
+    await fails('history', { action: 'undo', steps: 99 }, 'steps must be a whole number from 1 to 50');
+  });
   await check('argument problems are caught in TypeScript with a readable message', async () => {
     await fails('get_properties', {}, "missing required argument 'address'");
     await fails('get_properties', { address: 5 }, 'address must be a string');

@@ -87,6 +87,8 @@ const D = target.device;
 const S = target.slot;
 const snapshots = [pA, pB].map((p) => ({ ...p }));
 const cleanupsRegistry = []; // undo actions registered by tests that change the set, run in reverse in the finally block
+const setBefore = await call('describe_set');
+console.log(`Set fingerprint before the run: ${setBefore.fingerprint}`);
 await call('create_clip', { track_index: T, clip_index: S, length: 4, name: 'MCP TEST' });
 const CLIP_BEATS = 4;
 const sendA = { track_index: T, device_index: D, parameter_index: pA.index };
@@ -352,6 +354,83 @@ try {
     assert(list.kind === 'clip' && list.properties.launch_mode.values.join() === 'trigger,gate,toggle,repeat', JSON.stringify(list.properties.launch_mode));
     assert(list.properties.length.writable === false && list.properties.name.writable === true, 'writable flags');
     assert(!list.properties.warp_mode.values.includes('count'), 'the count sentinel must be hidden');
+  });
+
+  console.log('\nStructure, capabilities, transport and history');
+  await check('get_capabilities describes this Live and this bridge', async () => {
+    const caps = await call('get_capabilities');
+    assert(caps.script.version === EXPECTED_VERSION && caps.script.build_id === EXPECTED_BUILD, JSON.stringify(caps.script));
+    assert(caps.live.version === (await call('eval', { code: 'self.application().get_version_string()' })), 'Live version');
+    assert(caps.live.variant !== 'Beta' || caps.live.edition === 'unknown', 'a Beta build must report an unknown edition');
+    assert(typeof caps.features.max_for_live === 'boolean' && typeof caps.features.note_probabilities === 'boolean', JSON.stringify(caps.features));
+    assert(caps.commands.includes('describe_set') && caps.commands.includes('transport') && caps.commands.includes('history'), 'commands');
+  });
+  await check('describe_set covers every track, return, master and scene, and its fingerprint ignores the playhead', async () => {
+    const set = await call('describe_set');
+    const counts = await call('eval', { code: '[len(self._song.tracks), len(self._song.return_tracks), len(self._song.scenes)]' });
+    assert(set.tracks.length === counts[0] && set.returns.length === counts[1] && set.scenes.length === counts[2], `${set.tracks.length}/${set.returns.length}/${set.scenes.length} vs ${counts}`);
+    assert(set.master.address === 'master' && set.tracks[0].address === 'tracks/0', 'addresses');
+    await sleep(300);
+    const again = await call('describe_set', { include_clips: false });
+    assert(again.fingerprint === set.fingerprint, 'the fingerprint must not depend on the playhead, play state or clip detail level');
+    assert(again.tracks.every((t) => t.clips === undefined) && again.tracks.some((t) => t.clip_count >= 1), 'include_clips=false keeps counts, drops the list');
+    const clipTrack = set.tracks.find((t) => t.clips && t.clips.length);
+    assert(clipTrack.clips[0].slot !== undefined && clipTrack.clips[0].name !== undefined, 'clip entries');
+  });
+  await check('a scratch edit moves the fingerprint and history undo brings it back', async () => {
+    const i = await makeScratchTrack();
+    const settled = (await call('describe_set', { include_clips: false })).fingerprint;
+    await call('set_properties', { address: `tracks/${i}`, properties: { mute: true } });
+    const changed = await call('describe_set', { include_clips: false });
+    assert(changed.fingerprint !== settled, 'muting a track must change the fingerprint');
+    const hashes = Object.fromEntries(changed.tracks.map((t) => [t.address, t.hash]));
+    const undone = await call('history', { action: 'undo' });
+    assert(undone.performed === 1 && undone.steps.length === 1, JSON.stringify(undone));
+    assert((await call('describe_set', { include_clips: false })).fingerprint === settled, 'undo should restore the fingerprint exactly');
+    const redone = await call('history', { action: 'redo' });
+    assert(redone.performed === 1, JSON.stringify(redone));
+    assert((await call('describe_set', { include_clips: false })).tracks.find((t) => t.address === `tracks/${i}`).hash === hashes[`tracks/${i}`], 'redo should reapply the same state');
+  });
+  await check('history rejects bad arguments with clear codes', async () => {
+    for (const [params, code] of [[{ action: 'rewind' }, 'INVALID_ARGUMENT'], [{ action: 'undo', steps: 0 }, 'INVALID_ARGUMENT'], [{ action: 'undo', steps: 51 }, 'INVALID_ARGUMENT'], [{ action: 'undo', steps: 1.5 }, 'INVALID_ARGUMENT']]) {
+      try {
+        await call('history', params);
+      } catch (err) {
+        assert(err.bridgeCode === code, `${JSON.stringify(params)}: ${err.bridgeCode}`);
+        continue;
+      }
+      throw new Error(`${JSON.stringify(params)} should have failed`);
+    }
+  });
+  await check('transport validates its arguments and reports state (playback is left untouched)', async () => {
+    for (const [params, code] of [[{ action: 'rewind' }, 'INVALID_ARGUMENT'], [{}, 'INVALID_ARGUMENT'], [{ action: 'jump_by' }, 'INVALID_ARGUMENT'], [{ action: 'jump_by', amount: '4' }, 'INVALID_ARGUMENT']]) {
+      try {
+        await call('transport', params);
+      } catch (err) {
+        assert(err.bridgeCode === code, `${JSON.stringify(params)}: ${err.bridgeCode}`);
+        continue;
+      }
+      throw new Error(`${JSON.stringify(params)} should have failed`);
+    }
+    // toggle_cue twice restores the cue list only while the playhead is still (it toggles at the playhead)
+    if (!(await call('eval', { code: 'self._song.is_playing' }))) {
+      const cues = () => call('eval', { code: 'len(self._song.cue_points)' });
+      const n = await cues();
+      const first = await call('transport', { action: 'toggle_cue' });
+      assert((await cues()) === n + 1 && first.action === 'toggle_cue', 'toggle_cue should add a cue point');
+      await call('transport', { action: 'toggle_cue' });
+      assert((await cues()) === n, 'the second toggle should remove it');
+    } else {
+      console.log('       transport is playing: cue toggle skipped (it acts at the moving playhead)');
+    }
+    if (!(await call('eval', { code: 'self._song.can_jump_to_next_cue' }))) {
+      try {
+        await call('transport', { action: 'next_cue' });
+        throw new Error('next_cue without a next cue point should fail');
+      } catch (err) {
+        assert(err.bridgeCode === 'UNAVAILABLE', `${err.bridgeCode}: ${err.message}`);
+      }
+    }
   });
 
   console.log('\ndraw_automation');
@@ -920,6 +999,20 @@ try {
     await call('set_device_parameter', { track_index: T, device_index: D, parameter_index: p.index, value: p.value }).catch(() => {});
   }
   console.log('  scratch clip deleted, parameters restored');
+  await check('the Set is exactly as it was before this run (fingerprint invariant)', async () => {
+    const setAfter = await call('describe_set');
+    if (setAfter.fingerprint === setBefore.fingerprint) return;
+    const changed = [];
+    for (const group of ['tracks', 'returns']) {
+      const a = Object.fromEntries(setBefore[group].map((t) => [t.address, t.hash]));
+      for (const t of setAfter[group]) if (a[t.address] !== t.hash) changed.push(`${t.address} (${t.name})`);
+      if (setBefore[group].length !== setAfter[group].length) changed.push(`${group}: ${setBefore[group].length} -> ${setAfter[group].length}`);
+    }
+    if (setBefore.master.hash !== setAfter.master.hash) changed.push('master');
+    if (JSON.stringify(setBefore.scenes) !== JSON.stringify(setAfter.scenes)) changed.push('scenes');
+    if (JSON.stringify(setBefore.song) !== JSON.stringify(setAfter.song)) changed.push('song settings');
+    throw new Error(`the run left the Set changed: ${changed.join(', ') || 'unknown difference'}`);
+  });
 }
 
 console.log(`\n${passed} passed, ${failures.length} failed`);

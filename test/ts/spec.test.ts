@@ -44,6 +44,25 @@ test('specs carry accurate annotations', () => {
   assert.equal(TOOL_SPEC_BY_NAME.get_properties.annotations.readOnlyHint, true);
   assert.equal(TOOL_SPEC_BY_NAME.list_properties.annotations.readOnlyHint, true);
   assert.equal(TOOL_SPEC_BY_NAME.set_properties.annotations.readOnlyHint, false);
+  for (const name of ['get_capabilities', 'describe_set']) assert.equal(TOOL_SPEC_BY_NAME[name].annotations.readOnlyHint, true, name);
+  assert.equal(TOOL_SPEC_BY_NAME.transport.annotations.readOnlyHint, false);
+  assert.equal(TOOL_SPEC_BY_NAME.history.annotations.destructiveHint, true); // undo can revert the user's own edits
+  assert.equal(TOOL_SPEC_BY_NAME.transport.annotations.destructiveHint, false);
+});
+
+test('transport and history schemas', () => {
+  const transport = TOOL_SPEC_BY_NAME.transport.inputSchema;
+  assert.equal(validateArgs(transport, { action: 'play' }), null);
+  assert.equal(validateArgs(transport, { action: 'jump_by', amount: -4 }), null);
+  assert.match(validateArgs(transport, {})!, /missing required argument 'action'/);
+  assert.match(validateArgs(transport, { action: 'rewind' })!, /action must be one of: play, continue, stop/);
+  assert.match(validateArgs(transport, { action: 'jump_by', amount: '4' })!, /amount must be a number/);
+  const history = TOOL_SPEC_BY_NAME.history.inputSchema;
+  assert.equal(validateArgs(history, { action: 'undo', steps: 3 }), null);
+  assert.match(validateArgs(history, { action: 'rewind' })!, /must be one of: undo, redo/);
+  assert.equal(validateArgs(TOOL_SPEC_BY_NAME.describe_set.inputSchema, { include_clips: false }), null);
+  assert.match(validateArgs(TOOL_SPEC_BY_NAME.describe_set.inputSchema, { include_clips: 'no' })!, /include_clips must be true or false/);
+  assert.equal(validateArgs(TOOL_SPEC_BY_NAME.get_capabilities.inputSchema, {}), null);
 });
 
 test('spec-derived tools appear in the tool list with their annotations', () => {

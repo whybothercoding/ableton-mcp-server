@@ -171,6 +171,12 @@ Targets are `device_index` (or `device_path`) + `parameter_index`, or `mixer_par
 - **`set_properties` with `items`** changes several objects in one call. `expect: {"name": "Drift"}` refuses to write if the object is not the one you meant (index drift after deletes).
 - Virtual mixer properties on tracks: `volume` and `panning` (device values; volume 0.85 is 0 dB). An unset scene `tempo` or `time_signature_numerator` reads as `-1`.
 
+#### Set structure, capabilities, transport and history
+- `describe_set`: a compact map of the whole Set (song settings, every track/return/master with address, kind, mixer state, devices and clips, every scene). Each track has a `hash`, and the Set a `fingerprint`, that change only when the Set really changes (playhead, play state and meters are ignored), so a client can detect edits by comparing fingerprints and see which track changed by comparing hashes. `include_clips: false` gives a lighter summary. The live test suite uses the fingerprint as an invariant: it must be identical before and after a run.
+- `get_capabilities`: script version and build id, Live version/variant, unavailable features and feature probes (Max for Live, Conversions, note probabilities, Suite devices such as Meld/Roar). A beta build reports variant `Beta` and edition `unknown` (the edition is not readable), so rely on `features`.
+- `transport`: `play`, `continue`, `stop`, `stop_all_clips`, `tap_tempo`, `jump_by` (`amount` in beats), `next_cue`/`prev_cue`, `toggle_cue` (adds or removes a cue point at the playhead), `capture_midi`, `capture_and_insert_scene`. Returns the resulting transport state. Change tempo or loop settings with `set_properties` on `song`.
+- `history`: `undo`/`redo` (`steps` 1-50). It is flagged destructive because undo is global and also reverts edits made by hand.
+
 #### Addressing: track types, racks and parameter details
 Every device-facing tool (`get_track_detail`, `get_device_parameters`, `set_device_parameter`, `bulk_set_device_parameters`, `load_browser_item`, `ramp_parameter`, `cancel_ramps`, and the `set_track_*` tools) takes:
 

@@ -331,6 +331,7 @@ def load_module():
         Quantization=FakeEnum(q_no_q=0, q_8_bars=1, q_4_bars=2, q_2_bars=3, q_bar=4, q_half=5),
         RecordingQuantization=FakeEnum(rec_q_no_q=0, quarter=1, eight=2))
     live.Track = types.SimpleNamespace(Track=types.SimpleNamespace(monitoring_states=FakeEnum(IN=0, AUTO=1, OFF=2)))
+    live.Application = types.SimpleNamespace(UnavailableFeature=FakeEnum(note_velocity_ranges_and_probabilities=0))
     framework = types.ModuleType("_Framework")
     control_surface = types.ModuleType("_Framework.ControlSurface")
     control_surface.ControlSurface = FakeControlSurface
@@ -862,6 +863,195 @@ class AddressAndPropertyTests(unittest.TestCase):
             self.assertIn(name, self.script._get_script_info()["capabilities"])
         self.assertTrue(mod._COMMANDS["set_properties"]["writes"])
         self.assertFalse(mod._COMMANDS["get_properties"]["writes"])
+
+
+# ---------------------------------------------------------------- structure, capabilities, transport, history
+
+def children(*names):
+    return types.SimpleNamespace(children=[types.SimpleNamespace(name=n) for n in names])
+
+
+class StructureTests(unittest.TestCase):
+    def setUp(self):
+        self.script = make_script()
+        self.addCleanup(self.script._stop_server)
+        song = make_song()
+        song.tracks = [FakeTrack("Lead"), FakeTrack("Bass"), FakeTrack("Group")]
+        song.tracks[0].has_midi_input = True
+        song.tracks[0].clip_slots = [FakeSlot(PropClip("riff", 4.0)), FakeSlot()]
+        song.tracks[2].is_foldable = True
+        song.tracks[2].clip_slots = [FakeSlot(), FakeSlot()]
+        song.scenes = [PropScene("Verse"), PropScene("Chorus")]
+        song.is_playing, song.current_song_time, song.can_undo, song.can_redo = False, 0.0, True, False
+        song.metronome, song.loop, song.loop_start, song.loop_length = False, False, 0.0, 4.0
+        song.root_note, song.scale_name, song.scale_mode, song.groove_amount, song.swing_amount = 0, "Major", True, 0.0, 0.0
+        song.calls, song.can_capture_midi = [], True
+        song.can_jump_to_next_cue = song.can_jump_to_prev_cue = True
+        for name in ("start_playing", "continue_playing", "stop_playing", "stop_all_clips", "tap_tempo", "jump_to_next_cue",
+                     "jump_to_prev_cue", "set_or_delete_cue", "capture_midi", "capture_and_insert_scene"):
+            setattr(song, name, (lambda n: lambda *a: song.calls.append(n))(name))
+        song.jump_by = lambda beats: song.calls.append(("jump_by", beats))
+        song.undo_stack = ["Undo A", "Undo B", "Undo C"]
+        song.redo_stack = []
+
+        def undo():
+            name = song.undo_stack.pop()
+            song.redo_stack.append(name)
+            song.can_undo, song.can_redo = bool(song.undo_stack), True
+            return name
+
+        def redo():
+            name = song.redo_stack.pop()
+            song.undo_stack.append(name)
+            song.can_undo, song.can_redo = True, bool(song.redo_stack)
+            return name
+        song.undo, song.redo = undo, redo
+        self.script._song = self.song = song
+        self.app = types.SimpleNamespace(
+            get_variant=lambda: "Beta", get_version_string=lambda: "12.4.15b4", get_build_id=lambda: "Live 12.4.15b4 Build: x",
+            unavailable_features=[], browser=types.SimpleNamespace(
+                instruments=children("Drift", "Meld"), audio_effects=children("Reverb"), max_for_live=children("Max Audio Effect")))
+        self.script.application = lambda: self.app
+
+    def run_command(self, command_type, params=None):
+        return self.script._process_command({"type": command_type, "params": params or {}})
+
+    # ---- describe_set
+    def test_describe_set_structure(self):
+        out = self.script._describe_set()
+        self.assertEqual([t["address"] for t in out["tracks"]], ["tracks/0", "tracks/1", "tracks/2"])
+        self.assertEqual([t["kind"] for t in out["tracks"]], ["midi", "audio", "group"])
+        self.assertEqual(out["returns"][0]["address"], "returns/0")
+        self.assertEqual(out["master"]["kind"], "master")
+        self.assertEqual([s["address"] for s in out["scenes"]], ["scenes/0", "scenes/1"])
+        lead = out["tracks"][0]
+        self.assertEqual(lead["clip_count"], 1)
+        self.assertEqual(lead["clips"][0]["slot"], 0)
+        self.assertEqual((lead["clips"][0]["name"], lead["clips"][0]["kind"]), ("riff", "midi"))
+        self.assertEqual(lead["devices"], ["Dev"])
+        self.assertIn("tempo", out["song"])
+        self.assertEqual(len(out["fingerprint"]), 12)
+        self.assertNotIn("clips", out["returns"][0])  # return tracks have no clip slots
+
+    def test_include_clips_false_keeps_counts_and_hashes(self):
+        summary = self.script._describe_set(include_clips=False)
+        self.assertNotIn("clips", summary["tracks"][0])
+        self.assertEqual(summary["tracks"][0]["clip_count"], 1)
+        self.assertEqual(summary["fingerprint"], self.script._describe_set()["fingerprint"])
+
+    def test_fingerprint_is_stable_and_ignores_volatile_state(self):
+        base = self.script._describe_set()["fingerprint"]
+        self.assertEqual(self.script._describe_set()["fingerprint"], base)
+        self.song.is_playing, self.song.current_song_time = True, 12.5
+        self.song.tracks[0].clip_slots[0].clip.is_playing = True
+        self.assertEqual(self.script._describe_set()["fingerprint"], base)
+
+    def test_fingerprint_changes_when_the_set_changes(self):
+        base = self.script._describe_set()["fingerprint"]
+        mutations = [
+            lambda: setattr(self.song.tracks[1], "name", "Renamed"),
+            lambda: setattr(self.song.tracks[0].clip_slots[0].clip, "name", "other"),
+            lambda: self.song.tracks[1].devices.append(FakeDevice("Extra")),
+            lambda: setattr(self.song.tracks[1].mixer_device.volume, "value", 0.4),
+            lambda: setattr(self.song.scenes[0], "tempo_enabled", True),
+            lambda: setattr(self.song, "tempo", 99.0),
+            lambda: setattr(self.song.tracks[0], "mute", True),
+            lambda: setattr(self.song.return_tracks[0], "name", "Return B"),
+            lambda: setattr(self.song.master_track.mixer_device.volume, "value", 0.7),
+        ]
+        seen = {base}
+        for mutate in mutations:
+            mutate()
+            fingerprint = self.script._describe_set()["fingerprint"]
+            self.assertNotIn(fingerprint, seen)
+            seen.add(fingerprint)
+
+    def test_a_change_only_moves_the_affected_track_hash(self):
+        before = self.script._describe_set()
+        self.song.tracks[1].name = "Renamed"
+        after = self.script._describe_set()
+        self.assertEqual(before["tracks"][0]["hash"], after["tracks"][0]["hash"])
+        self.assertNotEqual(before["tracks"][1]["hash"], after["tracks"][1]["hash"])
+        self.assertEqual(before["master"]["hash"], after["master"]["hash"])
+
+    # ---- get_capabilities
+    def test_capabilities_probe_features_instead_of_trusting_the_variant(self):
+        out = self.script._get_capabilities()
+        self.assertEqual(out["live"]["variant"], "Beta")
+        self.assertEqual(out["live"]["edition"], "unknown")
+        self.assertEqual(out["live"]["version"], "12.4.15b4")
+        self.assertEqual(out["features"], {"max_for_live": True, "conversions": False,
+                                           "note_probabilities": True, "devices": {"Meld": True, "Roar": False}})
+        self.assertEqual(out["script"]["version"], mod.config.SCRIPT_VERSION)
+        self.assertIn("describe_set", out["commands"])
+
+    def test_capabilities_map_unavailable_features_by_name(self):
+        self.app.unavailable_features = [0]
+        out = self.script._get_capabilities()
+        self.assertEqual(out["live"]["unavailable_features"], ["note_velocity_ranges_and_probabilities"])
+        self.assertFalse(out["features"]["note_probabilities"])
+        self.app.get_variant = lambda: "Suite"
+        self.assertEqual(self.script._get_capabilities()["live"]["edition"], "Suite")
+
+    # ---- transport
+    def test_every_transport_action_does_its_thing(self):
+        expectations = {"play": "start_playing", "continue": "continue_playing", "stop": "stop_playing",
+                        "stop_all_clips": "stop_all_clips", "tap_tempo": "tap_tempo", "next_cue": "jump_to_next_cue",
+                        "prev_cue": "jump_to_prev_cue", "toggle_cue": "set_or_delete_cue", "capture_midi": "capture_midi",
+                        "capture_and_insert_scene": "capture_and_insert_scene"}
+        for action, call in expectations.items():
+            self.song.calls.clear()
+            response = self.run_command("transport", {"action": action})
+            self.assertEqual(response["status"], "success", action)
+            self.assertEqual(self.song.calls, [call], action)
+            self.assertEqual(response["result"]["action"], action)
+        self.song.calls.clear()
+        self.run_command("transport", {"action": "jump_by", "amount": -4})
+        self.assertEqual(self.song.calls, [("jump_by", -4.0)])
+
+    def test_transport_errors(self):
+        cases = [({"action": "rewind"}, "INVALID_ARGUMENT"), ({}, "INVALID_ARGUMENT"), ({"action": "jump_by"}, "INVALID_ARGUMENT"),
+                 ({"action": "jump_by", "amount": "4"}, "INVALID_ARGUMENT")]
+        for params, code in cases:
+            response = self.run_command("transport", params)
+            self.assertEqual((response["status"], response["code"]), ("error", code), str(params))
+        self.song.can_jump_to_next_cue = self.song.can_jump_to_prev_cue = self.song.can_capture_midi = False
+        for action in ("next_cue", "prev_cue", "capture_midi"):
+            self.assertEqual(self.run_command("transport", {"action": action})["code"], "UNAVAILABLE", action)
+
+    def test_transport_runs_in_one_undo_step_and_reports_state(self):
+        self.song.undo_log.clear()
+        out = self.run_command("transport", {"action": "play"})["result"]
+        self.assertEqual(self.song.undo_log, ["begin", "end"])
+        self.assertEqual(set(out), {"action", "is_playing", "current_song_time", "tempo", "can_undo", "can_redo"})
+
+    # ---- history
+    def test_undo_and_redo_report_the_steps(self):
+        out = self.run_command("history", {"action": "undo", "steps": 2})["result"]
+        self.assertEqual((out["performed"], out["steps"], out["can_undo"], out["can_redo"]), (2, ["Undo C", "Undo B"], True, True))
+        out = self.run_command("history", {"action": "redo"})["result"]
+        self.assertEqual((out["performed"], out["steps"]), (1, ["Undo B"]))
+
+    def test_undo_stops_at_the_end_of_history(self):
+        out = self.run_command("history", {"action": "undo", "steps": 10})["result"]
+        self.assertEqual((out["performed"], out["can_undo"]), (3, False))
+        empty = self.run_command("history", {"action": "undo"})
+        self.assertEqual((empty["status"], empty["code"], empty["message"]), ("error", "UNAVAILABLE", "Nothing to undo"))
+        self.assertEqual(self.run_command("history", {"action": "redo", "steps": 5})["result"]["performed"], 3)
+        self.assertEqual(self.run_command("history", {"action": "redo"})["code"], "UNAVAILABLE")
+
+    def test_history_argument_errors_and_no_undo_step_around_undo(self):
+        for params in ({"action": "rewind"}, {}, {"action": "undo", "steps": 0}, {"action": "undo", "steps": 51},
+                       {"action": "undo", "steps": 1.5}, {"action": "undo", "steps": True}, {"action": "undo", "steps": "2"}):
+            self.assertEqual(self.run_command("history", params)["code"], "INVALID_ARGUMENT", str(params))
+        self.song.undo_log.clear()
+        self.run_command("history", {"action": "undo"})
+        self.assertEqual(self.song.undo_log, [])  # undo must not run inside a step of its own
+
+    def test_commands_are_registered_with_the_right_flags(self):
+        for name, writes in (("describe_set", False), ("get_capabilities", False), ("transport", True), ("history", False)):
+            self.assertEqual(mod._COMMANDS[name]["writes"], writes, name)
+            self.assertIn(name, self.script._get_script_info()["capabilities"])
 
 
 # ---------------------------------------------------------------- package hygiene

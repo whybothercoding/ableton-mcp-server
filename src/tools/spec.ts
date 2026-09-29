@@ -115,6 +115,69 @@ export const TOOL_SPECS: ToolSpec[] = [
     bridge: { command: 'set_properties' }
   },
   {
+    name: 'get_capabilities',
+    description:
+      "What this Live and this bridge can do: script version and build id, Live version and variant, unavailable features, and feature probes " +
+      "(Max for Live present, Conversions, note probabilities, Suite devices such as Meld/Roar). A beta build reports variant 'Beta' and " +
+      "edition 'unknown' because the edition is not readable: rely on `features`, never on the edition. Also lists every bridge command.",
+    inputSchema: { type: 'object', properties: {} },
+    annotations: { readOnlyHint: true, destructiveHint: false, idempotentHint: true },
+    bridge: { command: 'get_capabilities' }
+  },
+  {
+    name: 'describe_set',
+    description:
+      "A compact map of the whole Set: song settings, every track (regular, return, master) with its address, kind, mixer state, devices and " +
+      "clips, and every scene. Each track has a `hash` and the Set has a `fingerprint` that only change when the Set really changes " +
+      "(playhead, play state and meters are ignored): compare fingerprints to detect edits, or hashes to see which track changed. " +
+      "Set include_clips=false for a lighter summary (clip counts and hashes stay).",
+    inputSchema: {
+      type: 'object',
+      properties: { include_clips: { type: 'boolean', description: 'List each track\'s clips (default true)' } }
+    },
+    annotations: { readOnlyHint: true, destructiveHint: false, idempotentHint: true },
+    bridge: { command: 'describe_set' }
+  },
+  {
+    name: 'transport',
+    description:
+      "Transport and playhead actions: play, continue, stop, stop_all_clips, tap_tempo, jump_by (needs `amount`: beats, negative jumps back), " +
+      "next_cue / prev_cue (jump to a cue point), toggle_cue (add or remove a cue point at the playhead), capture_midi (keep recently played MIDI) and " +
+      "capture_and_insert_scene. Returns the resulting transport state. To change tempo or loop settings use set_properties on 'song'. " +
+      "For undo/redo use the history tool.",
+    inputSchema: {
+      type: 'object',
+      properties: {
+        action: {
+          type: 'string',
+          enum: ['play', 'continue', 'stop', 'stop_all_clips', 'tap_tempo', 'jump_by', 'next_cue', 'prev_cue', 'toggle_cue', 'capture_midi', 'capture_and_insert_scene'],
+          description: 'What to do'
+        },
+        amount: { type: 'number', description: 'Beats to jump (jump_by only)' }
+      },
+      required: ['action']
+    },
+    annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: false },
+    bridge: { command: 'transport' }
+  },
+  {
+    name: 'history',
+    description:
+      "Undo or redo in Live. Every writing tool call is one undo step, so `undo` reverts exactly the last call (one exception: Live records a " +
+      "track rename as its own step). Undo is global: it also reverts edits the user made by hand, so use it deliberately. `steps` (1-50, default 1) " +
+      "repeats it; returns the names of what was undone and whether more undo/redo is available.",
+    inputSchema: {
+      type: 'object',
+      properties: {
+        action: { type: 'string', enum: ['undo', 'redo'], description: 'Direction' },
+        steps: { type: 'number', description: 'How many steps (1-50, default 1)' }
+      },
+      required: ['action']
+    },
+    annotations: { readOnlyHint: false, destructiveHint: true, idempotentHint: false },
+    bridge: { command: 'history' }
+  },
+  {
     name: 'list_properties',
     description:
       'List the properties get_properties/set_properties know for an object kind: type, whether it is writable, allowed enum values ' +
