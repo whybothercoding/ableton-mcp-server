@@ -176,7 +176,7 @@ Targets are addresses: a Session **clip** (`tracks/2/slots/0/clip`) and a **para
 - `get_automation`: reads a clip's envelopes (all, or one `parameter`) as breakpoints in the parameter's units with the parameter's address, name and range; a jump is reported as `jump_from`.
 - `clear_automation`: one parameter's envelope, or all of them on the clip.
 - `ramp_parameter`: sweeps a parameter to a target over `beats` or `seconds`, driven inside Live at about 100 updates per second (Live's timer resolution is 10 ms). For live gestures; use `draw_automation` for motion that belongs to a looping clip. A new ramp on the same parameter replaces the old one however it was addressed. `cancel_ramps`: one parameter, or all. Ramps are not undoable and cannot run inside a batch.
-- `device_action` `re_enable_automation` hands a parameter that a manual change overrode (`automation_state` 2) back to its automation, or every parameter when the address is `song`.
+- `device_action` `re_enable_automation` hands a parameter that was overridden (`automation_state` 2) back to its clip automation, or every parameter when the address is `song`. Any write to a parameter while its clip automation is playing overrides it, by hand or through the bridge (`set_properties`, `ramp_parameter`), so re-enable it afterwards if the automation should keep control.
 
 Limits from Live's API: envelopes exist only on **Session** clips (not arrangement clips), only for parameters on the clip's own track, and Live ignores the curve (control) coefficients of an envelope event, so curves are approximated by breakpoints. The bridge still accepts the older `track_index`/`clip_index`/`device_index` argument forms.
 
