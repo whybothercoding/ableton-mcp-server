@@ -1548,6 +1548,51 @@ try {
     await failsCode(() => call('device_action', { action: 'call', address: eq.address, method: 'crop' }), 'NOT_FOUND', 'no device-specific methods');
   });
 
+  console.log('\nFollow actions (emulated)');
+  await check('a chain of scratch clips follows itself next, next, next... with the engine running in Live, and clear stops it', async () => {
+    const wasPlaying = await call('eval', { code: 'bool(self._song.is_playing)' });
+    const track = await makeScratchTrack();
+    const tr = `tracks/${track}`;
+    const quantizations = (await call('list_properties', { kind: 'clip' })).properties.launch_quantization.values;
+    const immediate = quantizations.find((q) => /none/.test(q));
+    cleanupsRegistry.push(async () => {
+      await call('follow_actions', { action: 'clear' }).catch(() => {});
+      await call('launch', { address: tr, action: 'stop', quantized: false }).catch(() => {});
+      if (!wasPlaying) await call('transport', { action: 'stop' }).catch(() => {});
+    });
+    for (let i = 0; i < 3; i += 1) {
+      await call('create', { kind: 'midi_clip', address: `${tr}/slots/${i}`, length: 2, name: `MCP FOLLOW ${i}` });
+      await call('set_properties', { address: `${tr}/slots/${i}/clip`, properties: { launch_quantization: immediate } });
+      const set = await call('follow_actions', { action: 'set', address: `${tr}/slots/${i}/clip`, actions: ['next'], after_beats: 2 });
+      assert(set.config.after_beats === 2 && set.active >= 1, JSON.stringify(set));
+    }
+    assert((await call('follow_actions')).active >= 3, 'status lists the configurations');
+    if (!wasPlaying) await call('transport', { action: 'play' });
+    await call('launch', { address: `${tr}/slots/0`, quantization: 'q_no_q' });
+    const seen = [];
+    const t0 = performance.now();
+    while (performance.now() - t0 < 10000) {
+      const index = await call('eval', { code: `self._song.tracks[${track}].playing_slot_index` });
+      if (seen.length === 0 || seen.at(-1) !== index) seen.push(index);
+      await sleep(40);
+    }
+    const tempo = await call('eval', { code: 'self._song.tempo' });
+    console.log(`       tempo ${tempo}, playing slots seen: ${seen.join(' ')}`);
+    const forward = seen.filter((v, i) => i > 0 && v === (seen[i - 1] + 1) % 3).length;
+    assert(seen.length >= 4 && forward >= 3, `the clips should follow each other in order: ${seen.join(' ')}`);
+    await call('follow_actions', { action: 'clear' });
+    const after = await call('eval', { code: `self._song.tracks[${track}].playing_slot_index` });
+    await sleep(2500 + (tempo < 100 ? 1500 : 0));
+    assert((await call('eval', { code: `self._song.tracks[${track}].playing_slot_index` })) === after, 'after clear the clips no longer follow');
+    assert((await call('follow_actions')).active === 0, 'nothing is configured any more');
+    await call('launch', { address: tr, action: 'stop', quantized: false });
+  });
+  await check('follow action errors are specific', async () => {
+    await failsCode(() => call('follow_actions', { action: 'set', address: `tracks/${T}/slots/${S}/clip`, actions: ['dance'] }), 'INVALID_ARGUMENT');
+    await failsCode(() => call('follow_actions', { action: 'set', address: `tracks/${T}`, actions: ['next'] }), 'INVALID_ARGUMENT');
+    await failsCode(() => call('follow_actions', { action: 'set', address: `tracks/${T}/slots/${S}/clip`, actions: ['next'], after_beats: 0.01 }), 'INVALID_ARGUMENT');
+  });
+
   console.log('\ndraw_automation');
   await check('linear ramp: readback and independent envelope values match', async () => {
     const lo = pA.min + 0.2 * (pA.max - pA.min);

@@ -7,7 +7,7 @@ import { validateArgs } from './schema.js';
 import type { BridgeClient, ToolSpec } from './spec.js';
 
 /** Tools that are not one undoable edit (playback, launching, undo) or that already combine several calls. */
-const REFUSED = new Set(['transport', 'launch', 'history', 'batch', 'ramp_parameter', 'cancel_ramps', 'record']);
+const REFUSED = new Set(['transport', 'launch', 'history', 'batch', 'ramp_parameter', 'cancel_ramps', 'record', 'follow_actions']);
 
 const batchable = (specs: Record<string, ToolSpec>): string[] =>
   Object.values(specs)
@@ -43,7 +43,7 @@ export const BATCH_SPECS: ToolSpec[] = [
       "Example: [{tool:'create',args:{kind:'midi_track',name:'Bass'}},{tool:'device_action',args:{action:'insert',address:'$0.address',name:'Drift'}}]. " +
       "`on_error`: stop (default; ops already applied stay applied as one undo step, later ones do not run) or continue. A failure returns BATCH_FAILED with every op's outcome. Up to 100 ops. " +
       "Batchable tools: " + 'get_properties, set_properties, list_properties, describe_set, get_capabilities, get_notes, get_device, create, duplicate, delete, write_notes, edit_notes, clip_action, device_action, routing, draw_automation, get_automation, clear_automation, load_item' + ". " +
-      "Not batchable: transport, launch, history, ramp_parameter, cancel_ramps, record (not undoable edits), transform_notes, generate_notes, browse, analyze_audio_clip and convert (they combine calls or wait).",
+      "Not batchable: transport, launch, history, ramp_parameter, cancel_ramps, record, follow_actions (not undoable edits), transform_notes, generate_notes, browse, analyze_audio_clip and convert (they combine calls or wait).",
     inputSchema: {
       type: 'object',
       properties: {

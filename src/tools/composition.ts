@@ -52,7 +52,15 @@ function guarded<T>(fn: () => T): T {
 
 const differs = (a: unknown, b: unknown): boolean => (typeof a === 'number' && typeof b === 'number' ? Math.abs(a - b) > 1e-6 : a !== b);
 
+const requireAddress = (args: Record<string, any>): void => {
+  if (typeof args.address !== 'string' || !args.address) throw new CompositionError("address is required: a MIDI clip such as 'tracks/2/slots/0/clip'");
+};
+
 export async function transformNotes(args: Record<string, any>, client: BridgeClient): Promise<unknown> {
+  if (args.transform === 'help') {
+    return { note: 'Parameters go in `params`; times are beats, rates like 1/16, keys like C minor, pitches as numbers or names (C3 = 60).', transforms: Object.fromEntries(Object.entries(TRANSFORMS).map(([name, t]) => [name, { kind: t.kind, usage: t.summary }])) };
+  }
+  requireAddress(args);
   const spec = TRANSFORMS[args.transform];
   if (!spec) throw unknown('transform', args.transform, TRANSFORM_NAMES);
   const address: string = args.address;
@@ -102,6 +110,10 @@ export async function transformNotes(args: Record<string, any>, client: BridgeCl
 }
 
 export async function generateNotes(args: Record<string, any>, client: BridgeClient): Promise<unknown> {
+  if (args.generator === 'help') {
+    return { note: 'Parameters go in `params`; times are beats, rates like 1/16, keys like C minor, chords by roman numeral (with key) or symbol, pitches as numbers or names (C3 = 60), `seed` makes random choices repeatable.', generators: Object.fromEntries(Object.entries(GENERATORS).map(([name, g]) => [name, g.summary])) };
+  }
+  requireAddress(args);
   const spec = GENERATORS[args.generator];
   if (!spec) throw unknown('generator', args.generator, GENERATOR_NAMES);
   const address: string = args.address;
@@ -132,8 +144,6 @@ export async function generateNotes(args: Record<string, any>, client: BridgeCli
   return { ...summary, removed: applied.removed ?? 0, written: applied.written, note_count: applied.note_count, clip: applied.clip, warning: warn(applied.clip), preview: preview(result) };
 }
 
-const catalog = (entries: Record<string, { summary: string }>): string => Object.values(entries).map((e) => e.summary).join(' | ');
-
 const SELECTION_PROPERTIES = {
   from_time: { type: 'number', description: 'Only notes starting at or after this beat' },
   time_span: { type: 'number', description: 'Length of the time range in beats' },
@@ -145,22 +155,22 @@ export const COMPOSITION_SPECS: ToolSpec[] = [
   {
     name: 'transform_notes',
     description:
-      "Change notes already in a MIDI clip with a music transform: reads the notes, transforms them, writes the result in ONE undo step. `address`: a MIDI clip. `transform` + `params` (times in beats; rates like '1/16', '1/8t' triplet; " +
-      "keys like 'C minor'; pitches as numbers or Ableton names where C3 = 60). Select notes with a range (from_time/time_span/from_pitch/pitch_span) or, for in-place transforms, `ids` from get_notes; default is every note. " +
-      "`dry_run` previews without writing. In-place transforms keep note ids and settings; others replace the selected notes or add new ones. Notes that would land outside MIDI range or before beat 0 refuse in-place transforms. " +
-      "Transforms: " + catalog(TRANSFORMS),
+      "Change notes already in a MIDI clip with a music transform: reads the notes, transforms them, writes the result in ONE undo step. `address`: a MIDI clip; `transform` + `params`. " +
+      "Transforms: " + TRANSFORM_NAMES.join(', ') + ". Use transform 'help' for every transform's parameters and kind. " +
+      "Select notes with a range (from_time/time_span/from_pitch/pitch_span) or, for in-place transforms, `ids` from get_notes; default is every note. `dry_run` previews without writing. " +
+      "In-place transforms keep note ids and settings; rebuilds replace the selected notes in one step; additions keep them. Notes that would land outside MIDI range or before beat 0 refuse in-place transforms. Times are beats, pitches C3 = 60.",
     inputSchema: {
       type: 'object',
       properties: {
         address: { type: 'string', description: "A MIDI clip, e.g. 'tracks/2/slots/0/clip'" },
-        transform: { type: 'string', enum: TRANSFORM_NAMES, description: 'Which transform' },
+        transform: { type: 'string', enum: [...TRANSFORM_NAMES, 'help'], description: 'Which transform (help lists them all with parameters)' },
         params: { type: 'object', description: "The transform's parameters (see the list in the tool description)" },
         ids: { type: 'array', items: { type: 'number' }, description: 'Only these note ids (in-place transforms)' },
         ...SELECTION_PROPERTIES,
         dry_run: { type: 'boolean', description: 'Preview the result without changing the clip' },
         expect: { type: 'object', description: 'Guard: {"name": "..."} must match the clip' }
       },
-      required: ['address', 'transform']
+      required: ['transform']
     },
     annotations: { readOnlyHint: false, destructiveHint: true, idempotentHint: false },
     bridge: { command: 'edit_notes' },
@@ -170,22 +180,21 @@ export const COMPOSITION_SPECS: ToolSpec[] = [
   {
     name: 'generate_notes',
     description:
-      "Compose notes into a MIDI clip from a generator, in one undo step. `address`: a MIDI clip (create one with create kind midi_clip; the clip must be long enough: the result warns if the music runs past its loop end). " +
-      "`generator` + `params` (beats; rates like '1/16'; keys like 'C minor'; chords by roman numeral with a key, or symbols like Am7; pitches as numbers or names where C3 = 60; `seed` makes random choices repeatable). " +
-      "`start_time` offsets everything (beats). `mode`: add (default; keeps existing notes), replace_span (replaces notes inside the generated span) or replace_all. `dry_run` previews. " +
-      "Generators: " + catalog(GENERATORS),
+      "Compose notes into a MIDI clip from a generator, in one undo step. `address`: a MIDI clip (create one with create kind midi_clip; the result warns if the music runs past its loop end); `generator` + `params`. " +
+      "Generators: " + GENERATOR_NAMES.join(', ') + ". Use generator 'help' for every generator's parameters (keys, chord progressions by roman numeral or symbol, drum step strings, seeds...). " +
+      "`start_time` offsets everything (beats). `mode`: add (default; keeps existing notes), replace_span (replaces notes inside the generated span) or replace_all. `dry_run` previews.",
     inputSchema: {
       type: 'object',
       properties: {
         address: { type: 'string', description: "A MIDI clip, e.g. 'tracks/2/slots/0/clip'" },
-        generator: { type: 'string', enum: GENERATOR_NAMES, description: 'Which generator' },
+        generator: { type: 'string', enum: [...GENERATOR_NAMES, 'help'], description: 'Which generator (help lists them all with parameters)' },
         params: { type: 'object', description: "The generator's parameters (see the list in the tool description)" },
         start_time: { type: 'number', description: 'Beat where the generated music starts (default 0)' },
         mode: { type: 'string', enum: ['add', 'replace_span', 'replace_all'], description: 'Default add' },
         dry_run: { type: 'boolean', description: 'Preview the result without changing the clip' },
         expect: { type: 'object', description: 'Guard: {"name": "..."} must match the clip' }
       },
-      required: ['address', 'generator']
+      required: ['generator']
     },
     annotations: { readOnlyHint: false, destructiveHint: true, idempotentHint: false },
     bridge: { command: 'write_notes' },

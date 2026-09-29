@@ -546,6 +546,30 @@ export const TOOL_SPECS: ToolSpec[] = [
     bridge: { command: 'record' }
   },
   {
+    name: 'follow_actions',
+    description:
+      "Clip follow actions, which Live's API does not have, emulated inside Live on the Remote Script's 10 ms timer. `set` (`address` of a Session clip; `actions`: names or {action, weight} objects, chosen by weight each pass: " +
+      "next, previous, first, last, any, other, again, stop, all relative to the clip's own track; `after_bars` or `after_beats`, default one pass through the clip) launches the chosen clip when the clip has played that long. " +
+      "It only acts while the transport runs and the clip plays, once per pass, and launches through Live's normal clip launch, so Live's launch quantization decides the exact moment (the trigger fires ~40 ms early to catch the grid point; use q_none or a matching quantization for tight timing). " +
+      "`clear` (an `address`, or everything) stops them at once; `status` lists them. Configurations live in memory only: they are lost when Live restarts or the script reloads. Not undoable, not batchable.",
+    inputSchema: {
+      type: 'object',
+      properties: {
+        action: { type: 'string', enum: ['set', 'clear', 'status'], description: 'Default status' },
+        address: { type: 'string', description: "set/clear: a Session clip, e.g. 'tracks/2/slots/0/clip'" },
+        actions: {
+          type: 'array',
+          description: "set: e.g. ['next'] or [{action:'next',weight:3},{action:'again',weight:1}]",
+          items: { type: 'object', properties: { action: { type: 'string', enum: ['next', 'previous', 'first', 'last', 'any', 'other', 'again', 'stop'] }, weight: { type: 'number' } } }
+        },
+        after_bars: { type: 'number', description: "set: bars of the clip's time signature before the action" },
+        after_beats: { type: 'number', description: 'set: beats before the action (min 0.25)' }
+      }
+    },
+    annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: false },
+    bridge: { command: 'follow_actions' }
+  },
+  {
     name: 'list_properties',
     description:
       'List the properties get_properties/set_properties know for an object kind: type, whether it is writable, allowed enum values ' +

@@ -153,6 +153,9 @@ Earlier versions had one tool per property or action. These were folded into the
 | `get_device_parameters` | `get_device` (parameters with addresses, racks with their chains and pads) |
 | `set_device_parameter`, `bulk_set_device_parameters` | `set_properties` on a parameter address (`.../parameters/5`), `items` for many at once |
 
+#### Follow actions (emulated)
+Live's API has no clip follow actions, so `follow_actions` emulates them inside Live on the Remote Script's 10 ms timer. `set` (`address` of a Session clip, `actions`: names or `{action, weight}` chosen by weight each pass among `next`, `previous`, `first`, `last`, `any`, `other`, `again`, `stop`, all relative to the clip's own track; `after_bars` or `after_beats`, default one pass through the clip) launches the chosen clip when the clip has played that long. It acts only while the transport runs and the clip plays, once per pass, through Live's normal clip launch: Live's launch quantization decides the exact moment (the trigger fires about 40 ms early to catch the grid point; use `q_none` on the clips or a quantization that matches for tight timing). `clear` (one clip or all) stops them at once, `status` lists them. Configurations live in memory only: they are lost when Live restarts or the script reloads, and a deleted clip drops its configuration. Not undoable, not batchable.
+
 #### Arrangement and recording
 - **Timeline clips** have addresses like Session clips: `tracks/N/arrangement/M` in time order (a take lane's clips are `tracks/N/take_lanes/K/arrangement/M`), so `get_properties`, `set_properties` (`name`, `muted`, `start_time` and `end_time` are readable), `get_notes`/`write_notes`/`edit_notes`, `clip_action` and `delete` (with `expect`) all work on them. `describe_set` lists each track's timeline (`arrangement`: index, name, start, length, kind) and it is part of the fingerprint.
 - `create`: `arrangement_midi_clip` (`address` of a track or take lane, `time` in beats, `length` default 4), `arrangement_audio_clip` (`address`, `time`, `path`), `take_lane` (`address` of a track). `clip_action` `to_arrangement` copies a Session clip onto its track's timeline at `time`. `launch` refuses timeline clips (arrangement playback is `transport`).
@@ -203,7 +206,7 @@ The music logic is pure TypeScript in `src/music` (no Live needed to test it); t
 
 - `generate_notes` (`address` of a MIDI clip, `generator`, `params`, `start_time`, `mode`): **euclidean** (evenly spread hits, with layers for several drums), **drum_pattern** (step strings per drum: `x` hit, `X` accent, `o` ghost, `.` rest), **chord_progression** (roman numerals in a key, or chord symbols like `Am7`; voice leading, voicings, block/strum/arp/pulse/offbeat styles, optional bass), **bassline** (follows the chords: root, root+fifth, octaves, walking), **melody** (seeded random walk inside a scale with contour, rests and a tonic resolution), **scale_run**, **random_notes**. `mode` is `add` (default), `replace_span` or `replace_all`. If the music runs past the clip's loop end the result carries a `warning`.
 - `transform_notes` (`address`, `transform`, `params`, optional selection by range `from_time`/`time_span`/`from_pitch`/`pitch_span` or by `ids`): **in-place** transforms keep note ids and per-note settings (transpose by semitones or scale degrees, fit_to_scale, invert, reverse, stretch, shift, humanize, swing, quantize, legato, gate, velocity_shape, strum, recombine); **rebuilds** replace the selected range in one atomic step (arpeggiate, chop, trill); **additions** keep the notes and add more (stack, grace_notes, repeat). A transform that would push notes outside 0-127 or before beat 0 refuses and changes nothing.
-- The full parameter list of every generator and transform is in the tool descriptions. `npm run test:scenarios` composes, transforms, undoes and cleans up on a scratch track through MCP only.
+- Call either tool with `transform: "help"` / `generator: "help"` (no clip needed) for every entry's kind and parameters. `npm run test:scenarios` composes, transforms, undoes and cleans up on a scratch track through MCP only.
 
 #### Devices, racks and parameters
 Devices, rack chains, drum pads and parameters have addresses under a track (`tracks/N`, `returns/N` or `master`):
@@ -288,6 +291,12 @@ Not covered: device properties Live keeps outside `parameters` (Wavetable's osci
 
 4. **Group Track Errors**:
    - Group tracks and Master/Return tracks do not have arm buttons. The `AbletonMCP` script handles arm state safely via `can_be_armed` checks.
+
+---
+
+## What Live's API cannot do
+
+See [docs/beyond-the-api.md](docs/beyond-the-api.md) for the verdicts: what is emulated here (follow actions, arrangement automation, browser search), what is only possible with the owner's consent (bounce by resampling) and what is simply not available (export, save, grouping, MIDI mapping).
 
 ---
 

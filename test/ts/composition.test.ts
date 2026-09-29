@@ -192,12 +192,14 @@ test('the tools are declared with schemas, annotations and the bridge commands t
     assert.ok(spec.run, `${name} runs its own code`);
     assert.ok(spec.requires?.length);
     assert.equal(spec.annotations.destructiveHint, true);
-    assert.deepEqual(spec.inputSchema.required?.slice(0, 1), ['address']);
   }
   const transform = TOOL_SPEC_BY_NAME.transform_notes;
   assert.ok(transform.inputSchema.properties.transform.enum.includes('arpeggiate'));
-  assert.ok(transform.description.includes('arpeggiate(style='));
+  assert.ok(transform.description.includes('arpeggiate') && transform.description.includes("'help'"));
+  assert.deepEqual(transform.inputSchema.required, ['transform']);
+  assert.deepEqual(TOOL_SPEC_BY_NAME.generate_notes.inputSchema.required, ['generator']);
   assert.equal(validateArgs(transform.inputSchema, { address: ADDR, transform: 'nope' }), 'transform must be one of: ' + transform.inputSchema.properties.transform.enum.join(', '));
+  assert.equal(validateArgs(transform.inputSchema, { transform: 'help' }), null);
   assert.equal(validateArgs(TOOL_SPEC_BY_NAME.generate_notes.inputSchema, { address: ADDR, generator: 'euclidean', mode: 'bogus' }) !== null, true);
 });
 
@@ -217,4 +219,18 @@ test('through the tool handler, composition errors are plain messages and succes
   const failed = await handler.handleToolCall('generate_notes', { address: ADDR, generator: 'euclidean', params: {} });
   assert.equal(failed.isError, true);
   assert.equal((failed.content[0] as any).text, 'euclidean: pulses must be given (a whole number)');
+});
+
+test('help lists every transform and generator with its parameters and needs no clip', async () => {
+  const bridge = new FakeBridge([]);
+  const transforms: any = await transformNotes({ transform: 'help' }, bridge);
+  assert.equal(bridge.calls.length, 0);
+  assert.ok(Object.keys(transforms.transforms).length >= 19);
+  assert.match(transforms.transforms.arpeggiate.usage, /^arpeggiate\(style=up/);
+  assert.equal(transforms.transforms.stack.kind, 'add');
+  const generators: any = await generateNotes({ generator: 'help' }, bridge);
+  assert.ok(Object.keys(generators.generators).length >= 7);
+  assert.match(generators.generators.chord_progression, /numerals=/);
+  await assert.rejects(transformNotes({ transform: 'transpose', params: { semitones: 1 } }, bridge), /address is required/);
+  await assert.rejects(generateNotes({ generator: 'euclidean', params: { pulses: 3 } }, bridge), /address is required/);
 });

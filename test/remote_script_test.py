@@ -3364,6 +3364,231 @@ class DeviceSpecificTests(unittest.TestCase):
         self.assertEqual(self.song.undo_log, ["begin", "end", "begin", "end"])
 
 
+# ---------------------------------------------------------------- follow actions
+
+class FollowClip(PropClip):
+    def __init__(self, name, length=4.0):
+        PropClip.__init__(self, name, length)
+        self.is_playing, self.is_triggered, self.playing_position = False, False, 0.0
+        self.loop_start, self.loop_end, self.start_marker = 0.0, length, 0.0
+        self.signature_numerator, self.signature_denominator = 4, 4
+
+
+class FollowSlot(FakeSlot):
+    def __init__(self, clip, world):
+        FakeSlot.__init__(self, clip)
+        self.world = world
+
+    def fire(self, *args):
+        self.calls.append(("fire",) + args)
+        if self.clip is not None:
+            self.clip.is_triggered = True
+            self.world.pending.append(self)
+
+
+class FollowWorld(object):
+    """A tiny transport: advance() moves song time; a fired slot starts at the next advance (Live's launch quantization)."""
+
+    def __init__(self, script, lengths=(4.0, 4.0, 4.0)):
+        self.script, self.pending, self.time = script, [], 0.0
+        song = make_song()
+        track = FakeTrack("Track")
+        track.clip_slots = [FollowSlot(FollowClip("c{0}".format(i), n), self) for i, n in enumerate(lengths)] + [FollowSlot(None, self)]
+        track.stop_all_clips = lambda quantized=True: self.stop_track()
+        song.tracks = [track]
+        song.is_playing, song.current_song_time, song.tempo = True, 0.0, 120.0
+        script._song = self.song = song
+        self.track = track
+
+    def stop_track(self):
+        for slot in self.track.clip_slots:
+            if slot.clip is not None:
+                slot.clip.is_playing = False
+
+    def start(self, index):
+        for slot in self.track.clip_slots:
+            if slot.clip is not None:
+                slot.clip.is_playing = slot is self.track.clip_slots[index]
+        self.track.clip_slots[index].clip.playing_position = 0.0
+
+    def advance(self, beats, step=0.01):
+        """Run the pump timer's follow-action tick every `step` beats."""
+        moved = 0.0
+        while moved < beats - 1e-12:
+            delta = min(step, beats - moved)
+            moved += delta
+            if self.song.is_playing:
+                self.time += delta
+            self.song.current_song_time = self.time
+            for slot in list(self.pending):                                            # a fired clip launches on the next step
+                self.pending.remove(slot)
+                slot.clip.is_triggered = False
+                self.start(self.track.clip_slots.index(slot))
+            for slot in self.track.clip_slots:
+                if self.song.is_playing and slot.clip is not None and slot.clip.is_playing:
+                    slot.clip.playing_position = (slot.clip.playing_position + delta) % slot.clip.loop_end
+            self.script._tick_follow_actions()
+
+    def playing(self):
+        return [i for i, s in enumerate(self.track.clip_slots) if s.clip is not None and s.clip.is_playing]
+
+
+class FollowActionTests(unittest.TestCase):
+    def setUp(self):
+        self.script = make_script()
+        self.addCleanup(self.script._stop_server)
+        self.world = FollowWorld(self.script)
+        self.script._follow_random = lambda: 0.0
+
+    def call(self, **params):
+        return self.script._process_command({"type": "follow_actions", "params": params})
+
+    def ok(self, **params):
+        response = self.call(**params)
+        self.assertEqual(response["status"], "success", response)
+        return response["result"]
+
+    def code(self, **params):
+        response = self.call(**params)
+        self.assertEqual(response["status"], "error", response)
+        return response["code"]
+
+    def set(self, index, **params):
+        return self.ok(action="set", address="tracks/0/slots/{0}/clip".format(index), **params)
+
+    def test_a_clip_with_next_moves_on_after_one_pass(self):
+        self.set(0, actions=["next"])
+        self.world.start(0)
+        self.world.advance(3.5)
+        self.assertEqual(self.world.playing(), [0])
+        self.world.advance(1.0)
+        self.assertEqual(self.world.playing(), [1])
+
+    def test_a_chain_of_clips_cycles_and_wraps(self):
+        for i in range(3):
+            self.set(i, actions=["next"])
+        self.world.start(0)
+        seen = []
+        for _ in range(5):
+            self.world.advance(4.0)
+            seen.append(self.world.playing()[0])
+        self.assertEqual(seen, [1, 2, 0, 1, 2])
+
+    def test_the_action_fires_slightly_before_the_end_so_launch_quantization_lands_on_the_boundary(self):
+        self.set(0, actions=["next"])
+        self.world.start(0)
+        self.world.advance(3.9)
+        self.assertEqual(self.world.track.clip_slots[1].calls, [])
+        self.world.advance(0.05)                                    # inside the 40 ms lead (0.08 beats at 120 bpm)
+        self.assertEqual(self.world.track.clip_slots[1].calls, [("fire",)])
+
+    def test_every_action_picks_its_target(self):
+        cases = {"previous": 0, "first": 0, "last": 2, "again": 1, "other": 0}          # every case starts on clip 1
+        for action, expected in cases.items():
+            world = FollowWorld(self.script)
+            self.script._follow = {}
+            self.script._follow_random = lambda: 0.0
+            world.script._song = world.song
+            self.ok(action="set", address="tracks/0/slots/1/clip", actions=[action])
+            world.start(1)
+            world.advance(4.0)
+            self.assertEqual(world.playing(), [expected], action)
+
+    def test_any_and_other_use_the_random_source_and_other_never_repeats_the_clip(self):
+        self.script._follow_random = lambda: 0.99
+        self.set(0, actions=["any"])
+        self.world.start(0)
+        self.world.advance(4.0)
+        self.assertEqual(self.world.playing(), [2])
+        world = FollowWorld(self.script)
+        self.script._follow, self.script._follow_random = {}, lambda: 0.0
+        self.ok(action="set", address="tracks/0/slots/1/clip", actions=["other"])
+        world.start(1)
+        world.advance(4.0)
+        self.assertNotEqual(world.playing(), [1])
+
+    def test_stop_stops_the_track(self):
+        self.set(2, actions=["stop"])
+        self.world.start(2)
+        self.world.advance(4.0)
+        self.assertEqual(self.world.playing(), [])
+
+    def test_weights_choose_between_actions(self):
+        self.set(0, actions=[{"action": "again", "weight": 1}, {"action": "next", "weight": 3}])
+        self.script._follow_random = lambda: 0.1             # 0.1 * 4 = 0.4 < 1: the first action
+        self.world.start(0)
+        self.world.advance(4.0)
+        self.assertEqual(self.world.playing(), [0])
+        self.script._follow_random = lambda: 0.9             # 3.6 lands in the second
+        self.world.advance(4.0)
+        self.assertEqual(self.world.playing(), [1])
+
+    def test_again_repeats_once_per_pass(self):
+        self.set(0, actions=["again"])
+        self.world.start(0)
+        self.world.advance(12.0)
+        fires = self.world.track.clip_slots[0].calls
+        self.assertEqual(len(fires), 3)
+
+    def test_after_bars_and_beats_and_the_default_pass_length(self):
+        self.assertEqual(self.set(0, actions=["next"])["config"]["after_beats"], 4.0)
+        self.assertEqual(self.set(0, actions=["next"], after_bars=2)["config"]["after_beats"], 8.0)
+        self.assertEqual(self.set(0, actions=["next"], after_beats=1.5)["config"]["after_beats"], 1.5)
+        self.world.start(0)
+        self.world.advance(1.0)
+        self.assertEqual(self.world.playing(), [0])
+        self.world.advance(0.6)
+        self.assertEqual(self.world.playing(), [1])
+
+    def test_nothing_happens_while_the_transport_is_stopped_and_it_resumes_cleanly(self):
+        self.set(0, actions=["next"])
+        self.world.start(0)
+        self.world.song.is_playing = False
+        self.world.advance(10.0)
+        self.assertEqual(self.world.playing(), [0])
+        self.world.song.is_playing = True
+        self.world.advance(3.0)
+        self.assertEqual(self.world.playing(), [0])
+        self.world.advance(1.1)
+        self.assertEqual(self.world.playing(), [1])
+
+    def test_clips_without_a_configuration_are_left_alone(self):
+        self.set(1, actions=["next"])
+        self.world.start(0)
+        self.world.advance(20.0)
+        self.assertEqual(self.world.playing(), [0])
+
+    def test_a_deleted_clip_drops_its_entry_instead_of_firing(self):
+        self.set(0, actions=["next"])
+        self.world.start(0)
+        self.world.track.clip_slots[0].clip, self.world.track.clip_slots[0].has_clip = None, False
+        self.world.advance(1.0)
+        self.assertEqual(self.ok(action="status")["active"], 0)
+
+    def test_status_clear_and_validation(self):
+        self.set(0, actions=["next", {"action": "again", "weight": 2}], after_bars=1)
+        status = self.ok(action="status")
+        self.assertEqual((status["active"], status["entries"][0]["address"], status["entries"][0]["is_playing"]), (1, "tracks/0/slots/0/clip", False))
+        self.assertEqual(self.ok(action="clear", address="tracks/0/slots/0/clip")["cleared"], 1)
+        self.assertEqual(self.ok(action="clear", address="tracks/0/slots/0/clip")["cleared"], 0)
+        self.set(0, actions=["next"])
+        self.set(1, actions=["next"])
+        self.assertEqual(self.ok(action="clear")["cleared"], 2)
+        for params, code in [({"action": "set", "address": "tracks/0/slots/0/clip"}, "INVALID_ARGUMENT"), ({"action": "set", "address": "tracks/0/slots/0/clip", "actions": []}, "INVALID_ARGUMENT"),
+                             ({"action": "set", "address": "tracks/0/slots/0/clip", "actions": ["dance"]}, "INVALID_ARGUMENT"),
+                             ({"action": "set", "address": "tracks/0/slots/0/clip", "actions": [{"action": "next", "weight": 0}]}, "INVALID_ARGUMENT"),
+                             ({"action": "set", "address": "tracks/0/slots/0/clip", "actions": ["next"], "after_beats": 0.1}, "INVALID_ARGUMENT"),
+                             ({"action": "set", "address": "tracks/0/slots/0/clip", "actions": ["next"], "after_beats": 2, "after_bars": 1}, "INVALID_ARGUMENT"),
+                             ({"action": "set", "address": "tracks/0/slots/3/clip", "actions": ["next"]}, "NOT_FOUND"), ({"action": "set", "address": "tracks/0", "actions": ["next"]}, "INVALID_ARGUMENT"),
+                             ({"action": "explode"}, "INVALID_ARGUMENT")]:
+            self.assertEqual(self.code(**params), code, params)
+
+    def test_stopping_the_server_stops_the_engine(self):
+        self.set(0, actions=["next"])
+        self.script._stop_server()
+        self.assertEqual(self.script._follow, {})
+
+
 # ---------------------------------------------------------------- arrangement and recording
 
 class ArrClip(PropClip):

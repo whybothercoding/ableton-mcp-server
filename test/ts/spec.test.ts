@@ -234,3 +234,11 @@ test('device_action call and the device-specific vocabulary are declared', () =>
   assert.match(TOOL_SPEC_BY_NAME.get_device.description, /`specific` block/);
   assert.ok(TOOL_SPEC_BY_NAME.list_properties.inputSchema.properties.kind.enum.includes('sample'));
 });
+
+test('follow_actions is declared, described honestly, and not batchable', () => {
+  const spec = TOOL_SPEC_BY_NAME.follow_actions;
+  assert.deepEqual(spec.inputSchema.properties.action.enum, ['set', 'clear', 'status']);
+  assert.equal(validateArgs(spec.inputSchema, { action: 'set', address: 'tracks/0/slots/0/clip', actions: [{ action: 'next', weight: 2 }], after_bars: 1 }), null);
+  assert.match(spec.description, /memory only/);
+  assert.match(TOOL_SPEC_BY_NAME.batch.description, /follow_actions/);
+});
