@@ -1,7 +1,7 @@
 """Settings read at call time (tests patch these)."""
 import os
 
-SCRIPT_VERSION = "2.0.2"
+SCRIPT_VERSION = "2.0.3"
 DEFAULT_PORT = 9877
 HOST = "localhost"
 
