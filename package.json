@@ -1,8 +1,29 @@
 {
   "name": "ableton-mcp-server",
   "version": "2.0.2",
-  "description": "Stdio MCP server for Ableton Live via Remote Script TCP bridge",
+  "description": "MCP server for Ableton Live 12+: read, compose, mix and automate a Live Set through a Remote Script that runs inside Live",
+  "author": "IndieGoWeb Ltd",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/whybothercoding/ableton-mcp-server.git"
+  },
+  "homepage": "https://github.com/whybothercoding/ableton-mcp-server#readme",
+  "bugs": {
+    "url": "https://github.com/whybothercoding/ableton-mcp-server/issues"
+  },
   "main": "dist/index.js",
+  "files": [
+    "dist",
+    "remote-script",
+    "scripts",
+    "docs",
+    "reference",
+    "README.md",
+    "LICENSE",
+    "!**/__pycache__",
+    "!**/*.pyc",
+    "!**/.DS_Store"
+  ],
   "types": "dist/index.d.ts",
   "bin": {
     "ableton-mcp": "dist/index.js"
@@ -20,15 +41,19 @@
     "dump-api": "node scripts/dump-api.mjs",
     "build-registry": "node scripts/build-registry.mjs",
     "test:drift": "node scripts/dump-api.mjs --check",
-    "test:scenarios": "node test/scenarios/composition.mjs"
+    "test:scenarios": "node test/scenarios/composition.mjs",
+    "prepack": "npm run build"
   },
   "keywords": [
     "mcp",
     "ableton",
     "ableton-live",
-    "model-context-protocol"
+    "model-context-protocol",
+    "daw",
+    "midi",
+    "music",
+    "remote-script"
   ],
-  "author": "",
   "license": "MIT",
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.6.0",
@@ -38,5 +63,8 @@
     "@types/node": "^22.13.1",
     "tsx": "^4.19.2",
     "typescript": "^5.7.3"
+  },
+  "engines": {
+    "node": ">=18"
   }
 }
