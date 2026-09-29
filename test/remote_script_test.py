@@ -81,11 +81,17 @@ class FakeParam(object):
         object.__setattr__(self, key, val)
 
 
+class FakeEnvelopeEvent(object):
+    def __init__(self, time, value, control_coefficients=None):
+        self.time, self.value, self.control_coefficients = time, value, control_coefficients
+
+
 class FakeEnvelope(object):
-    """Events are (start, length, value); like Live, value_at_time(t) is the step with start < t <= end."""
+    """Steps are (start, length, value); like Live, value_at_time(t) is the step with start < t <= end. Breakpoints made with
+    create_event are joined by straight lines, and two at one time make a jump."""
 
     def __init__(self, parameter):
-        self.parameter, self.events = parameter, []
+        self.parameter, self.events, self.breakpoints = parameter, [], []
 
     def _carve(self, start, end):
         """Remove [start, end) from existing steps, splitting steps that straddle it."""
@@ -105,10 +111,29 @@ class FakeEnvelope(object):
         self._carve(start, start + length)
         self.events.append((start, length, value))
 
+    def create_event(self, event):
+        self.breakpoints.append((event.time, event.value))
+        self.breakpoints.sort(key=lambda b: b[0])            # stable: same-time events keep their creation order
+
     def delete_events_in_range(self, start, end):
         self._carve(start, end)
+        self.breakpoints = [b for b in self.breakpoints if not start - 1e-12 <= b[0] < end - 1e-12 and not (b[0] == end == start)]
+
+    def events_in_range(self, start, end):
+        return [types.SimpleNamespace(time=t, value=v) for t, v in self.breakpoints if start - 1e-12 <= t <= end + 1e-12] + \
+               [types.SimpleNamespace(time=t, value=v) for s0, l0, v0 in self.events for t, v in ((s0, v0), (s0 + l0, v0))
+                if start - 1e-12 <= t <= end + 1e-12]
 
     def value_at_time(self, t):
+        if self.breakpoints:
+            points = self.breakpoints
+            if t <= points[0][0]:
+                return points[0][1]
+            for i in range(len(points) - 1):
+                (t0, v0), (t1, v1) = points[i], points[i + 1]
+                if t0 <= t < t1:
+                    return v0 + (v1 - v0) * (t - t0) / (t1 - t0)
+            return points[-1][1]
         for start, length, value in self.events:
             if start < t <= start + length + 1e-12:
                 return value
@@ -491,6 +516,7 @@ def load_module():
         WarpMode=FakeEnum(beats=0, tones=1, texture=2, repitch=3, complex=4, rex=5, complex_pro=6, count=7))
     live.ClipSlot = types.SimpleNamespace(ClipSlotPlayingState=FakeEnum(stopped=0, started=1, recording=2))
     live.Device = types.SimpleNamespace(Device=FakeDevice, DeviceType=FakeEnum(undefined=0, instrument=1, audio_effect=2, midi_effect=4))
+    live.Envelope = types.SimpleNamespace(EnvelopeEvent=FakeEnvelopeEvent)
     live.Chain = types.SimpleNamespace(Chain=FakeChain)
     live.DrumPad = types.SimpleNamespace(DrumPad=FakePad)
     live.DeviceParameter = types.SimpleNamespace(DeviceParameter=FakeParam)
@@ -645,7 +671,7 @@ class AutomationTests(unittest.TestCase):
         self.freq = self.track.devices[0].parameters[1]
 
     def draw(self, **overrides):
-        params = {"track_index": 0, "clip_index": 0, "device_index": 0, "parameter_index": 1,
+        params = {"track_index": 0, "clip_index": 0, "device_index": 0, "parameter_index": 1, "style": "steps",
                   "points": [{"time": 0, "value": 0.2}, {"time": 8, "value": 0.9}]}
         params.update(overrides)
         return self.script._draw_automation(params)
@@ -2464,6 +2490,169 @@ class DeviceTests(unittest.TestCase):
         self.ok("get_device", address="tracks/0/devices/0")
         self.ok("set_properties", address="tracks/0/devices/0/parameters/1", properties={"value": 0.25})
         self.assertEqual(self.song.undo_log, ["begin", "end", "begin", "end"])
+
+
+# ---------------------------------------------------------------- automation by address, breakpoints
+
+class BreakpointMathTests(unittest.TestCase):
+    def points(self, *pairs, curve=None):
+        return [{"time": t, "value": v, "curve": curve, "order": i} for i, (t, v) in enumerate(pairs)]
+
+    def test_a_linear_segment_is_just_its_two_ends(self):
+        events = mod.curves._build_breakpoints(self.points((0, 0.2), (8, 0.9)), "linear", 0.25, 8.0, True)
+        self.assertEqual(events, [(0, 0.2), (8, 0.9)])
+
+    def test_hold_fills_the_clip_edges(self):
+        events = mod.curves._build_breakpoints(self.points((2, 0.2), (6, 0.9)), "linear", 0.25, 8.0, True)
+        self.assertEqual(events, [(0.0, 0.2), (2, 0.2), (6, 0.9), (8.0, 0.9)])
+        without = mod.curves._build_breakpoints(self.points((2, 0.2), (6, 0.9)), "linear", 0.25, 8.0, False)
+        self.assertEqual(without, [(2, 0.2), (6, 0.9)])
+
+    def test_curved_segments_get_a_breakpoint_every_resolution_and_hit_both_ends_exactly(self):
+        events = mod.curves._build_breakpoints(self.points((0, 0.0), (4, 1.0)), "ease_in", 1.0, 4.0, False)
+        self.assertEqual([t for t, v in events], [0, 1, 2, 3, 4])
+        self.assertEqual((events[0][1], events[-1][1]), (0.0, 1.0))
+        self.assertAlmostEqual(events[2][1], 0.25)                # ease_in: 0.5 progress -> 0.25
+        self.assertTrue(all(events[i][1] < events[i + 1][1] for i in range(4)))
+
+    def test_step_segments_hold_and_jump_with_two_breakpoints_at_one_time(self):
+        events = mod.curves._build_breakpoints(self.points((0, 0.2), (2, 0.8), (4, 0.4)), "step", 0.25, 4.0, True)
+        self.assertEqual(events, [(0, 0.2), (2, 0.2), (2, 0.8), (4, 0.8), (4, 0.4)])
+
+    def test_per_point_curves_and_coincident_points(self):
+        pts = self.points((0, 0.0), (2, 1.0), (2, 0.5), (4, 0.5))
+        pts[0]["curve"] = "step"
+        events = mod.curves._build_breakpoints(pts, "linear", 0.25, 4.0, False)
+        self.assertEqual(events, [(0, 0.0), (2, 0.0), (2, 1.0), (2, 0.5), (4, 0.5)])
+
+    def test_eval_follows_lines_and_takes_the_value_after_a_jump(self):
+        events = [(0, 0.2), (2, 0.2), (2, 0.8), (4, 0.8)]
+        f = mod.curves._eval_breakpoints
+        self.assertAlmostEqual(f(events, 1.0), 0.2)
+        self.assertAlmostEqual(f(events, 2.0), 0.8)
+        self.assertAlmostEqual(f(events, 3.9), 0.8)
+        ramp = [(0, 0.0), (4, 1.0)]
+        self.assertAlmostEqual(f(ramp, 1.0), 0.25)
+        self.assertAlmostEqual(f(ramp, 9.0), 1.0)
+        self.assertAlmostEqual(f(ramp, -1.0), 0.0)
+
+    def test_limits_and_errors(self):
+        with self.assertRaises(ValueError):
+            mod.curves._build_breakpoints(self.points((0, 0.2), (8, 0.9)), "wobble", 0.25, 8.0, True)
+        with self.assertRaises(ValueError):
+            mod.curves._build_breakpoints(self.points((0, 0.2), (8, 0.9)), "linear", 0, 8.0, True)
+        with self.assertRaises(ValueError):
+            mod.curves._build_breakpoints(self.points((3, 0.2)), "linear", 0.25, 8.0, False)
+        with self.assertRaises(ValueError):
+            mod.curves._build_breakpoints(self.points((0, 0.0), (8000, 1.0)), "smooth", 0.25, 8000.0, False)
+
+
+class AutomationAddressTests(unittest.TestCase):
+    setUp = DeviceTests.setUp
+    move = DeviceTests.move
+    run_command = DeviceTests.run_command
+    ok = DeviceTests.ok
+    code = DeviceTests.code
+
+    def prepare(self):
+        self.clip = FakeClip("auto", 8.0)
+        self.synth.clip_slots = [FakeSlot(self.clip)]
+        self.parameter = self.synth.devices[0].parameters[1]      # Freq 0..1
+        self.clip_address, self.parameter_address = "tracks/0/slots/0/clip", "tracks/0/devices/0/parameters/1"
+
+    def test_draw_by_address_makes_real_breakpoints_and_reads_them_back(self):
+        self.prepare()
+        result = self.ok("draw_automation", clip=self.clip_address, parameter=self.parameter_address,
+                         points=[{"time": 0, "value": 0.2}, {"time": 8, "value": 0.9}])
+        self.assertEqual((result["style"], result["breakpoints"], result["target"]), ("breakpoints", 2, {"parameter": self.parameter_address}))
+        self.assertEqual(self.clip.envelopes[id(self.parameter)].breakpoints, [(0.0, 0.2), (8.0, 0.9)])
+        for row in result["readback"]:
+            self.assertAlmostEqual(row["expected"], row["actual"], places=3)
+
+    def test_the_older_track_index_form_still_works_and_gets_breakpoints_too(self):
+        self.prepare()
+        self.ok("draw_automation", track_index=0, clip_index=0, device_index=0, parameter_index=1, points=[{"time": 0, "value": 0.1}, {"time": 4, "value": 0.5}])
+        self.assertEqual(len(self.clip.envelopes[id(self.parameter)].breakpoints), 3)      # 2 points + hold at the clip end
+
+    def test_steps_style_is_still_available(self):
+        self.prepare()
+        result = self.ok("draw_automation", clip=self.clip_address, parameter=self.parameter_address, style="steps", resolution=1,
+                         points=[{"time": 0, "value": 0.2}, {"time": 8, "value": 0.9}])
+        self.assertEqual(result["style"], "steps")
+        self.assertGreater(len(self.clip.envelopes[id(self.parameter)].events), 4)
+        self.assertEqual(self.code("draw_automation", clip=self.clip_address, parameter=self.parameter_address, style="wavy", points=[{"time": 0, "value": 0.2}]), "INVALID_ARGUMENT")
+
+    def test_merge_rewrites_only_the_drawn_range(self):
+        self.prepare()
+        self.ok("draw_automation", clip=self.clip_address, parameter=self.parameter_address, points=[{"time": 0, "value": 0.1}, {"time": 8, "value": 0.1}])
+        self.ok("draw_automation", clip=self.clip_address, parameter=self.parameter_address, mode="merge", hold=False,
+                points=[{"time": 2, "value": 0.9}, {"time": 4, "value": 0.9}])
+        points = self.clip.envelopes[id(self.parameter)].breakpoints
+        # the old value is pinned at both edges of the drawn range, so a jump (two breakpoints at one time) joins old and new
+        self.assertEqual(points, [(0.0, 0.1), (2.0, 0.1), (2.0, 0.9), (4.0, 0.9), (4.0, 0.1), (8.0, 0.1)])
+
+    def test_address_errors_are_specific(self):
+        self.prepare()
+        pts = [{"time": 0, "value": 0.2}]
+        self.assertEqual(self.code("draw_automation", clip="tracks/0", parameter=self.parameter_address, points=pts), "INVALID_ARGUMENT")
+        self.assertEqual(self.code("draw_automation", clip=self.clip_address, parameter="tracks/0/devices/0", points=pts), "INVALID_ARGUMENT")
+        self.assertEqual(self.code("draw_automation", clip=self.clip_address, parameter="tracks/0/devices/0/parameters/99", points=pts), "OUT_OF_RANGE")
+        self.assertEqual(self.code("draw_automation", clip="tracks/0/slots/2/clip", parameter=self.parameter_address, points=pts), "OUT_OF_RANGE")
+
+    def test_clear_by_address_one_parameter_or_all(self):
+        self.prepare()
+        self.ok("draw_automation", clip=self.clip_address, parameter=self.parameter_address, points=[{"time": 0, "value": 0.2}, {"time": 4, "value": 0.6}])
+        one = self.ok("clear_automation", clip=self.clip_address, parameter=self.parameter_address)
+        self.assertEqual((one["had_envelope"], one["cleared"], one["clip_has_envelopes"]), (True, "Freq", False))
+        self.ok("draw_automation", clip=self.clip_address, parameter=self.parameter_address, points=[{"time": 0, "value": 0.2}, {"time": 4, "value": 0.6}])
+        all_ = self.ok("clear_automation", clip=self.clip_address)
+        self.assertEqual((all_["cleared"], all_["clip_has_envelopes"]), ("all", False))
+
+    def test_get_automation_lists_envelopes_with_breakpoints_in_the_parameters_units(self):
+        self.prepare()
+        self.clip.automation_envelopes = []
+        self.ok("draw_automation", clip=self.clip_address, parameter=self.parameter_address, points=[{"time": 0, "value": 0.2}, {"time": 4, "value": 0.8}, {"time": 6, "value": 0.8}],
+                curve="step")
+        self.clip.automation_envelopes = [self.clip.envelopes[id(self.parameter)]]
+        got = self.ok("get_automation", clip=self.clip_address)
+        self.assertEqual((got["clip_length"], got["has_envelopes"], len(got["envelopes"])), (8.0, True, 1))
+        env = got["envelopes"][0]
+        self.assertEqual((env["parameter"], env["name"], env["min"], env["max"]), (self.parameter_address, "Freq", 0.0, 1.0))
+        by_time = dict((b["time"], b) for b in env["breakpoints"])
+        self.assertAlmostEqual(by_time[0.0]["value"], 0.2)
+        self.assertAlmostEqual(by_time[4.0]["value"], 0.8)
+        self.assertAlmostEqual(by_time[4.0]["jump_from"], 0.2)          # a step: the value jumps at beat 4
+        one = self.ok("get_automation", clip=self.clip_address, parameter=self.parameter_address)
+        self.assertEqual(len(one["envelopes"]), 1)
+        none = self.ok("get_automation", clip=self.clip_address, parameter="tracks/0/devices/0/parameters/2")
+        self.assertEqual(none["envelopes"], [])
+        capped = self.ok("get_automation", clip=self.clip_address, max_points=2)["envelopes"][0]
+        self.assertEqual((len(capped["breakpoints"]), capped["truncated"], capped["total_breakpoints"] > 2), (2, True, True))
+        self.assertEqual(self.code("get_automation", clip=self.clip_address, max_points=1), "INVALID_ARGUMENT")
+
+    def test_re_enable_automation_for_one_parameter_or_the_whole_song(self):
+        self.prepare()
+        calls = []
+        self.parameter.re_enable_automation = lambda: (calls.append("param"), setattr(self.parameter, "automation_state", 1))
+        self.parameter.automation_state = 2
+        out = self.ok("device_action", action="re_enable_automation", address=self.parameter_address)
+        self.assertEqual((out["automation_state"], calls), (1, ["param"]))
+        self.assertEqual(self.code("device_action", action="re_enable_automation", address=self.parameter_address), "UNAVAILABLE")     # no longer overridden
+        self.song.re_enable_automation = lambda: calls.append("song")
+        self.ok("device_action", action="re_enable_automation", address="song")
+        self.assertEqual(calls, ["param", "song"])
+        self.assertEqual(self.code("device_action", action="re_enable_automation", address="tracks/0"), "INVALID_ARGUMENT")
+
+    def test_ramps_by_address_replace_and_cancel_each_other_however_the_parameter_was_named(self):
+        self.prepare()
+        self.ok("ramp_parameter", parameter=self.parameter_address, to=0.9, seconds=5)
+        self.ok("ramp_parameter", parameter=self.parameter_address, to=0.1, seconds=5)
+        self.assertEqual(len(self.script._ramps), 1)
+        cancelled = self.ok("cancel_ramps", parameter=self.parameter_address)
+        self.assertEqual((cancelled["cancelled"], cancelled["active_ramps"]), (1, 0))
+        self.ok("ramp_parameter", parameter=self.parameter_address, to=0.9, seconds=5)
+        self.assertEqual(self.ok("cancel_ramps")["cancelled"], 1)
+        self.assertEqual(self.code("ramp_parameter", parameter="tracks/0", to=0.9, seconds=1), "INVALID_ARGUMENT")
 
 
 # ---------------------------------------------------------------- routing and mixer state

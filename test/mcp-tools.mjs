@@ -69,7 +69,9 @@ for (const track of session.tracks) {
 assert(T !== undefined, 'no MIDI track with a device and a free slot');
 const original = P.value;
 const span = P.max - P.min;
-const target = { track_index: T, device_index: D, parameter_index: P.index };
+const parameterAddress = `tracks/${T}/devices/${D}/parameters/${P.index}`;
+const target = { parameter: parameterAddress };
+const clipTarget = `tracks/${T}/slots/${S}/clip`;
 console.log(`Track ${T}, parameter "${P.name}", scratch slot ${S}\n`);
 
 try {
@@ -78,51 +80,57 @@ try {
   console.log('Tool listing');
   const { tools } = await client.listTools();
   const byName = Object.fromEntries(tools.map((t) => [t.name, t]));
-  await check('all four new tools are listed exactly once with object schemas', async () => {
+  await check('the automation tools are listed exactly once with object schemas', async () => {
     assert(new Set(tools.map((t) => t.name)).size === tools.length, 'duplicate tool names');
-    for (const name of ['draw_automation', 'clear_automation', 'ramp_parameter', 'cancel_ramps']) {
+    for (const name of ['draw_automation', 'get_automation', 'clear_automation', 'ramp_parameter', 'cancel_ramps']) {
       assert(byName[name], `${name} missing`);
       assert(byName[name].inputSchema.type === 'object', `${name} schema is not an object`);
       assert(byName[name].description.length > 40, `${name} has no useful description`);
     }
   });
-  await check('required arguments are declared', async () => {
-    assert(JSON.stringify(byName.draw_automation.inputSchema.required) === JSON.stringify(['track_index', 'clip_index', 'points']), 'draw_automation.required');
-    assert(JSON.stringify(byName.clear_automation.inputSchema.required) === JSON.stringify(['track_index', 'clip_index']), 'clear_automation.required');
-    assert(JSON.stringify(byName.ramp_parameter.inputSchema.required) === JSON.stringify(['track_index', 'to']), 'ramp_parameter.required');
+  await check('required arguments are declared and read-only/destructive hints are right', async () => {
+    assert(JSON.stringify(byName.draw_automation.inputSchema.required) === JSON.stringify(['clip', 'parameter', 'points']), 'draw_automation.required');
+    assert(JSON.stringify(byName.get_automation.inputSchema.required) === JSON.stringify(['clip']), 'get_automation.required');
+    assert(JSON.stringify(byName.clear_automation.inputSchema.required) === JSON.stringify(['clip']), 'clear_automation.required');
+    assert(JSON.stringify(byName.ramp_parameter.inputSchema.required) === JSON.stringify(['parameter', 'to']), 'ramp_parameter.required');
     assert(byName.cancel_ramps.inputSchema.required === undefined, 'cancel_ramps takes no required args');
+    assert(byName.get_automation.annotations.readOnlyHint === true && byName.clear_automation.annotations.destructiveHint === true, 'annotations');
   });
   await check('point schema and curve enums are exposed', async () => {
     const point = byName.draw_automation.inputSchema.properties.points.items;
     assert(JSON.stringify(point.required) === JSON.stringify(['time', 'value']), 'point.required');
     assert(byName.draw_automation.inputSchema.properties.curve.enum.includes('step'), 'draw curve enum');
+    assert(JSON.stringify(byName.draw_automation.inputSchema.properties.style.enum) === JSON.stringify(['breakpoints', 'steps']), 'style enum');
     assert(!byName.ramp_parameter.inputSchema.properties.curve.enum.includes('step'), 'ramp curve must not offer step');
   });
 
   console.log('\nTool calls');
-  await check('draw_automation via MCP with a device parameter', async () => {
+  await check('draw_automation via MCP with a device parameter writes real breakpoints and reads them back', async () => {
     const out = await ok('draw_automation', {
-      ...target, clip_index: S, points: [{ time: 0, value: P.min + 0.2 * span }, { time: 4, value: P.min + 0.8 * span }], curve: 'smooth'
+      ...target, clip: clipTarget, points: [{ time: 0, value: P.min + 0.2 * span }, { time: 4, value: P.min + 0.8 * span }], curve: 'smooth'
     });
-    assert(out.parameter === P.name && out.steps > 10 && out.mode === 'replace', JSON.stringify(out));
-    for (const row of out.readback) near(row.actual, row.expected, 1e-4 * span, `readback @${row.time}`);
+    assert(out.parameter === P.name && out.style === 'breakpoints' && out.breakpoints > 5 && out.mode === 'replace', JSON.stringify(out));
+    for (const row of out.readback) near(row.actual, row.expected, 1e-3 * span, `readback @${row.time}`);
+    const back = await ok('get_automation', { clip: clipTarget });
+    assert(back.has_envelopes && back.envelopes.length === 1 && back.envelopes[0].parameter === parameterAddress, JSON.stringify(back).slice(0, 300));
+    near(back.envelopes[0].breakpoints[0].value, P.min + 0.2 * span, 1e-3 * span, 'first breakpoint');
+    near(back.envelopes[0].breakpoints.at(-1).value, P.min + 0.8 * span, 1e-3 * span, 'last breakpoint');
   });
-  await check('draw_automation via MCP on the mixer, optional device fields omitted', async () => {
-    const out = await ok('draw_automation', { track_index: T, clip_index: S, mixer_parameter: 'volume', points: [{ time: 0, value: 0.4 }, { time: 4, value: 0.7 }] });
-    assert(out.parameter === 'Volume' || /vol/i.test(out.parameter), out.parameter);
-    assert(out.target.mixer_parameter === 'volume', JSON.stringify(out.target));
+  await check('draw_automation via MCP on the mixer by address, in steps style', async () => {
+    const out = await ok('draw_automation', { clip: clipTarget, parameter: `tracks/${T}/mixer/volume`, style: 'steps', points: [{ time: 0, value: 0.4 }, { time: 4, value: 0.7 }] });
+    assert(/vol/i.test(out.parameter) && out.style === 'steps' && out.steps > 4, JSON.stringify(out));
   });
   await check('draw_automation merge and hold=false through MCP', async () => {
     const out = await ok('draw_automation', {
-      ...target, clip_index: S, mode: 'merge', hold: false, curve: 'step',
+      ...target, clip: clipTarget, mode: 'merge', hold: false, curve: 'step',
       points: [{ time: 1, value: P.min + 0.5 * span }, { time: 3, value: P.min + 0.5 * span }]
     });
     assert(out.mode === 'merge', JSON.stringify(out));
   });
   await check('clear_automation via MCP: one parameter, then everything', async () => {
-    const one = await ok('clear_automation', { ...target, clip_index: S });
+    const one = await ok('clear_automation', { ...target, clip: clipTarget });
     assert(one.had_envelope === true && one.cleared === P.name, JSON.stringify(one));
-    const all = await ok('clear_automation', { track_index: T, clip_index: S });
+    const all = await ok('clear_automation', { clip: clipTarget });
     assert(all.cleared === 'all' && all.clip_has_envelopes === false, JSON.stringify(all));
   });
   await check('ramp_parameter via MCP in beats, with optional fields omitted', async () => {
@@ -141,13 +149,16 @@ try {
     assert(all.cancelled === 1 && all.active_ramps === 0, JSON.stringify(all));
   });
   await check('errors come back as tool errors with the reason', async () => {
-    await fails('draw_automation', { ...target, clip_index: S }, 'non-empty');
-    await fails('draw_automation', { ...target, clip_index: S, points: [{ time: 99, value: 0 }] }, 'outside the clip');
-    await fails('draw_automation', { track_index: 999, clip_index: S, mixer_parameter: 'volume', points: [{ time: 0, value: 0.5 }] }, 'Track index out of range');
-    await fails('draw_automation', { ...target, clip_index: S + 1, points: [{ time: 0, value: P.min }] }, 'empty');
-    await fails('clear_automation', { track_index: T }, 'clip_index');
+    await fails('draw_automation', { ...target, clip: clipTarget }, "missing required argument 'points'");
+    await fails('draw_automation', { ...target, clip: clipTarget, points: [] }, 'non-empty');
+    await fails('draw_automation', { ...target, clip: clipTarget, points: [{ time: 99, value: 0 }] }, 'outside the clip');
+    await fails('draw_automation', { clip: clipTarget, parameter: 'tracks/999/mixer/volume', points: [{ time: 0, value: 0.5 }] }, 'out of range');
+    await fails('draw_automation', { ...target, clip: `tracks/${T}/slots/${S + 1}/clip`, points: [{ time: 0, value: P.min }] }, 'empty');
+    await fails('draw_automation', { clip: `tracks/${T}`, parameter: parameterAddress, points: [{ time: 0, value: P.min }] }, 'address of a clip');
+    await fails('draw_automation', { clip: clipTarget, parameter: `tracks/${T}`, points: [{ time: 0, value: P.min }] }, 'address of a device or mixer parameter');
+    await fails('clear_automation', {}, "missing required argument 'clip'");
     await fails('ramp_parameter', { ...target, to: P.max }, 'exactly one');
-    await fails('ramp_parameter', { ...target, seconds: 1 }, 'to must');
+    await fails('ramp_parameter', { ...target, seconds: 1 }, "missing required argument 'to'");
     await fails('ramp_parameter', { ...target, to: P.max + 1000, seconds: 1 }, 'to must');
   });
   await check('get_health lists the new capabilities', async () => {
@@ -331,12 +342,9 @@ try {
 
   console.log('\nTrack types, device paths and parameter details');
   await check('schemas expose track_type and device_path where they apply', async () => {
-    for (const name of ['get_track_detail', 'load_browser_item', 'ramp_parameter', 'cancel_ramps', 'draw_automation', 'clear_automation']) {
+    for (const name of ['get_track_detail', 'load_browser_item']) {
       const prop = byName[name].inputSchema.properties.track_type;
       assert(prop && JSON.stringify(prop.enum) === JSON.stringify(['track', 'return', 'master']), `${name} lacks a track_type enum`);
-    }
-    for (const name of ['ramp_parameter', 'cancel_ramps', 'draw_automation', 'clear_automation']) {
-      assert(byName[name].inputSchema.properties.device_path?.type === 'array', `${name} lacks device_path`);
     }
   });
   await check('get_device returns quantized labels, display strings and parameter addresses', async () => {
@@ -368,11 +376,10 @@ try {
       assert(dev.address === 'returns/0/devices/0', JSON.stringify(dev).slice(0, 120));
       const prm = dev.parameters.find((p) => p.index > 0 && p.max > p.min && !p.is_quantized && p.is_enabled);
       const rspan = prm.max - prm.min;
-      const rt = { track_index: 0, track_type: 'return', device_index: 0, parameter_index: prm.index };
       try {
         const set = await ok('set_properties', { address: prm.address, properties: { value: prm.min + 0.25 * rspan } });
         near(set.applied.value.to, prm.min + 0.25 * rspan, 1e-4 * rspan, 'set value');
-        await ok('ramp_parameter', { ...rt, to: prm.min + 0.5 * rspan, seconds: 0.2 });
+        await ok('ramp_parameter', { parameter: prm.address, to: prm.min + 0.5 * rspan, seconds: 0.2 });
         await sleep(500);
         const detail = await ok('get_track_detail', { track_index: 0, track_type: 'return' });
         assert(detail.track_type === 'return' && detail.devices.length >= 1, JSON.stringify(detail).slice(0, 160));
@@ -387,9 +394,9 @@ try {
     await fails('set_properties', { address: 'master', properties: { mute: true } }, 'mute');
     await fails('get_track_detail', { track_index: 99, track_type: 'return' }, 'Return track index out of range');
     const currentVolume = (await ok('describe_set', { include_clips: false })).master.volume;
-    const volume = await tool('ramp_parameter', { track_index: 0, track_type: 'master', mixer_parameter: 'volume', to: currentVolume, seconds: 0.05 });
+    const volume = await tool('ramp_parameter', { parameter: 'master/mixer/volume', to: currentVolume, seconds: 0.05 });
     assert(!volume.isError, volume.text);
-    const cancelled = await ok('cancel_ramps', { track_index: 0, track_type: 'master', mixer_parameter: 'volume' });
+    const cancelled = await ok('cancel_ramps', { parameter: 'master/mixer/volume' });
     assert(typeof cancelled.cancelled === 'number', JSON.stringify(cancelled));
     await ok('cancel_ramps');
   });
@@ -401,7 +408,7 @@ try {
   });
 } finally {
   await tool('cancel_ramps');
-  await tool('clear_automation', { track_index: T, clip_index: S });
+  await tool('clear_automation', { clip: clipTarget });
   await tool('delete', { address: `tracks/${T}/slots/${S}/clip`, expect: { name: 'MCP TOOL TEST' } });
   await tool('set_properties', { address: `tracks/${T}/devices/${D}/parameters/${P.index}`, properties: { value: original } });
   await client.close();

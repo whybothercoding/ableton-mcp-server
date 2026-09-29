@@ -191,3 +191,15 @@ test('routing tool: schema and annotations', () => {
   assert.match(validateArgs(routing.inputSchema, { address: 'tracks/0', direction: 'sideways' }) ?? '', /direction must be one of: input, output/);
   assert.equal(validateArgs(routing.inputSchema, { address: 'tracks/0', direction: 'input', action: 'set', type: 'Master', allow_feedback: true }), null);
 });
+
+test('automation tools take addresses: schemas, annotations and batchability', () => {
+  const draw = TOOL_SPEC_BY_NAME.draw_automation;
+  assert.deepEqual(draw.inputSchema.required, ['clip', 'parameter', 'points']);
+  assert.deepEqual(draw.inputSchema.properties.style.enum, ['breakpoints', 'steps']);
+  assert.equal(TOOL_SPEC_BY_NAME.get_automation.annotations.readOnlyHint, true);
+  assert.equal(TOOL_SPEC_BY_NAME.clear_automation.annotations.destructiveHint, true);
+  assert.deepEqual(TOOL_SPEC_BY_NAME.ramp_parameter.inputSchema.required, ['parameter', 'to']);
+  assert.equal(TOOL_SPEC_BY_NAME.cancel_ramps.inputSchema.required, undefined);
+  assert.match(validateArgs(draw.inputSchema, { clip: 'x', parameter: 'y', points: [{ time: 0 }] }) ?? '', /points\[0\]: missing required argument 'value'/);
+  assert.match(TOOL_SPEC_BY_NAME.batch.description, /draw_automation, get_automation, clear_automation/);
+});

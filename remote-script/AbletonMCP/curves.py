@@ -84,3 +84,65 @@ def _build_steps(points, default_curve, resolution, clip_length, hold):
     if len(steps) > MAX_AUTOMATION_STEPS:
         raise ValueError("{0} steps exceeds the {1} limit; use a larger resolution".format(len(steps), MAX_AUTOMATION_STEPS))
     return steps
+
+
+def _build_breakpoints(points, default_curve, resolution, clip_length, hold):
+    """Turn normalized points into envelope breakpoints [(time, value)], joined by straight lines in Live.
+
+    A linear segment is just its two ends; smooth/ease segments get a breakpoint every `resolution` beats (Live draws
+    straight lines between breakpoints, so this is a smooth curve, unlike a staircase). A step segment holds its start value
+    up to the next point, where two breakpoints at the same time make the jump. With hold, the clip's edges are filled."""
+    if default_curve not in CURVES:
+        raise ValueError("curve must be one of: " + ", ".join(CURVES))
+    if not _is_number(resolution) or resolution <= 0:
+        raise ValueError("resolution must be a positive number of beats")
+    events = []
+
+    def add(time, value):
+        if events and abs(events[-1][0] - time) <= _EPS and abs(events[-1][1] - value) <= _EPS:
+            return
+        events.append((time, value))
+
+    first, last = points[0], points[-1]
+    if hold and first["time"] > _EPS:
+        add(0.0, first["value"])
+    add(first["time"], first["value"])
+    for i in range(len(points) - 1):
+        a, b = points[i], points[i + 1]
+        segment = b["time"] - a["time"]
+        curve = a["curve"] or default_curve
+        if segment <= _EPS:
+            add(b["time"], b["value"])
+            continue
+        if curve == "step":
+            add(b["time"], a["value"])
+            add(b["time"], b["value"])
+            continue
+        if curve != "linear":
+            count = max(1, int(math.ceil(segment / resolution - 1e-9)))
+            for k in range(1, count):
+                progress = k / float(count)
+                add(a["time"] + segment * progress, a["value"] + (b["value"] - a["value"]) * _ease(curve, progress))
+        add(b["time"], b["value"])
+    if hold and clip_length - last["time"] > _EPS:
+        add(clip_length, last["value"])
+    if len(events) < 2 and not hold:
+        raise ValueError("nothing to draw: give at least two points at different times, or one point with hold enabled")
+    if len(events) < 2:
+        events.append((min(clip_length, events[0][0] + max(resolution, _EPS)), events[0][1]))
+    if len(events) > MAX_AUTOMATION_STEPS:
+        raise ValueError("{0} breakpoints exceeds the {1} limit; use a larger resolution".format(len(events), MAX_AUTOMATION_STEPS))
+    return events
+
+
+def _eval_breakpoints(events, time):
+    """The value a piecewise-linear breakpoint list has at `time` (at a jump: the value after it)."""
+    if time <= events[0][0]:
+        return events[0][1]
+    for i in range(len(events) - 1):
+        (t0, v0), (t1, v1) = events[i], events[i + 1]
+        if t0 - _EPS <= time < t1 - _EPS or (abs(t1 - t0) <= _EPS and time <= t1 + _EPS and i == len(events) - 2):
+            if t1 - t0 <= _EPS:
+                return v1
+            return v0 + (v1 - v0) * (time - t0) / (t1 - t0)
+    return events[-1][1]

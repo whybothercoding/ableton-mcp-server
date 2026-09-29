@@ -7,7 +7,7 @@ import { validateArgs } from './schema.js';
 import type { BridgeClient, ToolSpec } from './spec.js';
 
 /** Tools that are not one undoable edit (playback, launching, undo) or that already combine several calls. */
-const REFUSED = new Set(['transport', 'launch', 'history', 'batch']);
+const REFUSED = new Set(['transport', 'launch', 'history', 'batch', 'ramp_parameter', 'cancel_ramps']);
 
 const batchable = (specs: Record<string, ToolSpec>): string[] =>
   Object.values(specs)
@@ -42,8 +42,8 @@ export const BATCH_SPECS: ToolSpec[] = [
       "Later ops can use earlier results: '$0.address' is the address op 0 returned (a whole-string reference keeps its type, e.g. a number; inside a longer string it is inserted as text; '$1.ids[0]' indexes lists). " +
       "Example: [{tool:'create',args:{kind:'midi_track',name:'Bass'}},{tool:'device_action',args:{action:'insert',address:'$0.address',name:'Drift'}}]. " +
       "`on_error`: stop (default; ops already applied stay applied as one undo step, later ones do not run) or continue. A failure returns BATCH_FAILED with every op's outcome. Up to 100 ops. " +
-      "Batchable tools: " + 'get_properties, set_properties, list_properties, describe_set, get_capabilities, get_notes, get_device, create, duplicate, delete, write_notes, edit_notes, clip_action, device_action, routing' + ". " +
-      "Not batchable: transport, launch, history (not undoable edits), transform_notes and generate_notes (already combine calls), and the older automation, ramp and browser tools.",
+      "Batchable tools: " + 'get_properties, set_properties, list_properties, describe_set, get_capabilities, get_notes, get_device, create, duplicate, delete, write_notes, edit_notes, clip_action, device_action, routing, draw_automation, get_automation, clear_automation' + ". " +
+      "Not batchable: transport, launch, history, ramp_parameter, cancel_ramps (not undoable edits), transform_notes and generate_notes (already combine calls), and the older browser tools.",
     inputSchema: {
       type: 'object',
       properties: {

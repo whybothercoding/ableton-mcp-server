@@ -365,14 +365,14 @@ export const TOOL_SPECS: ToolSpec[] = [
       "Change device structure. `action`: insert (`address` of a track, return track, master or rack chain; `name` as in Live's browser, e.g. 'EQ Eight', 'Drum Rack', 'Audio Effect Rack'; optional `position`, default end; Live refuses bad placements " +
       "such as effects before an instrument and says why), delete (`address` of a device; `expect` {name} mandatory), duplicate (a device; the copy goes right after it), move (`address` of a device, `to` a track or chain, optional `position`; returns where it landed), " +
       "save_ab (store the current preset in the A/B compare slot), and for racks: insert_chain (optional `position`), add_macro, remove_macro, randomize_macros, store_variation, recall_variation (`index` selects the variation first; else the selected one; `which` last = the last recalled), delete_variation (`index` or the selected one; Live does nothing when none is selected, so this refuses), " +
-      "copy_pad (Drum Rack: `from_note` and `to_note`), clear_pad (`address` of a drum pad, e.g. 'tracks/1/devices/0/drum_pads/36'; `expect` {name} mandatory). Returns the new address where one is created. One undo step. DESTRUCTIVE for delete, clear_pad, remove_macro, delete_variation.",
+      "re_enable_automation (`address` of a parameter that a manual change overrode, or 'song' for all: hands it back to its automation), copy_pad (Drum Rack: `from_note` and `to_note`), clear_pad (`address` of a drum pad, e.g. 'tracks/1/devices/0/drum_pads/36'; `expect` {name} mandatory). Returns the new address where one is created. One undo step. DESTRUCTIVE for delete, clear_pad, remove_macro, delete_variation.",
     inputSchema: {
       type: 'object',
       properties: {
         address: { type: 'string', description: 'Track/chain (insert), device (delete, duplicate, move, save_ab, rack actions) or drum pad (clear_pad)' },
         action: {
           type: 'string',
-          enum: ['insert', 'delete', 'duplicate', 'move', 'save_ab', 'insert_chain', 'add_macro', 'remove_macro', 'randomize_macros', 'store_variation', 'recall_variation', 'delete_variation', 'copy_pad', 'clear_pad'],
+          enum: ['insert', 'delete', 'duplicate', 'move', 'save_ab', 'insert_chain', 'add_macro', 'remove_macro', 'randomize_macros', 'store_variation', 'recall_variation', 'delete_variation', 'copy_pad', 'clear_pad', 're_enable_automation'],
           description: 'What to do'
         },
         name: { type: 'string', description: 'insert: device name' },
@@ -410,6 +410,103 @@ export const TOOL_SPECS: ToolSpec[] = [
     },
     annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: true },
     bridge: { command: 'routing' }
+  },
+  {
+    name: 'draw_automation',
+    description:
+      "Draw a clip automation envelope for a device or mixer parameter, inside Live (tempo-locked, sample-accurate). `clip`: a Session clip address ('tracks/2/slots/0/clip'); `parameter`: a parameter address on that clip's track " +
+      "('tracks/2/devices/0/parameters/5', 'tracks/2/mixer/volume', 'tracks/2/mixer/sends/0'). `points`: [{time, value, curve?}] with time in beats from clip start and value in the parameter's own units (get_device shows min/max). " +
+      "The default `style` 'breakpoints' writes real envelope breakpoints (straight lines between them; smooth/ease curves get a breakpoint every `resolution` beats, default 0.25; step curves make jumps), so it is editable in Live and light. " +
+      "'steps' writes a staircase of fine steps instead (`resolution` default 0.125). `curve`: linear (default), step, smooth, ease_in, ease_out (a point's own curve shapes the segment after it). " +
+      "`mode` replace (default) rebuilds the parameter's envelope, merge rewrites only the drawn range (breakpoints outside connect to it by straight lines). With `hold` (default true) the clip edges are filled with the first/last value. " +
+      "The result includes a readback of Live's stored values. Arrangement clips have no envelopes in Live's API. One undo step per call.",
+    inputSchema: {
+      type: 'object',
+      properties: {
+        clip: { type: 'string', description: "Session clip address, e.g. 'tracks/2/slots/0/clip'" },
+        parameter: { type: 'string', description: "Parameter address, e.g. 'tracks/2/devices/0/parameters/5' or 'tracks/2/mixer/volume'" },
+        points: {
+          type: 'array',
+          description: 'Breakpoints, e.g. [{"time":0,"value":0.2},{"time":8,"value":0.9}]',
+          items: {
+            type: 'object',
+            properties: {
+              time: { type: 'number', description: 'Beats from clip start' },
+              value: { type: 'number', description: "Value in the parameter's units" },
+              curve: { type: 'string', enum: ['linear', 'step', 'smooth', 'ease_in', 'ease_out'], description: 'Curve to the next point' }
+            },
+            required: ['time', 'value']
+          }
+        },
+        curve: { type: 'string', enum: ['linear', 'step', 'smooth', 'ease_in', 'ease_out'], description: "Default curve between points (default 'linear')" },
+        style: { type: 'string', enum: ['breakpoints', 'steps'], description: "Default 'breakpoints'" },
+        resolution: { type: 'number', description: 'Beats between generated breakpoints (or steps) on curved segments' },
+        mode: { type: 'string', enum: ['replace', 'merge'], description: "'replace' (default) or 'merge'" },
+        hold: { type: 'boolean', description: 'Fill the clip before the first and after the last point (default true)' }
+      },
+      required: ['clip', 'parameter', 'points']
+    },
+    annotations: { readOnlyHint: false, destructiveHint: true, idempotentHint: false },
+    bridge: { command: 'draw_automation' }
+  },
+  {
+    name: 'get_automation',
+    description:
+      "Read a Session clip's automation: every envelope on the clip (or only `parameter`'s) as breakpoints in the parameter's own units: {time, value, jump_from?} (`jump_from` marks a step: the value just before it), " +
+      "with the parameter's address, name and range. `max_points` caps each envelope (default 500; `truncated` says if more exist). Use it to inspect what a clip already does before drawing over it.",
+    inputSchema: {
+      type: 'object',
+      properties: {
+        clip: { type: 'string', description: "Session clip address, e.g. 'tracks/2/slots/0/clip'" },
+        parameter: { type: 'string', description: 'Only this parameter' },
+        max_points: { type: 'number', description: 'Breakpoints per envelope (default 500)' }
+      },
+      required: ['clip']
+    },
+    annotations: { readOnlyHint: true, destructiveHint: false, idempotentHint: true },
+    bridge: { command: 'get_automation' }
+  },
+  {
+    name: 'clear_automation',
+    description:
+      "Clear one parameter's envelope on a Session clip (`clip` + `parameter`), or every envelope on the clip when no parameter is given. Returns whether an envelope existed. One undo step.",
+    inputSchema: {
+      type: 'object',
+      properties: {
+        clip: { type: 'string', description: "Session clip address, e.g. 'tracks/2/slots/0/clip'" },
+        parameter: { type: 'string', description: 'Parameter address; omit to clear all envelopes on the clip' }
+      },
+      required: ['clip']
+    },
+    annotations: { readOnlyHint: false, destructiveHint: true, idempotentHint: false },
+    bridge: { command: 'clear_automation' }
+  },
+  {
+    name: 'ramp_parameter',
+    description:
+      "Sweep a device or mixer parameter (`parameter` address) to `to` over `beats` or `seconds`, driven inside Live at about 100 updates per second. For live gestures; use draw_automation for motion that belongs to a looping clip. " +
+      "`from` defaults to the current value; `curve`: linear, smooth, ease_in, ease_out. A new ramp on the same parameter replaces the old one. Values are in the parameter's own units. Ramps are not undoable and cannot run inside a batch.",
+    inputSchema: {
+      type: 'object',
+      properties: {
+        parameter: { type: 'string', description: "Parameter address, e.g. 'tracks/2/devices/0/parameters/5' or 'tracks/2/mixer/volume'" },
+        to: { type: 'number', description: 'Target value' },
+        from: { type: 'number', description: 'Start value (default: current)' },
+        beats: { type: 'number', description: 'Duration in beats (give beats or seconds)' },
+        seconds: { type: 'number', description: 'Duration in seconds (0.01 to 3600)' },
+        curve: { type: 'string', enum: ['linear', 'smooth', 'ease_in', 'ease_out'], description: 'Default linear' }
+      },
+      required: ['parameter', 'to']
+    },
+    annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: false },
+    bridge: { command: 'ramp_parameter' }
+  },
+  {
+    name: 'cancel_ramps',
+    description: 'Cancel the ramp on one `parameter`, or every active ramp when no parameter is given. The parameter stays wherever the ramp had taken it.',
+    inputSchema: { type: 'object', properties: { parameter: { type: 'string', description: 'Parameter address; omit to cancel all' } } },
+    annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: true },
+    bridge: { command: 'cancel_ramps' }
   },
   {
     name: 'list_properties',

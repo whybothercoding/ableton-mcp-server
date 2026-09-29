@@ -8,10 +8,12 @@ from .helpers import _is_number, _safe_attr
 from .registry import BridgeError, command
 
 DEVICE_ACTIONS = ("insert", "delete", "duplicate", "move", "save_ab", "insert_chain", "add_macro", "remove_macro",
-                  "randomize_macros", "store_variation", "recall_variation", "delete_variation", "copy_pad", "clear_pad")
+                  "randomize_macros", "store_variation", "recall_variation", "delete_variation", "copy_pad", "clear_pad",
+                  "re_enable_automation")
 
 
-_LABELS = {"track": "a track, return track or the master", "chain": "a rack chain", "device": "a device", "pad": "a drum pad"}
+_LABELS = {"track": "a track, return track or the master", "chain": "a rack chain", "device": "a device", "pad": "a drum pad",
+           "parameter": "a device or mixer parameter", "song": "'song'"}
 
 
 def _position(params, name="position", default=-1):
@@ -217,6 +219,17 @@ class DeviceActionsMixin(object):
         rack.copy_pad(notes[0], notes[1])
         return {"address": canonical, "from_note": notes[0], "to_note": notes[1],
                 "to": "{0}/drum_pads/{1}".format(canonical, notes[1])}
+
+    def _do_re_enable_automation(self, kind, obj, canonical, params):
+        """Hand a parameter (or, for 'song', every parameter) back to its automation after a manual change overrode it."""
+        self._expect(kind, ("parameter", "song"), "re_enable_automation")
+        if kind == "parameter" and obj.automation_state != 2:
+            raise BridgeError("'{0}' is not overridden (automation_state 2): it has no automation to re-enable, or already follows it".format(obj.name), "UNAVAILABLE")
+        obj.re_enable_automation()
+        result = {"address": canonical}
+        if kind == "parameter":
+            result["automation_state"] = obj.automation_state
+        return result
 
     def _do_clear_pad(self, kind, obj, canonical, params):
         self._expect(kind, ("pad",), "clear_pad")

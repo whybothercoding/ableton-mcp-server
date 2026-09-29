@@ -117,38 +117,6 @@ export class ToolHandler {
           break;
         }
 
-        case 'draw_automation': {
-          this.client.ensureCapability('draw_automation');
-          resultData = await this.client.sendCommand('draw_automation', {
-            ...pick(args, [...TARGET_NUMBERS, 'clip_index', 'resolution'], ['mixer_parameter', 'track_type', 'device_path', 'points', 'curve', 'mode', 'hold'])
-          });
-          break;
-        }
-
-        case 'clear_automation': {
-          this.client.ensureCapability('clear_automation');
-          resultData = await this.client.sendCommand('clear_automation', {
-            ...pick(args, [...TARGET_NUMBERS, 'clip_index'], ['mixer_parameter', 'track_type', 'device_path'])
-          });
-          break;
-        }
-
-        case 'ramp_parameter': {
-          this.client.ensureCapability('ramp_parameter');
-          resultData = await this.client.sendCommand('ramp_parameter', {
-            ...pick(args, [...TARGET_NUMBERS, 'to', 'from', 'beats', 'seconds'], ['mixer_parameter', 'track_type', 'device_path', 'curve'])
-          });
-          break;
-        }
-
-        case 'cancel_ramps': {
-          this.client.ensureCapability('cancel_ramps');
-          resultData = await this.client.sendCommand('cancel_ramps', {
-            ...pick(args, TARGET_NUMBERS, ['mixer_parameter', 'track_type', 'device_path'])
-          });
-          break;
-        }
-
         case 'load_browser_item': {
           this.client.ensureCapability('load_browser_item');
           resultData = await this.client.sendCommand('load_browser_item', {

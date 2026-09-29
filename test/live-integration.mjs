@@ -1248,7 +1248,7 @@ try {
     const lo = pA.min + 0.2 * (pA.max - pA.min);
     const hi = pA.min + 0.9 * (pA.max - pA.min);
     const out = await call('draw_automation', {
-      ...sendA, clip_index: S, points: [{ time: 0, value: lo }, { time: CLIP_BEATS, value: hi }], resolution: 0.125
+      ...sendA, clip_index: S, points: [{ time: 0, value: lo }, { time: CLIP_BEATS, value: hi }], resolution: 0.125, style: 'steps'
     });
     assert(out.steps === 32, `steps ${out.steps}`);
     for (const row of out.readback) near(row.actual, row.expected, 1e-4 * (pA.max - pA.min), `readback @${row.time}`);
@@ -1327,14 +1327,14 @@ try {
       ...sendA, clip_index: S, curve: 'linear',
       points: [{ time: 3.3, value: pA.min + 0.9 * span }, { time: 0.7, value: pA.min + 0.1 * span }, { time: 3.3, value: pA.min + 0.2 * span }]
     });
-    assert(out.steps > 0, 'nothing drawn');
+    assert(out.breakpoints > 0, 'nothing drawn');
     const [early, late] = await envelopeAt(T, S, paramExpr(T, D, pA.index), [0.3, 3.8]);
     near(early, pA.min + 0.1 * span, 1e-3 * span, 'hold before first point');
     near(late, pA.min + 0.2 * span, 1e-3 * span, 'hold after last point (later duplicate wins)');
   });
   await check('a fine resolution draws many steps in one round trip', async () => {
     const t0 = performance.now();
-    const out = await call('draw_automation', { ...sendA, clip_index: S, resolution: 0.01, points: [{ time: 0, value: pA.min }, { time: 4, value: pA.max }] });
+    const out = await call('draw_automation', { ...sendA, clip_index: S, resolution: 0.01, style: 'steps', points: [{ time: 0, value: pA.min }, { time: 4, value: pA.max }] });
     console.log(`       ${out.steps} steps in ${(performance.now() - t0).toFixed(0)} ms`);
     assert(out.steps === 400, `steps ${out.steps}`);
   });
@@ -1401,6 +1401,78 @@ try {
   await check('clear errors', async () => {
     await rejects(call('clear_automation', { track_index: T, clip_index: S + 1 }), 'empty');
     await rejects(call('clear_automation', { track_index: T, clip_index: S, device_index: D }), 'parameter_index');
+  });
+
+  console.log('\nAutomation by address: breakpoints, get_automation, merge edges');
+  const autoClip = `tracks/${T}/slots/${S}/clip`;
+  const autoParam = `tracks/${T}/devices/${D}/parameters/${pA.index}`;
+  const spanA = pA.max - pA.min;
+  await check('breakpoint drawing is light: a linear ramp is two breakpoints, a curve a few dozen, and Live interpolates between them', async () => {
+    const lin = await call('draw_automation', { clip: autoClip, parameter: autoParam, points: [{ time: 0, value: pA.min + 0.2 * spanA }, { time: 4, value: pA.min + 0.8 * spanA }] });
+    assert(lin.style === 'breakpoints' && lin.breakpoints === 2, JSON.stringify(lin).slice(0, 200));
+    const [a, b, c] = await envelopeAt(T, S, paramExpr(T, D, pA.index), [1, 2, 3]);
+    near(a, pA.min + 0.35 * spanA, 2e-3 * spanA, '25%'); near(b, pA.min + 0.5 * spanA, 2e-3 * spanA, '50%'); near(c, pA.min + 0.65 * spanA, 2e-3 * spanA, '75%');
+    const curved = await call('draw_automation', { clip: autoClip, parameter: autoParam, curve: 'ease_in', resolution: 0.25, points: [{ time: 0, value: pA.min }, { time: 4, value: pA.max }] });
+    assert(curved.breakpoints === 17, `breakpoints ${curved.breakpoints}`);
+    const [q1, q2] = await envelopeAt(T, S, paramExpr(T, D, pA.index), [1, 2]);
+    near(q1, pA.min + 0.0625 * spanA, 3e-3 * spanA, 'ease_in at 25% is 6.25%'); near(q2, pA.min + 0.25 * spanA, 3e-3 * spanA, 'ease_in at 50% is 25%');
+  });
+  await check('a step draws a real jump, and get_automation reads breakpoints and the jump back in the parameter units', async () => {
+    await call('draw_automation', { clip: autoClip, parameter: autoParam, curve: 'step', points: [{ time: 0, value: pA.min + 0.2 * spanA }, { time: 2, value: pA.min + 0.7 * spanA }, { time: 4, value: pA.min + 0.4 * spanA }] });
+    const got = await call('get_automation', { clip: autoClip });
+    assert(got.has_envelopes && got.envelopes.length >= 1, JSON.stringify(got).slice(0, 200));
+    const env = got.envelopes.find((e) => e.parameter === autoParam);
+    assert(env && env.name === pA.name && env.min === pA.min && env.max === pA.max, JSON.stringify(env).slice(0, 200));
+    const jump = env.breakpoints.find((p) => Math.abs(p.time - 2) < 1e-3 && p.jump_from !== undefined);
+    assert(jump, `the jump at beat 2 should be reported: ${JSON.stringify(env.breakpoints)}`);
+    near(jump.value, pA.min + 0.7 * spanA, 2e-3 * spanA, 'value after the jump'); near(jump.jump_from, pA.min + 0.2 * spanA, 2e-3 * spanA, 'value before the jump');
+    const one = await call('get_automation', { clip: autoClip, parameter: autoParam });
+    assert(one.envelopes.length === 1, 'a single parameter');
+    const none = await call('get_automation', { clip: autoClip, parameter: `tracks/${T}/mixer/panning` });
+    assert(none.envelopes.length === 0, 'a parameter without an envelope reports none');
+    const capped = await call('get_automation', { clip: autoClip, parameter: autoParam, max_points: 2 });
+    assert(capped.envelopes[0].breakpoints.length === 2 && capped.envelopes[0].truncated === true, JSON.stringify(capped.envelopes[0]).slice(0, 200));
+  });
+  await check('merge keeps the envelope outside the drawn range exactly as it was, for straight lines too', async () => {
+    await call('draw_automation', { clip: autoClip, parameter: autoParam, points: [{ time: 0, value: pA.min + 0.1 * spanA }, { time: 4, value: pA.min + 0.9 * spanA }] });
+    const [b1, b2] = await envelopeAt(T, S, paramExpr(T, D, pA.index), [0.5, 3.5]);
+    await call('draw_automation', { clip: autoClip, parameter: autoParam, mode: 'merge', hold: false, points: [{ time: 1, value: pA.min + 0.5 * spanA }, { time: 3, value: pA.min + 0.5 * spanA }] });
+    const [before, inside, after] = await envelopeAt(T, S, paramExpr(T, D, pA.index), [0.5, 2, 3.5]);
+    near(before, b1, 3e-3 * spanA, 'before the range: the old line'); near(inside, pA.min + 0.5 * spanA, 3e-3 * spanA, 'inside: the new drawing'); near(after, b2, 3e-3 * spanA, 'after the range: the old line');
+  });
+  await check('the address form and the older track_index form draw the same envelope', async () => {
+    const points = [{ time: 0, value: pA.min + 0.3 * spanA }, { time: 4, value: pA.min + 0.6 * spanA }];
+    await call('draw_automation', { clip: autoClip, parameter: autoParam, points });
+    const viaAddress = await envelopeAt(T, S, paramExpr(T, D, pA.index), [0.5, 2, 3.5]);
+    await call('draw_automation', { ...sendA, clip_index: S, points });
+    const viaIndex = await envelopeAt(T, S, paramExpr(T, D, pA.index), [0.5, 2, 3.5]);
+    viaAddress.forEach((v, i) => near(viaIndex[i], v, 1e-6 * spanA, `time ${i}`));
+    await call('clear_automation', { clip: autoClip, parameter: autoParam });
+    assert(!(await hasEnvelope(T, S, paramExpr(T, D, pA.index))), 'cleared by address');
+  });
+  await check('a ramp by address replaces a ramp started the older way, and cancel_ramps by address cancels it', async () => {
+    await call('ramp_parameter', { ...sendA, to: pA.max, from: pA.min, seconds: 5 });
+    const second = await call('ramp_parameter', { parameter: autoParam, to: pA.min, from: pA.max, seconds: 5 });
+    assert(second.active_ramps === 1, `one ramp per parameter however it is addressed: ${second.active_ramps}`);
+    const cancelled = await call('cancel_ramps', { parameter: autoParam });
+    assert(cancelled.cancelled === 1 && cancelled.active_ramps === 0, JSON.stringify(cancelled));
+    await call('set_device_parameter', { ...sendA, value: pA.value });
+  });
+  await check('re_enable_automation hands an overridden parameter back to its clip automation (only when it is overridden)', async () => {
+    const isPlaying = await call('eval', { code: 'bool(self._song.is_playing)' });
+    await call('draw_automation', { clip: autoClip, parameter: autoParam, points: [{ time: 0, value: pA.min + 0.3 * spanA }, { time: 4, value: pA.min + 0.6 * spanA }] });
+    const state = (await call('get_properties', { address: autoParam, names: ['automation_state'] })).properties.automation_state;
+    if (state !== 2) {
+      try {
+        await call('device_action', { action: 're_enable_automation', address: autoParam });
+        throw new Error('re_enable_automation should refuse a parameter that is not overridden');
+      } catch (err) {
+        assert(err.bridgeCode === 'UNAVAILABLE', `${err.bridgeCode}: ${err.message}`);
+      }
+    }
+    console.log(`       parameter automation_state ${state} (${isPlaying ? 'playing' : 'stopped'}): the override path needs a manual change during playback`);
+    await call('device_action', { action: 're_enable_automation', address: 'song' });
+    await call('clear_automation', { clip: autoClip });
   });
 
   console.log('\nramp_parameter');
@@ -1695,7 +1767,7 @@ try {
   });
   await check('automation can be drawn on a nested device parameter and Live stores it', async () => {
     const out = await call('draw_automation', { ...nestedTarget(), clip_index: S, points: [{ time: 0, value: 0.2 }, { time: 4, value: 0.9 }] });
-    assert(out.target.device_path.join() === nestedPath().join() && out.steps > 10, JSON.stringify(out.target));
+    assert(out.target.device_path.join() === nestedPath().join() && out.breakpoints >= 2, JSON.stringify(out.target));
     for (const row of out.readback) near(row.actual, row.expected, 1e-4, `readback @${row.time}`);
     assert(await hasEnvelope(T, S, nestedParam()), 'no envelope on the nested parameter');
     const [start, end] = await envelopeAt(T, S, nestedParam(), [0.1, 3.95]);
