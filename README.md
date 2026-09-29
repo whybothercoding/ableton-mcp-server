@@ -296,7 +296,9 @@ Not covered: device properties Live keeps outside `parameters` (Wavetable's osci
 
 ## What Live's API cannot do
 
-See [docs/beyond-the-api.md](docs/beyond-the-api.md) for the verdicts: what is emulated here (follow actions, arrangement automation, browser search), what is only possible with the owner's consent (bounce by resampling) and what is simply not available (export, save, grouping, MIDI mapping).
+See [docs/beyond-the-api.md](docs/beyond-the-api.md) for the verdicts: what is emulated here (follow actions, arrangement automation, browser search), what is only possible with the owner's consent (bounce, freeze and consolidate by resampling*) and what is simply not available (export, save, grouping, MIDI mapping).
+
+\* Not built yet. Planned for after the rest of the project is complete.
 
 ---
 
