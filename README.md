@@ -177,6 +177,12 @@ Targets are `device_index` (or `device_path`) + `parameter_index`, or `mixer_par
 - `transport`: `play`, `continue`, `stop`, `stop_all_clips`, `tap_tempo`, `jump_by` (`amount` in beats), `next_cue`/`prev_cue`, `toggle_cue` (adds or removes a cue point at the playhead), `capture_midi`, `capture_and_insert_scene`. Returns the resulting transport state. Change tempo or loop settings with `set_properties` on `song`.
 - `history`: `undo`/`redo` (`steps` 1-50). It is flagged destructive because undo is global and also reverts edits made by hand.
 
+#### Creating, duplicating and deleting
+- `create`: `kind` is `audio_track`, `midi_track`, `return_track` (always appended) or `scene`; optional `index` (0-based insertion position, -1 appends), `name` and `color`. Returns the new object's `address`. Live snaps colours to its palette, so the result reports the colour it actually applied.
+- `duplicate`: a regular track (`tracks/N`, with devices and clips), a scene, or a clip slot (`tracks/N/slots/M`); the copy lands right after the source and the new address is returned. Return tracks and the master cannot be duplicated.
+- `delete` (destructive): a track, return track, scene or clip. **`expect: {"name": ...}` is mandatory**: indices shift after every create/delete, and a stale index is exactly how the wrong object gets removed, so the call is refused (`GUARD_FAILED`) when the object's current name differs. The master cannot be deleted, and a Set always keeps at least one scene. Each call is one undo step, and `history` `undo` brings a deleted object back.
+- Live renumbers default track names when tracks are inserted or removed ("12-Acid..." becomes "13-Acid..."), so re-read addresses after structural changes instead of caching them.
+
 #### Addressing: track types, racks and parameter details
 Every device-facing tool (`get_track_detail`, `get_device_parameters`, `set_device_parameter`, `bulk_set_device_parameters`, `load_browser_item`, `ramp_parameter`, `cancel_ramps`, and the `set_track_*` tools) takes:
 

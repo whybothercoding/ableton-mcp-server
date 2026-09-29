@@ -211,6 +211,33 @@ try {
     await fails('history', { action: 'rewind' }, 'action must be one of: undo, redo');
     await fails('history', { action: 'undo', steps: 99 }, 'steps must be a whole number from 1 to 50');
   });
+  await check('create, duplicate and delete carry the right risk annotations and a mandatory guard', async () => {
+    assert(byName.create.annotations.destructiveHint === false && byName.duplicate.annotations.destructiveHint === false, 'create/duplicate are not destructive');
+    assert(byName.delete.annotations.destructiveHint === true, 'delete must be flagged destructive');
+    assert(JSON.stringify(byName.delete.inputSchema.required) === JSON.stringify(['address', 'expect']), 'delete requires address and expect');
+    assert(JSON.stringify(byName.delete.inputSchema.properties.expect.required) === JSON.stringify(['name']), 'expect requires a name');
+  });
+  await check('create, duplicate and delete work through MCP and the guard refuses a wrong name', async () => {
+    const scenes = (await ok('describe_set', { include_clips: false })).scenes.length;
+    const made = await ok('create', { kind: 'scene', name: 'MCP TOOL TEST SCENE' });
+    let dup = null;
+    try {
+      assert(made.address === `scenes/${scenes}` && made.name === 'MCP TOOL TEST SCENE', JSON.stringify(made));
+      dup = await ok('duplicate', { address: made.address });
+      assert(dup.address === `scenes/${scenes + 1}` && dup.name === 'MCP TOOL TEST SCENE', JSON.stringify(dup));
+      await fails('delete', { address: made.address, expect: { name: 'Definitely Not This' } }, 'Guard failed');
+      await fails('delete', { address: made.address }, "missing required argument 'expect'");
+      await fails('delete', { address: made.address, expect: {} }, "expect: missing required argument 'name'");
+      assert((await ok('describe_set', { include_clips: false })).scenes.length === scenes + 2, 'refused deletes must remove nothing');
+    } finally {
+      for (const address of [dup && dup.address, made.address].filter(Boolean)) {
+        await tool('delete', { address, expect: { name: 'MCP TOOL TEST SCENE' } });
+      }
+    }
+    assert((await ok('describe_set', { include_clips: false })).scenes.length === scenes, 'the scratch scenes should be gone');
+    await fails('create', { kind: 'device' }, 'kind must be one of: audio_track, midi_track, return_track, scene');
+    await fails('duplicate', { address: 'master' }, 'Only regular tracks, scenes and clip slots can be duplicated');
+  });
   await check('argument problems are caught in TypeScript with a readable message', async () => {
     await fails('get_properties', {}, "missing required argument 'address'");
     await fails('get_properties', { address: 5 }, 'address must be a string');

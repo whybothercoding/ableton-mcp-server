@@ -433,6 +433,152 @@ try {
     }
   });
 
+  console.log('\nLifecycle: create, duplicate, delete');
+  // Everything created here is deleted by _live_ptr in the cleanup registry, even if a check fails halfway.
+  const lifecycleScratch = [];
+  const listOf = { track: 'tracks', return: 'return_tracks', scene: 'scenes' };
+  const trackPtr = async (address, list) => {
+    const obj = await call('eval', { code: `self._resolve(${JSON.stringify(address)})[1]._live_ptr` });
+    lifecycleScratch.push({ list, ptr: obj });
+    return obj;
+  };
+  cleanupsRegistry.push(async () => {
+    for (const { list, ptr } of lifecycleScratch.reverse()) {
+      const i = (await call('eval', { code: `[i for i, o in enumerate(self._song.${list}) if o._live_ptr == ${ptr}]` }))[0];
+      if (i === undefined) continue;
+      const remover = { tracks: 'delete_track', return_tracks: 'delete_return_track', scenes: 'delete_scene' }[list];
+      await call('eval', { code: `self._song.${remover}(${i})` });
+    }
+  });
+  const countOf = (list) => call('eval', { code: `len(self._song.${list})` });
+  const guardCode = async (params) => {
+    try {
+      await call('delete', params);
+    } catch (err) {
+      return err.bridgeCode;
+    }
+    return 'DELETED';
+  };
+  await check('create makes each kind, returns its address, applies name and colour; delete removes it', async () => {
+    const n = await countOf('tracks');
+    const midi = await call('create', { kind: 'midi_track', name: 'MCP TEST MIDI', color: 16711680 });
+    await trackPtr(midi.address, 'tracks');
+    assert(midi.address === `tracks/${n}` && midi.name === 'MCP TEST MIDI', JSON.stringify(midi));
+    assert((await countOf('tracks')) === n + 1, 'track count');
+    const props = await call('get_properties', { address: midi.address, names: ['name', 'color', 'has_midi_input'] });
+    assert(props.properties.name === 'MCP TEST MIDI' && props.properties.has_midi_input === true, JSON.stringify(props.properties));
+    assert(typeof midi.color === 'number' && props.properties.color === midi.color, `create reports the colour Live applied (Live snaps colours to its palette): ${midi.color} vs ${props.properties.color}`);
+    const audio = await call('create', { kind: 'audio_track', name: 'MCP TEST AUDIO' });
+    await trackPtr(audio.address, 'tracks');
+    assert((await call('get_properties', { address: audio.address, names: ['has_audio_input'] })).properties.has_audio_input === true, 'audio track');
+    assert(audio.address === `tracks/${n + 1}`, audio.address);
+    const returns = await countOf('return_tracks');
+    const ret = await call('create', { kind: 'return_track', name: 'MCP TEST RETURN' });
+    await trackPtr(ret.address, 'return_tracks');
+    assert(ret.address === `returns/${returns}` && (await countOf('return_tracks')) === returns + 1, JSON.stringify(ret));
+    const scenes = await countOf('scenes');
+    const scene = await call('create', { kind: 'scene', name: 'MCP TEST SCENE' });
+    await trackPtr(scene.address, 'scenes');
+    assert(scene.address === `scenes/${scenes}` && (await countOf('scenes')) === scenes + 1, JSON.stringify(scene));
+    for (const [address, name, list, count] of [[scene.address, 'MCP TEST SCENE', 'scenes', scenes], [ret.address, 'MCP TEST RETURN', 'return_tracks', returns],
+      [audio.address, 'MCP TEST AUDIO', 'tracks', n + 1], [midi.address, 'MCP TEST MIDI', 'tracks', n]]) {
+      const out = await call('delete', { address, expect: { name: name.startsWith('MCP TEST RETURN') ? (await call('get_properties', { address, names: ['name'] })).properties.name : name } });
+      assert(out.deleted === address && (await countOf(list)) === count, JSON.stringify(out));
+    }
+  });
+  await check('create at an index shifts what follows, and bad arguments are refused with codes', async () => {
+    const n = await countOf('tracks');
+    // compare by Live's stable _live_ptr: Live renumbers default track names ("12-Acid..." becomes "13-Acid...") when a track is inserted before them
+    const lastPtr = await call('eval', { code: `self._song.tracks[${n - 1}]._live_ptr` });
+    const inserted = await call('create', { kind: 'midi_track', index: n - 1, name: 'MCP TEST INSERT' });
+    await trackPtr(inserted.address, 'tracks');
+    assert(inserted.address === `tracks/${n - 1}`, inserted.address);
+    assert((await call('eval', { code: `self._song.tracks[${n}]._live_ptr` })) === lastPtr, 'the former last track should have shifted to the end');
+    await call('delete', { address: inserted.address, expect: { name: 'MCP TEST INSERT' } });
+    for (const [params, code] of [[{ kind: 'device' }, 'INVALID_ARGUMENT'], [{ kind: 'scene', name: 5 }, 'TYPE_ERROR'], [{ kind: 'midi_track', index: 999 }, 'OUT_OF_RANGE'],
+      [{ kind: 'midi_track', index: -2 }, 'INVALID_ARGUMENT'], [{ kind: 'return_track', index: 0 }, 'INVALID_ARGUMENT']]) {
+      try {
+        await call('create', params);
+        throw new Error(`${JSON.stringify(params)} should have failed`);
+      } catch (err) {
+        assert(err.bridgeCode === code, `${JSON.stringify(params)}: ${err.bridgeCode} ${err.message}`);
+      }
+    }
+    assert((await countOf('tracks')) === n, 'a refused create must leave no track behind');
+  });
+  await check('duplicate copies a track, a scene and a clip slot and returns the new address', async () => {
+    const t = await call('create', { kind: 'midi_track', name: 'MCP TEST DUP' });
+    await trackPtr(t.address, 'tracks');
+    const dup = await call('duplicate', { address: t.address });
+    await trackPtr(dup.address, 'tracks');
+    assert(dup.source === t.address && dup.address === `tracks/${Number(t.address.split('/')[1]) + 1}` && dup.name === 'MCP TEST DUP', JSON.stringify(dup));
+    const slots = `${t.address}/slots`;
+    await call('create_clip', { track_index: Number(t.address.split('/')[1]), clip_index: 0, length: 2 });
+    await call('set_properties', { address: `${slots}/0/clip`, properties: { name: 'MCP TEST CLIP' } });
+    const slotDup = await call('duplicate', { address: `${slots}/0` });
+    assert(slotDup.address === `${slots}/1`, JSON.stringify(slotDup));
+    assert((await call('get_properties', { address: `${slots}/1/clip`, names: ['name'] })).properties.name === 'MCP TEST CLIP', 'the duplicated clip keeps its name');
+    const clipOut = await call('delete', { address: `${slots}/1/clip`, expect: { name: 'MCP TEST CLIP' } });
+    assert(clipOut.deleted === `${slots}/1/clip`, JSON.stringify(clipOut));
+    assert((await call('eval', { code: `self._song.tracks[${Number(t.address.split('/')[1])}].clip_slots[1].has_clip` })) === false, 'the clip should be gone');
+    const scene = await call('create', { kind: 'scene', name: 'MCP TEST SCENE DUP' });
+    await trackPtr(scene.address, 'scenes');
+    const sceneDup = await call('duplicate', { address: scene.address });
+    await trackPtr(sceneDup.address, 'scenes');
+    assert(sceneDup.name === 'MCP TEST SCENE DUP', JSON.stringify(sceneDup));
+    for (const address of [sceneDup.address, scene.address]) await call('delete', { address, expect: { name: 'MCP TEST SCENE DUP' } });
+    for (const address of [dup.address, t.address]) await call('delete', { address, expect: { name: 'MCP TEST DUP' } });
+  });
+  await check('what cannot be duplicated is refused, and nothing changes', async () => {
+    const n = await countOf('tracks');
+    for (const address of ['master', 'returns/0', 'song', 'tracks/0/slots/0/clip']) {
+      try {
+        await call('duplicate', { address });
+        throw new Error(`${address} should not be duplicable`);
+      } catch (err) {
+        assert(err.bridgeCode === 'INVALID_ARGUMENT', `${address}: ${err.bridgeCode} ${err.message}`);
+      }
+    }
+    assert((await countOf('tracks')) === n, 'track count changed');
+  });
+  await check('delete refuses without expect, with a wrong name, on the master, and on a stale index', async () => {
+    const n = await countOf('tracks');
+    const x = await call('create', { kind: 'midi_track', name: 'MCP TEST X' });
+    const i = Number(x.address.split('/')[1]);
+    await trackPtr(x.address, 'tracks');
+    const y = await call('create', { kind: 'midi_track', name: 'MCP TEST Y' });
+    await trackPtr(y.address, 'tracks');
+    const z = await call('create', { kind: 'midi_track', name: 'MCP TEST Z' });
+    await trackPtr(z.address, 'tracks');
+    assert((await guardCode({ address: x.address })) === 'INVALID_ARGUMENT', 'expect is mandatory');
+    assert((await guardCode({ address: x.address, expect: {} })) === 'INVALID_ARGUMENT', 'expect needs a name');
+    assert((await guardCode({ address: x.address, expect: { name: 'Definitely Not Its Name' } })) === 'GUARD_FAILED', 'a wrong name must be refused');
+    assert((await guardCode({ address: 'master', expect: { name: await call('eval', { code: 'self._song.master_track.name' }) } })) === 'INVALID_ARGUMENT', 'the master cannot be deleted');
+    assert((await guardCode({ address: `tracks/0`, expect: { name: 'MCP TEST NOT YOUR TRACK' } })) === 'GUARD_FAILED', 'your own tracks are protected by the guard');
+    assert((await countOf('tracks')) === n + 3, 'refused deletes must leave every track in place');
+    // the stale-index scenario: the caller read Y at i+1, then X is deleted, so tracks/(i+1) is now Z
+    await call('delete', { address: x.address, expect: { name: 'MCP TEST X' } });
+    assert((await guardCode({ address: `tracks/${i + 1}`, expect: { name: 'MCP TEST Y' } })) === 'GUARD_FAILED', 'a stale index must not delete the wrong track');
+    assert((await call('get_properties', { address: `tracks/${i + 1}`, names: ['name'] })).properties.name === 'MCP TEST Z', 'Z must still be there');
+    await call('delete', { address: 'tracks/name:MCP TEST Y', expect: { name: 'MCP TEST Y' } });
+    await call('delete', { address: 'tracks/name:MCP TEST Z', expect: { name: 'MCP TEST Z' } });
+    assert((await countOf('tracks')) === n, 'back to the original track count');
+  });
+  await check('create and delete are single undo steps', async () => {
+    const scenes = await countOf('scenes');
+    const scene = await call('create', { kind: 'scene', name: 'MCP TEST UNDO' });
+    await trackPtr(scene.address, 'scenes');
+    await call('history', { action: 'undo' });
+    assert((await countOf('scenes')) === scenes, 'one undo should remove the created scene');
+    await call('history', { action: 'redo' });
+    assert((await countOf('scenes')) === scenes + 1, 'redo should bring it back');
+    await call('delete', { address: scene.address, expect: { name: 'MCP TEST UNDO' } });
+    assert((await countOf('scenes')) === scenes, 'deleted');
+    await call('history', { action: 'undo' });
+    assert((await countOf('scenes')) === scenes + 1, 'one undo should bring the deleted scene back');
+    await call('delete', { address: `scenes/${scenes}`, expect: { name: 'MCP TEST UNDO' } });
+  });
+
   console.log('\ndraw_automation');
   await check('linear ramp: readback and independent envelope values match', async () => {
     const lo = pA.min + 0.2 * (pA.max - pA.min);

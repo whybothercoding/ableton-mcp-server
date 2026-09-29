@@ -50,6 +50,24 @@ test('specs carry accurate annotations', () => {
   assert.equal(TOOL_SPEC_BY_NAME.transport.annotations.destructiveHint, false);
 });
 
+test('create, duplicate and delete schemas and risk annotations', () => {
+  assert.equal(TOOL_SPEC_BY_NAME.delete.annotations.destructiveHint, true);
+  assert.equal(TOOL_SPEC_BY_NAME.create.annotations.destructiveHint, false);
+  assert.equal(TOOL_SPEC_BY_NAME.duplicate.annotations.destructiveHint, false);
+  const create = TOOL_SPEC_BY_NAME.create.inputSchema;
+  assert.equal(validateArgs(create, { kind: 'scene', name: 'Verse', index: 0 }), null);
+  assert.match(validateArgs(create, {})!, /missing required argument 'kind'/);
+  assert.match(validateArgs(create, { kind: 'device' })!, /must be one of: audio_track, midi_track, return_track, scene/);
+  assert.match(validateArgs(create, { kind: 'scene', name: 5 })!, /name must be a string/);
+  assert.equal(validateArgs(TOOL_SPEC_BY_NAME.duplicate.inputSchema, { address: 'tracks/1' }), null);
+  assert.match(validateArgs(TOOL_SPEC_BY_NAME.duplicate.inputSchema, {})!, /missing required argument 'address'/);
+  const del = TOOL_SPEC_BY_NAME.delete.inputSchema;
+  assert.equal(validateArgs(del, { address: 'tracks/1', expect: { name: 'B' } }), null);
+  assert.match(validateArgs(del, { address: 'tracks/1' })!, /missing required argument 'expect'/);
+  assert.match(validateArgs(del, { address: 'tracks/1', expect: {} })!, /expect: missing required argument 'name'/);
+  assert.match(validateArgs(del, { address: 'tracks/1', expect: { name: 5 } })!, /expect.name must be a string/);
+});
+
 test('transport and history schemas', () => {
   const transport = TOOL_SPEC_BY_NAME.transport.inputSchema;
   assert.equal(validateArgs(transport, { action: 'play' }), null);

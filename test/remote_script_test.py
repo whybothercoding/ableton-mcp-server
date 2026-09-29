@@ -1054,6 +1054,165 @@ class StructureTests(unittest.TestCase):
             self.assertIn(name, self.script._get_script_info()["capabilities"])
 
 
+# ---------------------------------------------------------------- lifecycle: create, duplicate, delete
+
+class LifecycleTests(unittest.TestCase):
+    def setUp(self):
+        self.script = make_script()
+        self.addCleanup(self.script._stop_server)
+        song = make_song()
+        song.tracks = [FakeTrack("A"), FakeTrack("B"), FakeTrack("C")]
+        song.tracks[0].clip_slots = [FakeSlot(PropClip("riff", 4.0)), FakeSlot(), FakeSlot()]
+        song.scenes = [PropScene("S0"), PropScene("S1")]
+        song.calls = []
+        self.count = 0
+
+        def add(target, item, index):
+            target.insert(len(target) if index == -1 else index, item)
+            return item
+
+        def make_track(label, kind_index=None):
+            def create(index=-1):
+                self.count += 1
+                return add(song.tracks, FakeTrack("{0} {1}".format(label, self.count)), index)
+            return create
+
+        song.create_audio_track = make_track("Audio")
+        song.create_midi_track = make_track("MIDI")
+        song.create_return_track = lambda: add(song.return_tracks, FakeReturnTrack("Return New", with_clips=False), -1)
+        song.create_scene = lambda index=-1: add(song.scenes, PropScene("Scene New"), index)
+        song.delete_track = lambda i: song.tracks.pop(i)
+        song.delete_return_track = lambda i: song.return_tracks.pop(i)
+        song.delete_scene = lambda i: song.scenes.pop(i)
+
+        def duplicate_track(i):
+            copy = FakeTrack(song.tracks[i].name)
+            song.tracks.insert(i + 1, copy)
+
+        def duplicate_scene(i):
+            song.scenes.insert(i + 1, PropScene(song.scenes[i].name))
+
+        song.duplicate_track, song.duplicate_scene = duplicate_track, duplicate_scene
+
+        def duplicate_clip_slot(i):
+            slot = song.tracks[0].clip_slots[i]
+            song.tracks[0].clip_slots.insert(i + 1, FakeSlot(PropClip(slot.clip.name, slot.clip.length)))
+            return i + 1
+        song.tracks[0].duplicate_clip_slot = duplicate_clip_slot
+        for track in song.tracks:
+            for slot in track.clip_slots:
+                slot.delete_clip = (lambda s: lambda: (setattr(s, "clip", None), setattr(s, "has_clip", False)))(slot)
+        self.script._song = self.song = song
+
+    def run_command(self, command_type, params):
+        return self.script._process_command({"type": command_type, "params": params})
+
+    def code_of(self, command_type, params):
+        response = self.run_command(command_type, params)
+        self.assertEqual(response["status"], "error", str(params))
+        return response["code"]
+
+    # ---- create
+    def test_create_each_kind_returns_a_reusable_address(self):
+        audio = self.run_command("create", {"kind": "audio_track", "name": "Vox", "color": 123})["result"]
+        self.assertEqual((audio["address"], audio["name"]), ("tracks/3", "Vox"))
+        self.assertEqual((self.song.tracks[3].name, self.song.tracks[3].color), ("Vox", 123))
+        self.assertEqual(audio["color"], 123)
+        midi = self.run_command("create", {"kind": "midi_track", "index": 0})["result"]
+        self.assertEqual(midi["address"], "tracks/0")                       # inserted at the front, everything shifts
+        self.assertIs(self.script._resolve(midi["address"])[1], self.song.tracks[0])
+        ret = self.run_command("create", {"kind": "return_track", "name": "Space"})["result"]
+        self.assertEqual((ret["address"], self.song.return_tracks[-1].name), ("returns/1", "Space"))
+        scene = self.run_command("create", {"kind": "scene", "index": 1, "name": "Bridge"})["result"]
+        self.assertEqual((scene["address"], self.song.scenes[1].name), ("scenes/1", "Bridge"))
+
+    def test_create_appends_by_default_and_by_minus_one(self):
+        self.assertEqual(self.run_command("create", {"kind": "scene"})["result"]["address"], "scenes/2")
+        self.assertEqual(self.run_command("create", {"kind": "scene", "index": -1})["result"]["address"], "scenes/3")
+        self.assertEqual(self.run_command("create", {"kind": "midi_track", "index": None})["result"]["address"], "tracks/3")
+
+    def test_create_errors(self):
+        cases = [({}, "INVALID_ARGUMENT"), ({"kind": "device"}, "INVALID_ARGUMENT"),
+                 ({"kind": "scene", "name": 5}, "TYPE_ERROR"), ({"kind": "scene", "color": True}, "TYPE_ERROR"),
+                 ({"kind": "scene", "color": 1.5}, "TYPE_ERROR"), ({"kind": "midi_track", "index": -2}, "INVALID_ARGUMENT"),
+                 ({"kind": "midi_track", "index": 1.5}, "INVALID_ARGUMENT"), ({"kind": "midi_track", "index": True}, "INVALID_ARGUMENT"),
+                 ({"kind": "midi_track", "index": "0"}, "INVALID_ARGUMENT"), ({"kind": "midi_track", "index": 9}, "OUT_OF_RANGE"),
+                 ({"kind": "scene", "index": 9}, "OUT_OF_RANGE"), ({"kind": "return_track", "index": 0}, "INVALID_ARGUMENT")]
+        for params, code in cases:
+            self.assertEqual(self.code_of("create", params), code, str(params))
+        self.assertEqual((len(self.song.tracks), len(self.song.scenes), len(self.song.return_tracks)), (3, 2, 1))  # nothing created
+
+    # ---- duplicate
+    def test_duplicate_track_scene_and_slot(self):
+        out = self.run_command("duplicate", {"address": "tracks/1"})["result"]
+        self.assertEqual((out["source"], out["address"], out["name"]), ("tracks/1", "tracks/2", "B"))
+        self.assertEqual([t.name for t in self.song.tracks], ["A", "B", "B", "C"])
+        out = self.run_command("duplicate", {"address": "scenes/name:S0"})["result"]
+        self.assertEqual((out["address"], [s.name for s in self.song.scenes]), ("scenes/1", ["S0", "S0", "S1"]))
+        out = self.run_command("duplicate", {"address": "tracks/0/slots/0"})["result"]
+        self.assertEqual(out["address"], "tracks/0/slots/1")
+        self.assertEqual(self.song.tracks[0].clip_slots[1].clip.name, "riff")
+
+    def test_duplicate_errors(self):
+        for address, code in (("master", "INVALID_ARGUMENT"), ("returns/0", "INVALID_ARGUMENT"), ("song", "INVALID_ARGUMENT"),
+                              ("tracks/0/slots/0/clip", "INVALID_ARGUMENT"), ("tracks/9", "OUT_OF_RANGE"), (None, "INVALID_ARGUMENT")):
+            self.assertEqual(self.code_of("duplicate", {"address": address}), code, str(address))
+        self.assertEqual(len(self.song.tracks), 3)
+
+    # ---- delete
+    def test_delete_requires_an_expect_guard(self):
+        for expect in (None, {}, {"class_name": "X"}, "B", ["name"]):
+            self.assertEqual(self.code_of("delete", {"address": "tracks/1", "expect": expect}), "INVALID_ARGUMENT", str(expect))
+        self.assertEqual(self.code_of("delete", {"address": "tracks/1"}), "INVALID_ARGUMENT")
+        self.assertEqual(len(self.song.tracks), 3)
+
+    def test_delete_refuses_a_stale_index(self):
+        # the caller read the Set when "B" was track 1; then track 0 was deleted, so index 1 is now "C"
+        self.run_command("delete", {"address": "tracks/0", "expect": {"name": "A"}})
+        self.assertEqual(self.song.tracks[1].name, "C")
+        self.assertEqual(self.code_of("delete", {"address": "tracks/1", "expect": {"name": "B"}}), "GUARD_FAILED")
+        self.assertEqual([t.name for t in self.song.tracks], ["B", "C"])      # nothing was removed
+        self.run_command("delete", {"address": "tracks/name:B", "expect": {"name": "B"}})
+        self.assertEqual([t.name for t in self.song.tracks], ["C"])
+
+    def test_delete_each_kind_reports_what_remains(self):
+        out = self.run_command("delete", {"address": "tracks/1", "expect": {"name": "B"}})["result"]
+        self.assertEqual((out["deleted"], out["name"], out["tracks"]), ("tracks/1", "B", 2))
+        out = self.run_command("delete", {"address": "returns/0", "expect": {"name": "Return A"}})["result"]
+        self.assertEqual((out["deleted"], out["returns"]), ("returns/0", 0))
+        out = self.run_command("delete", {"address": "scenes/1", "expect": {"name": "S1"}})["result"]
+        self.assertEqual((out["deleted"], out["scenes"]), ("scenes/1", 1))
+        out = self.run_command("delete", {"address": "tracks/0/slots/0/clip", "expect": {"name": "riff"}})["result"]
+        self.assertEqual(out["deleted"], "tracks/0/slots/0/clip")
+        self.assertFalse(self.song.tracks[0].clip_slots[0].has_clip)
+
+    def test_delete_refusals(self):
+        self.assertEqual(self.code_of("delete", {"address": "master", "expect": {"name": "Master"}}), "INVALID_ARGUMENT")
+        self.assertEqual(self.code_of("delete", {"address": "tracks/0/slots/0", "expect": {"name": "x"}}), "GUARD_FAILED")
+        self.assertEqual(self.code_of("delete", {"address": "tracks/9", "expect": {"name": "x"}}), "OUT_OF_RANGE")
+        self.assertEqual(self.code_of("delete", {"address": "tracks/0/slots/1/clip", "expect": {"name": "x"}}), "NOT_FOUND")  # empty slot
+        self.assertEqual(self.code_of("delete", {"address": "tracks/0", "expect": {"name": "A", "colour": 1}}), "INVALID_ARGUMENT")
+        self.assertEqual(len(self.song.tracks), 3)
+
+    def test_delete_with_an_empty_clip_name_needs_the_name_key(self):
+        self.song.tracks[0].clip_slots[0].clip.name = ""
+        self.run_command("delete", {"address": "tracks/0/slots/0/clip", "expect": {"name": ""}})
+        self.assertFalse(self.song.tracks[0].clip_slots[0].has_clip)
+
+    # ---- flags and undo
+    def test_flags_and_one_undo_step_per_call(self):
+        self.assertTrue(mod._COMMANDS["create"]["writes"] and mod._COMMANDS["duplicate"]["writes"])
+        self.assertTrue(mod._COMMANDS["delete"]["destructive"] and mod._COMMANDS["delete"]["writes"])
+        self.assertFalse(mod._COMMANDS["create"]["destructive"])
+        self.song.undo_log.clear()
+        self.run_command("create", {"kind": "scene", "name": "X"})
+        self.run_command("delete", {"address": "tracks/2", "expect": {"name": "C"}})
+        self.assertEqual(self.song.undo_log, ["begin", "end", "begin", "end"])
+        self.song.undo_log.clear()
+        self.run_command("delete", {"address": "tracks/9", "expect": {"name": "x"}})   # a failing call still closes its step
+        self.assertEqual(self.song.undo_log, ["begin", "end"])
+
+
 # ---------------------------------------------------------------- package hygiene
 
 class PackageTests(unittest.TestCase):

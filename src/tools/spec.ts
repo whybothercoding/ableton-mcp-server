@@ -178,6 +178,60 @@ export const TOOL_SPECS: ToolSpec[] = [
     bridge: { command: 'history' }
   },
   {
+    name: 'create',
+    description:
+      "Create a track, return track or scene and get back its address. kind: audio_track, midi_track, return_track (always appended) or scene. " +
+      "`index` is the insertion position (0-based; omit or -1 to append; existing objects shift, so re-read addresses afterwards). " +
+      "Optional `name` and `color` (RGB integer; Live snaps it to the nearest palette colour and the result reports the colour it applied) are applied immediately. One undo step.",
+    inputSchema: {
+      type: 'object',
+      properties: {
+        kind: { type: 'string', enum: ['audio_track', 'midi_track', 'return_track', 'scene'], description: 'What to create' },
+        index: { type: 'number', description: 'Insertion position, -1 (default) appends' },
+        name: { type: 'string', description: 'Name to give it' },
+        color: { type: 'number', description: 'RGB color integer' }
+      },
+      required: ['kind']
+    },
+    annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: false },
+    bridge: { command: 'create' }
+  },
+  {
+    name: 'duplicate',
+    description:
+      "Duplicate a regular track ('tracks/N', with its devices and clips), a scene ('scenes/N') or a clip slot ('tracks/N/slots/M', with its clip). " +
+      "The copy lands right after the source (a duplicated slot goes into the next scene); returns the new address. Return tracks and the master cannot be duplicated.",
+    inputSchema: {
+      type: 'object',
+      properties: { address: { type: 'string', description: "What to duplicate, e.g. 'tracks/3', 'scenes/name:Verse', 'tracks/0/slots/2'" } },
+      required: ['address']
+    },
+    annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: false },
+    bridge: { command: 'duplicate' }
+  },
+  {
+    name: 'delete',
+    description:
+      "Delete a track ('tracks/N'), return track ('returns/N'), scene ('scenes/N') or clip ('tracks/N/slots/M/clip'). DESTRUCTIVE (one undo step brings it back). " +
+      "`expect` is mandatory: {\"name\": <the object's current name>}. Indices shift after every create/delete, so read the object first; if its name no longer matches, " +
+      "nothing is deleted (GUARD_FAILED). The master track cannot be deleted, and a Set always keeps at least one scene.",
+    inputSchema: {
+      type: 'object',
+      properties: {
+        address: { type: 'string', description: 'What to delete' },
+        expect: {
+          type: 'object',
+          description: 'Guard: the object must still have this name (class_name optional)',
+          properties: { name: { type: 'string' }, class_name: { type: 'string' } },
+          required: ['name']
+        }
+      },
+      required: ['address', 'expect']
+    },
+    annotations: { readOnlyHint: false, destructiveHint: true, idempotentHint: false },
+    bridge: { command: 'delete' }
+  },
+  {
     name: 'list_properties',
     description:
       'List the properties get_properties/set_properties know for an object kind: type, whether it is writable, allowed enum values ' +
