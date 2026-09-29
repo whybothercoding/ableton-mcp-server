@@ -189,7 +189,7 @@ class ServerMixin(object):
                 except Exception as e:
                     self.log_message("Error processing command '{0}': {1}".format(command_type, e))
                     self.log_message(traceback.format_exc())
-                    response = _error_response(_error_code(e), str(e))
+                    response = _error_response(_error_code(e), str(e), getattr(e, "details", None))
         response["elapsed_ms"] = round((clock.now() - started) * 1000.0, 2)
         return response
 

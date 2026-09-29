@@ -21,10 +21,14 @@ class BridgeError(Exception):
     """An error with a stable machine-readable code."""
     code = "INTERNAL_ERROR"
 
-    def __init__(self, message, code=None):
+    details = None
+
+    def __init__(self, message, code=None, details=None):
         Exception.__init__(self, message)
         if code:
             self.code = code
+        if details is not None:
+            self.details = details
 
 
 def _error_code(exc):
@@ -44,5 +48,8 @@ def _error_code(exc):
     return "INTERNAL_ERROR"
 
 
-def _error_response(code, message):
-    return {"status": "error", "code": code, "message": message}
+def _error_response(code, message, details=None):
+    response = {"status": "error", "code": code, "message": message}
+    if details is not None:
+        response["details"] = details
+    return response

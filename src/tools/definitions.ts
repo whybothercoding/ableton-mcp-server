@@ -212,43 +212,6 @@ const LEGACY_TOOLS: ToolDefinition[] = [
     requiredCapability: 'load_browser_item'
   },
   {
-    name: 'bulk_edit_clips',
-    description: 'Batch edit multiple clip names and/or batch create clips in a single round trip.',
-    inputSchema: {
-      type: 'object',
-      properties: {
-        names: {
-          type: 'array',
-          description: 'Items to rename',
-          items: {
-            type: 'object',
-            properties: {
-              track_index: { type: 'number' },
-              clip_index: { type: 'number' },
-              name: { type: 'string' }
-            },
-            required: ['track_index', 'clip_index', 'name']
-          }
-        },
-        create: {
-          type: 'array',
-          description: 'Items to create',
-          items: {
-            type: 'object',
-            properties: {
-              track_index: { type: 'number' },
-              clip_index: { type: 'number' },
-              length: { type: 'number' },
-              name: { type: 'string' }
-            },
-            required: ['track_index', 'clip_index']
-          }
-        }
-      }
-    },
-    requiredCapability: 'bulk_set_clip_names'
-  },
-  {
     name: 'eval_python',
     description: 'Evaluate raw Python code on the Ableton Remote Script instance (for development and advanced debugging).',
     inputSchema: {

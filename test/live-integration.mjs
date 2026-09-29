@@ -1077,6 +1077,98 @@ try {
     assert(out.is_using_compare_preset_b === false || out.is_using_compare_preset_b === true, JSON.stringify(out));
   });
 
+  console.log('\nBatch');
+  const trackCount = () => call('eval', { code: 'len(self._song.tracks)' });
+  const lastTrackPtr = () => call('eval', { code: 'self._song.tracks[-1]._live_ptr' });
+  cleanupsRegistry.push(async () => {       // a batch that failed to clean up after itself must not leave tracks behind
+    for (const name of ['MCP TEST BATCH', 'MCP TEST BATCH 2']) {
+      const found = await call('eval', { code: `[i for i, t in enumerate(self._song.tracks) if t.name.endswith(${JSON.stringify(name)})]` });
+      for (const i of found.reverse()) await call('eval', { code: `self._song.delete_track(${i})` });
+    }
+  });
+  await check('a batch builds a track, a device and a clip in one call, using earlier results, and one undo reverts all of it', async () => {
+    const before = await trackCount();
+    const result = await call('batch', { ops: [
+      { command: 'create', params: { kind: 'midi_track', name: 'MCP TEST BATCH' } },
+      { command: 'device_action', params: { action: 'insert', address: '$0.address', name: 'Drift' } },
+      { command: 'create', params: { kind: 'midi_clip', address: '$0.address/slots/0', length: 4, name: 'batched' } },
+      { command: 'write_notes', params: { address: '$2.address', notes: [{ pitch: 60, start_time: 0, duration: 1 }] } },
+      { command: 'set_properties', params: { address: '$0.address', properties: { name: 'MCP TEST BATCH', mute: false } } },
+      { command: 'get_properties', params: { address: '$2.address', names: ['name', 'length'] } }] });
+    assert(result.ok && result.applied === 6, JSON.stringify(result).slice(0, 300));
+    const track = result.results[0].result.address;
+    assert(result.results[1].result.address === `${track}/devices/0` && result.results[2].result.address === `${track}/slots/0/clip`, 'references resolved to the created objects');
+    assert(JSON.stringify(result.results[5].result.properties) === JSON.stringify({ name: 'batched', length: 4 }), JSON.stringify(result.results[5].result));
+    assert(result.results[1].result.name === 'Drift', 'the device op saw the track created by op 0');
+    assert((await trackCount()) === before + 1, 'the track exists');
+    assert((await call('get_notes', { address: `${track}/slots/0/clip` })).count === 1, 'the notes are in the clip');
+    await call('history', { action: 'undo' });
+    assert((await trackCount()) === before, 'ONE undo should remove the track, its device and its clip together');
+    await call('history', { action: 'redo' });
+    assert((await trackCount()) === before + 1, 'redo brings the whole batch back');
+    await call('delete', { address: track, expect: { name: (await call('get_properties', { address: track, names: ['name'] })).properties.name } });
+  });
+  await check('Live records a device parameter write as its own undo entry even inside a batch: one extra undo', async () => {
+    const before = await trackCount();
+    const made = await call('batch', { ops: [
+      { command: 'create', params: { kind: 'midi_track', name: 'MCP TEST BATCH' } },
+      { command: 'device_action', params: { action: 'insert', address: '$0.address', name: 'Drift' } },
+      { command: 'set_properties', params: { address: '$1.address/parameters/1', properties: { value: 0 } } }] });
+    assert(made.applied === 3, JSON.stringify(made).slice(0, 200));
+    let undos = 0;
+    while ((await trackCount()) > before && undos < 4) {
+      await call('history', { action: 'undo' });
+      undos += 1;
+    }
+    assert((await trackCount()) === before && undos === 2, `expected 2 undos (the parameter write, then the rest), needed ${undos}`);
+  });
+  await check('a failing batch stops, keeps what ran as one undo step, reports every op, and Live explains the failure', async () => {
+    const before = await trackCount();
+    let failure;
+    try {
+      await call('batch', { ops: [
+        { command: 'create', params: { kind: 'midi_track', name: 'MCP TEST BATCH 2' } },
+        { command: 'device_action', params: { action: 'insert', address: '$0.address', name: 'Definitely Not A Device' } },
+        { command: 'create', params: { kind: 'scene' } }] });
+    } catch (err) {
+      failure = err;
+    }
+    assert(failure && failure.bridgeCode === 'BATCH_FAILED', `expected BATCH_FAILED, got ${failure && failure.bridgeCode}`);
+    assert(failure.details.applied === 1 && failure.details.failed[0] === 1 && failure.details.not_run[0] === 2, JSON.stringify(failure.details).slice(0, 200));
+    assert(failure.details.results[1].code === 'NOT_FOUND' && /not found/i.test(failure.details.results[1].message), JSON.stringify(failure.details.results[1]));
+    assert((await trackCount()) === before + 1, 'the op before the failure stays applied');
+    assert((await call('describe_set')).scenes.length === setBefore.scenes.length, 'the op after the failure did not run');
+    await call('history', { action: 'undo' });
+    assert((await trackCount()) === before, 'the applied part is one undo step');
+  });
+  await check('a batch is refused up front when it holds ops that are not undoable edits, and nothing runs', async () => {
+    const before = await trackCount();
+    for (const command of ['transport', 'launch', 'history', 'eval', 'ramp_parameter', 'batch']) {
+      try {
+        await call('batch', { ops: [{ command: 'create', params: { kind: 'midi_track', name: 'MCP TEST BATCH' } }, { command }] });
+      } catch (err) {
+        assert(err.bridgeCode === 'INVALID_ARGUMENT' && err.message.includes('cannot run inside a batch'), `${command}: ${err.bridgeCode} ${err.message}`);
+        continue;
+      }
+      throw new Error(`${command} should not run inside a batch`);
+    }
+    assert((await trackCount()) === before, 'a refused batch created something');
+  });
+  await check('many edits in one batch are much faster than the same edits one by one', async () => {
+    const address = `tracks/${T}`;
+    const original = (await call('get_properties', { address, names: ['panning'] })).properties.panning;
+    const values = Array.from({ length: 40 }, (_, i) => (i % 2 ? -0.1 : 0.1));
+    const t0 = performance.now();
+    for (const value of values) await call('set_properties', { address, properties: { panning: value } });
+    const separate = performance.now() - t0;
+    const t1 = performance.now();
+    await call('batch', { ops: values.map((value) => ({ command: 'set_properties', params: { address, properties: { panning: value } } })) });
+    const batched = performance.now() - t1;
+    await call('set_properties', { address, properties: { panning: original } });
+    console.log(`       40 writes: ${separate.toFixed(0)} ms one by one, ${batched.toFixed(0)} ms in one batch`);
+    assert(batched < separate, 'a batch should beat separate round trips');
+  });
+
   console.log('\ndraw_automation');
   await check('linear ramp: readback and independent envelope values match', async () => {
     const lo = pA.min + 0.2 * (pA.max - pA.min);

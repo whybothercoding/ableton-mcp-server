@@ -300,6 +300,20 @@ try {
     await fails('transform_notes', { address: clipAddress, transform: 'transpose', params: { semitones: 2 } }, 'no notes in that selection');
     await fails('transform_notes', { address: `tracks/${T}`, transform: 'transpose', params: { semitones: 2 } }, 'address must be a clip');
   });
+  await check('batch is listed, runs several tools with references in one call, and reports a failure with every op', async () => {
+    assert(byName.batch.annotations.destructiveHint === true && JSON.stringify(byName.batch.inputSchema.required) === JSON.stringify(['ops']), 'batch schema');
+    const made = await ok('batch', { ops: [
+      { tool: 'create', args: { kind: 'scene', name: 'MCP BATCH SCENE' } },
+      { tool: 'set_properties', args: { address: '$0.address', properties: { tempo: 111 } } },
+      { tool: 'get_properties', args: { address: '$0.address', names: ['tempo', 'name'] } }] });
+    assert(made.applied === 3 && made.results[2].tool === 'get_properties' && made.results[2].result.properties.tempo === 111, JSON.stringify(made).slice(0, 240));
+    const address = made.results[0].result.address;
+    const failed = await tool('batch', { ops: [{ tool: 'set_properties', args: { address, properties: { name: 'MCP BATCH RENAMED' } } }, { tool: 'set_properties', args: { address: 'scenes/999', properties: { name: 'x' } } }] });
+    assert(failed.isError && failed.text.includes('Batch stopped at op 1') && failed.text.includes('"not_run"'), failed.text.slice(0, 300));
+    await fails('batch', { ops: [{ tool: 'transport', args: { action: 'play' } }] }, 'cannot be used in a batch');
+    await fails('batch', { ops: [{ tool: 'create', args: { kind: 'nonsense' } }] }, 'ops[0] (create): kind must be one of');
+    await ok('delete', { address, expect: { name: 'MCP BATCH RENAMED' } });
+  });
   await check('argument problems are caught in TypeScript with a readable message', async () => {
     await fails('get_properties', {}, "missing required argument 'address'");
     await fails('get_properties', { address: 5 }, 'address must be a string');

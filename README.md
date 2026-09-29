@@ -127,7 +127,8 @@ Most tools take an **address** (`song`, `tracks/N`, `tracks/N/slots/M/clip`, `gr
 | Read / change any property | `get_properties`, `set_properties` |
 | Structure | `create`, `duplicate`, `delete` (needs `expect`) |
 | Play | `transport`, `launch`, `history` (undo/redo) |
-| Clips and notes | `clip_action`, `get_notes`, `write_notes`, `edit_notes`, `bulk_edit_clips` |
+| Clips and notes | `clip_action`, `get_notes`, `write_notes`, `edit_notes` |
+| Many edits at once | `batch` |
 | Compose | `generate_notes`, `transform_notes` |
 | Devices and sound | `device_action`, `load_browser_item`, `draw_automation`, `clear_automation`, `ramp_parameter`, `cancel_ramps` (parameters and device properties are written with `set_properties`) |
 | Development | `eval_python` (gated) |
@@ -143,13 +144,13 @@ Earlier versions had one tool per property or action. These were folded into the
 | `fire_clip`, `stop_clip`, `fire_scene`, `stop_all_clips` | `launch` |
 | `start_playback`, `stop_playback` | `transport` |
 | `get_clip_notes`, `edit_clip_notes` | `get_notes`, `write_notes`, `edit_notes` |
+| `bulk_edit_clips` | `batch` (`create` midi_clip + `set_properties` name/color per clip, one undo step) |
 | `get_device_parameters` | `get_device` (parameters with addresses, racks with their chains and pads) |
 | `set_device_parameter`, `bulk_set_device_parameters` | `set_properties` on a parameter address (`.../parameters/5`), `items` for many at once |
 
 #### Notes on a few tools
 - `get_track_detail`: clip slots, arrangement clips and devices of a track. `get_audio_clip_path`: an audio clip's source path and warp metadata. `analyze_audio_clip`: codec/format metadata, integrated LUFS, sample and true peak (dBTP), RMS and an approximate six-band frequency profile of the clip's source file. `get_browser_items`: browser items at a category path, paged with `limit` (default 200) and `offset` (`total` and `truncated` in the result).
 - `load_browser_item`: load an instrument, effect or sample onto a track by URI (any URI returned by `get_browser_items`). Samples load into the track's selected clip slot, replacing what is there.
-- `bulk_edit_clips`: batch clip creation and renaming in serial order on Live's main thread.
 
 #### Automation & Ramps
 - `draw_automation`: Draw a Session-clip automation envelope for a device or mixer parameter from `{time, value}` points (times in beats from clip start, values in the parameter's own units). Curves: `linear`, `step`, `smooth`, `ease_in`, `ease_out`, per call or per point. Ramps are drawn as fine staircases (`resolution` beats per step) that start exactly on the first value and end exactly on the last. `mode: "replace"` (default) rebuilds the parameter's envelope, `"merge"` rewrites only the drawn range; `hold` (default) fills the clip edges. The result includes a readback of Live's stored values.
@@ -195,6 +196,9 @@ Devices, rack chains, drum pads and parameters have addresses under a track (`tr
 - `set_properties` writes a **parameter's `value`**, checked against that parameter's own range (`OUT_OF_RANGE`); a quantized parameter also takes its label (`"value": "Low-pass"`); disabled or macro-mapped parameters refuse (`UNAVAILABLE`); `items` writes many parameters (or anything else) in one call. Devices have `name`, `on` (the Device On switch), `collapsed`, `is_using_compare_preset_b` and rack state; chains have `name`, `color`, `mute`, `solo`, `volume`, `panning`; pads `mute` and `solo` (Live ignores those on an empty pad, and the result shows what Live holds).
 - `device_action`: `insert` (`name` as in Live's browser, `position`; Live's own refusals such as "Insert audio effects after instruments" come through), `delete` (needs `expect: {"name"}`), `duplicate`, `move` (to another track or chain; returns where it landed), `save_ab`, and rack actions `insert_chain`, `add_macro`, `remove_macro`, `randomize_macros`, `store_variation`, `recall_variation` and `delete_variation` (by `index`: Live silently does nothing when no variation is selected, so the tool refuses instead), `copy_pad`, `clear_pad` (needs `expect`). Each call is one undo step. A device chain holds one instrument, and Live refuses to duplicate instruments.
 - Not in Live's API: deleting a rack chain, loading presets by path (use `load_browser_item`), plugin parameters beyond those Live has configured.
+
+#### Batches
+`batch` runs several tool calls (`ops: [{tool, args}]`, up to 100) as **one round trip and one undo step** on Live's main thread, so `history undo` reverts all of it (see the parameter quirk below) and the user never sees a half-built Set. Later ops can use earlier results: `"$0.address"` is the address op 0 returned (a whole-string reference keeps its type; inside a longer string it is inserted as text; `$1.ids[0]` indexes lists), e.g. create a track, then insert a device into `$0.address`. Arguments are validated in TypeScript before anything is sent (references pass for any type). `on_error: "stop"` (default) leaves ops that already ran applied as one undo step and skips the rest; `"continue"` runs everything. A failure comes back as `BATCH_FAILED` with the outcome of every op. Not batchable: `transport`, `launch`, `history` (not undoable edits), `transform_notes`, `generate_notes` (they combine calls themselves) and the older automation/ramp/browser tools. A failed batch is reported, not rolled back automatically (Live's undo cannot be tried out from outside without touching the user's own history): use `history undo` deliberately. One Live quirk to know: **device parameter writes are always their own undo entries**, even inside a batch, so a batch that writes k parameter values needs k+1 undos to revert (the same holds for `set_properties` with several parameters in `items`). `history` returns what each undo reverted.
 
 #### Set structure, capabilities, transport and history
 - `describe_set`: a compact map of the whole Set (song settings, every track/return/master with address, kind, mixer state, devices and clips, every scene). Each track has a `hash`, and the Set a `fingerprint`, that change only when the Set really changes (playhead, play state and meters are ignored), so a client can detect edits by comparing fingerprints and see which track changed by comparing hashes. `include_clips: false` gives a lighter summary. The live test suite uses the fingerprint as an invariant: it must be identical before and after a run.

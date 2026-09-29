@@ -1,3 +1,4 @@
+import { BATCH_SPECS } from './batch.js';
 import { COMPOSITION_SPECS } from './composition.js';
 
 /**
@@ -31,47 +32,10 @@ export interface ToolSpec {
   /** More commands a composed tool uses (checked like bridge.command). */
   requires?: string[];
   /** Tools that combine several bridge calls (or run code of their own) provide this instead of a single pass-through call. */
-  run?: (args: Record<string, any>, client: BridgeClient) => Promise<unknown>;
+  run?: (args: Record<string, any>, client: BridgeClient, specs: Record<string, ToolSpec>) => Promise<unknown>;
 }
 
-const isPlainObject = (v: unknown): v is Record<string, unknown> => typeof v === 'object' && v !== null && !Array.isArray(v);
-
-function checkValue(schema: any, value: unknown, label: string): string | null {
-  if (schema === undefined || schema === null) return null;
-  const type = schema.type;
-  const bad = (expected: string) => `${label} must be ${expected}`;
-  if (type === 'number' && !(typeof value === 'number' && Number.isFinite(value))) return bad('a number');
-  if (type === 'string' && typeof value !== 'string') return bad('a string');
-  if (type === 'boolean' && typeof value !== 'boolean') return bad('true or false');
-  if (type === 'object' && !isPlainObject(value)) return bad('an object');
-  if (type === 'array') {
-    if (!Array.isArray(value)) return bad('an array');
-    for (let i = 0; i < value.length; i += 1) {
-      const problem = checkValue(schema.items, value[i], `${label}[${i}]`);
-      if (problem) return problem;
-    }
-  }
-  if (Array.isArray(schema.enum) && !schema.enum.includes(value)) return `${label} must be one of: ${schema.enum.join(', ')}`;
-  if (type === 'object' && isPlainObject(value)) return checkObject(schema, value, label);
-  return null;
-}
-
-function checkObject(schema: any, value: Record<string, unknown>, label: string): string | null {
-  for (const key of schema.required ?? []) {
-    if (value[key] === undefined || value[key] === null) return `${label ? label + ': ' : ''}missing required argument '${key}'`;
-  }
-  for (const [key, sub] of Object.entries<any>(schema.properties ?? {})) {
-    if (value[key] === undefined || value[key] === null) continue;
-    const problem = checkValue(sub, value[key], label ? `${label}.${key}` : key);
-    if (problem) return problem;
-  }
-  return null;
-}
-
-/** Validates tool arguments against the advertised JSON schema; returns a readable problem or null. */
-export function validateArgs(schema: ToolSpec['inputSchema'], args: Record<string, unknown>): string | null {
-  return checkObject(schema, args, '');
-}
+export { validateArgs, BATCH_REFERENCE } from './schema.js';
 
 const ADDRESS_HELP =
   "Addresses: 'song', 'master', 'tracks/N', 'returns/N', 'scenes/N', 'tracks/N/slots/M' (clip slot) and " +
@@ -174,8 +138,8 @@ export const TOOL_SPECS: ToolSpec[] = [
   {
     name: 'history',
     description:
-      "Undo or redo in Live. Every writing tool call is one undo step, so `undo` reverts exactly the last call (one exception: Live records a " +
-      "track rename as its own step). Undo is global: it also reverts edits the user made by hand, so use it deliberately. `steps` (1-50, default 1) " +
+      "Undo or redo in Live. Every writing tool call is one undo step, so `undo` reverts exactly the last call (exceptions: Live records a " +
+      "track rename and every device parameter write as their own entries, so a call or batch that writes several parameters takes that many extra undos). Undo is global: it also reverts edits the user made by hand, so use it deliberately. `steps` (1-50, default 1) " +
       "repeats it; returns the names of what was undone and whether more undo/redo is available.",
     inputSchema: {
       type: 'object',
@@ -442,5 +406,7 @@ export const TOOL_SPECS: ToolSpec[] = [
   },
   ...COMPOSITION_SPECS
 ];
+
+TOOL_SPECS.push(...BATCH_SPECS);
 
 export const TOOL_SPEC_BY_NAME: Record<string, ToolSpec> = Object.fromEntries(TOOL_SPECS.map((s) => [s.name, s]));

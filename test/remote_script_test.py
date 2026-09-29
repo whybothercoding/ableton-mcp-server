@@ -1814,6 +1814,109 @@ class NotesTests(unittest.TestCase):
         self.assertIsNone(live["note_id"]["set"])
 
 
+# ---------------------------------------------------------------- batch
+
+class BatchTests(unittest.TestCase):
+    setUp = LifecycleTests.setUp
+    run_command = LifecycleTests.run_command
+
+    def batch(self, ops, **extra):
+        return self.run_command("batch", dict({"ops": ops}, **extra))
+
+    def op(self, command, **params):
+        return {"command": command, "params": params}
+
+    def test_a_batch_runs_every_op_in_order_and_returns_each_result(self):
+        response = self.batch([self.op("create", kind="scene", name="Bridge"), self.op("create", kind="midi_track", name="Bass"),
+                               self.op("get_properties", address="scenes/2", names=["name"])])
+        self.assertEqual(response["status"], "success", response)
+        result = response["result"]
+        self.assertEqual((result["ok"], result["applied"], [r["command"] for r in result["results"]]), (True, 3, ["create", "create", "get_properties"]))
+        self.assertEqual(result["results"][0]["result"]["address"], "scenes/2")
+        self.assertEqual(result["results"][2]["result"]["properties"], {"name": "Bridge"})
+        self.assertEqual((len(self.song.scenes), self.song.tracks[-1].name), (3, "Bass"))
+
+    def test_the_whole_batch_is_one_undo_step(self):
+        self.song.undo_log.clear()
+        self.batch([self.op("create", kind="scene"), self.op("create", kind="scene"), self.op("create", kind="midi_track")])
+        self.assertEqual(self.song.undo_log, ["begin", "end"])
+
+    def test_later_ops_can_use_earlier_results(self):
+        response = self.batch([self.op("create", kind="scene", name="First"),
+                               self.op("set_properties", address="$0.address", properties={"name": "Renamed", "tempo": 100}),
+                               self.op("duplicate", address="$0.address"),
+                               self.op("get_properties", address="$2.address", names=["name"])])
+        self.assertEqual(response["status"], "success", response)
+        self.assertEqual([s.name for s in self.song.scenes][-2:], ["Renamed", "Renamed"])
+        self.assertEqual(self.song.scenes[2].tempo, 100.0)
+
+    def test_references_keep_types_and_work_inside_strings_lists_and_objects(self):
+        response = self.batch([self.op("create", kind="scene", name="Verse"),
+                               self.op("set_properties", address="scenes/$0.name", properties={"tempo": "$0.color"}),
+                               ])
+        self.assertEqual(response["status"], "error")
+        self.assertEqual(response["details"]["results"][1]["code"], "INVALID_ARGUMENT")      # 'scenes/Verse' is not an address: the text was substituted
+        ok = self.batch([self.op("create", kind="scene", name="Chorus"),
+                         self.op("set_properties", address="scenes/name:$0.name", properties={"tempo": 90})])
+        self.assertEqual(ok["status"], "success", ok)
+        self.assertEqual(self.song.scenes[-1].tempo, 90.0)
+        typed = self.batch([self.op("create", kind="midi_track", color=77), self.op("create", kind="scene", color="$0.color")])
+        self.assertEqual(typed["result"]["results"][1]["result"]["color"], 77)                # a whole-string reference keeps its number type
+
+    def test_an_error_stops_the_batch_keeps_what_was_applied_and_reports_everything(self):
+        response = self.batch([self.op("create", kind="scene", name="A"), self.op("create", kind="scene", index=99),
+                               self.op("create", kind="scene", name="Never")])
+        self.assertEqual((response["status"], response["code"]), ("error", "BATCH_FAILED"))
+        self.assertIn("Batch stopped at op 1 (create)", response["message"])
+        self.assertIn("1 op(s) before it were applied as ONE undo step", response["message"])
+        details = response["details"]
+        self.assertEqual((details["applied"], details["failed"], details["not_run"]), (1, [1], [2]))
+        self.assertEqual([r["status"] for r in details["results"]], ["success", "error"])
+        self.assertEqual(details["results"][1]["code"], "OUT_OF_RANGE")
+        self.assertEqual([s.name for s in self.song.scenes], ["S0", "S1", "A"])                # op 0 stays, op 2 never ran
+        self.assertEqual(self.song.undo_log[-2:], ["begin", "end"])                             # the step is closed even on failure
+
+    def test_on_error_continue_runs_the_rest(self):
+        response = self.batch([self.op("create", kind="scene", index=99), self.op("create", kind="scene", name="Later")], on_error="continue")
+        self.assertEqual(response["code"], "BATCH_FAILED")
+        self.assertIn("1 of 2 ops failed", response["message"])
+        self.assertEqual((response["details"]["applied"], response["details"]["failed"], response["details"]["not_run"]), (1, [0], []))
+        self.assertEqual(self.song.scenes[-1].name, "Later")
+
+    def test_bad_batches_are_refused_before_anything_runs(self):
+        cases = [({"ops": []}, "INVALID_ARGUMENT"), ({"ops": "x"}, "INVALID_ARGUMENT"), ({}, "INVALID_ARGUMENT"),
+                 ({"ops": [self.op("create", kind="scene"), {"params": {}}]}, "INVALID_ARGUMENT"),
+                 ({"ops": [self.op("create", kind="scene"), self.op("no_such_command")]}, "NOT_FOUND"),
+                 ({"ops": [self.op("create", kind="scene"), {"command": "get_properties", "params": []}]}, "INVALID_ARGUMENT"),
+                 ({"ops": [self.op("create", kind="scene")], "on_error": "explode"}, "INVALID_ARGUMENT"),
+                 ({"ops": [self.op("create", kind="scene")] * 101}, "INVALID_ARGUMENT")]
+        for command in ("batch", "history", "eval", "transport", "launch", "ramp_parameter", "cancel_ramps"):
+            cases.append(({"ops": [self.op("create", kind="scene"), self.op(command)]}, "INVALID_ARGUMENT"))
+        for params, code in cases:
+            response = self.run_command("batch", params)
+            self.assertEqual((response["status"], response["code"]), ("error", code), str(params)[:80])
+        self.assertEqual(len(self.song.scenes), 2)
+
+    def test_reference_errors_are_specific(self):
+        for ops, fragment in [([self.op("create", kind="scene", name="$1.name"), self.op("create", kind="scene")], "has not run yet"),
+                              ([self.op("create", kind="scene"), self.op("set_properties", address="$0.nope", properties={"name": "x"})], "does not exist in the result of op 0"),
+                              ([self.op("create", kind="scene", index=99), self.op("delete", address="$0.address", expect={"name": "x"})], "refers to an op that failed"),
+                              ([self.op("create", kind="scene"), self.op("set_properties", address="$0.ids[3]", properties={"name": "x"})], "does not exist")]:
+            response = self.batch(ops, on_error="continue")
+            messages = " ".join(r.get("message", "") for r in response["details"]["results"])
+            self.assertIn(fragment, messages, ops)
+
+    def test_the_error_response_carries_elapsed_time_and_details_only_for_batches(self):
+        response = self.batch([self.op("create", kind="scene", index=99)])
+        self.assertIn("elapsed_ms", response)
+        self.assertIn("details", response)
+        plain = self.run_command("create", {"kind": "scene", "index": 99})
+        self.assertNotIn("details", plain)
+
+    def test_a_batch_is_listed_as_a_writing_command(self):
+        self.assertTrue(mod._COMMANDS["batch"]["writes"])
+
+
 # ---------------------------------------------------------------- cue points and the application
 
 class FakeCue(Typed):

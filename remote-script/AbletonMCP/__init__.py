@@ -16,6 +16,7 @@ from .lifecycle import LifecycleMixin
 from .clip_actions import ClipActionsMixin
 from .notes import NotesMixin
 from .introspect import IntrospectMixin
+from .batch import BatchMixin
 from .server import ServerMixin
 from .session import SessionMixin
 from .tracks import TracksMixin
@@ -44,7 +45,7 @@ def create_instance(c_instance):
     return AbletonMCP(c_instance)
 
 
-class AbletonMCP(ServerMixin, AddressingMixin, DeviceAddressingMixin, PropertiesMixin, StructureMixin, LifecycleMixin, ClipActionsMixin, NotesMixin, IntrospectMixin, SessionMixin, TracksMixin, ClipsMixin, DevicesMixin, DeviceActionsMixin, AutomationMixin, BrowserMixin,
+class AbletonMCP(ServerMixin, BatchMixin, AddressingMixin, DeviceAddressingMixin, PropertiesMixin, StructureMixin, LifecycleMixin, ClipActionsMixin, NotesMixin, IntrospectMixin, SessionMixin, TracksMixin, ClipsMixin, DevicesMixin, DeviceActionsMixin, AutomationMixin, BrowserMixin,
                  ControlSurface):
     """AbletonMCP Remote Script for Ableton Live"""
 

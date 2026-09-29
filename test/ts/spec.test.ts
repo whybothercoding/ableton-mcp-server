@@ -166,7 +166,7 @@ test('tools folded into the verb tools are no longer advertised', () => {
   const retired = ['get_session_info', 'get_track_structure', 'get_bulk_session_structure', 'get_clip_notes', 'edit_clip_notes', 'set_tempo', 'set_track_name',
     'set_track_color', 'set_track_mute', 'set_track_solo', 'set_track_arm', 'set_clip_name', 'set_clip_color', 'set_scene_name', 'create_midi_track', 'create_clip',
     'delete_clip', 'fire_clip', 'stop_clip', 'fire_scene', 'stop_all_clips', 'start_playback', 'stop_playback', 'get_device_parameters', 'set_device_parameter',
-    'bulk_set_device_parameters'];
+    'bulk_set_device_parameters', 'bulk_edit_clips'];
   const names = new Set(TOOLS.map((t) => t.name));
   for (const name of retired) assert.ok(!names.has(name), `${name} should be retired`);
   assert.deepEqual(TOOL_SPEC_BY_NAME.create.inputSchema.properties.kind.enum, ['audio_track', 'midi_track', 'return_track', 'scene', 'midi_clip', 'cue_point']);

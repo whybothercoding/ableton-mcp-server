@@ -50,7 +50,7 @@ export class ToolHandler {
         this.client.ensureCapability(spec.bridge.command);
         for (const required of spec.requires ?? []) this.client.ensureCapability(required);
         resultData = spec.run
-          ? await spec.run(args, this.client)
+          ? await spec.run(args, this.client, TOOL_SPEC_BY_NAME)
           : await this.client.sendCommand(spec.bridge.command, spec.bridge.params ? spec.bridge.params(args) : args);
         return { content: [{ type: 'text', text: JSON.stringify(resultData, null, 2) }] };
       }
@@ -159,42 +159,6 @@ export class ToolHandler {
           break;
         }
 
-        case 'bulk_edit_clips': {
-          const results: Record<string, any> = {};
-          if (Array.isArray(args.create) && args.create.length > 0) {
-            if (this.client.hasCapability('bulk_create_clips')) {
-              results.created = await this.client.sendCommand('bulk_create_clips', {
-                items: args.create
-              });
-            } else {
-              this.client.ensureCapability('create_clip');
-              const created = [];
-              for (const item of args.create) {
-                const res = await this.client.sendCommand('create_clip', item);
-                created.push(res);
-              }
-              results.created = created;
-            }
-          }
-          if (Array.isArray(args.names) && args.names.length > 0) {
-            if (this.client.hasCapability('bulk_set_clip_names')) {
-              results.renamed = await this.client.sendCommand('bulk_set_clip_names', {
-                items: args.names
-              });
-            } else {
-              this.client.ensureCapability('set_clip_name');
-              const renamed = [];
-              for (const item of args.names) {
-                const res = await this.client.sendCommand('set_clip_name', item);
-                renamed.push(res);
-              }
-              results.renamed = renamed;
-            }
-          }
-          resultData = results;
-          break;
-        }
-
         case 'eval_python': {
           this.client.ensureCapability('eval');
           resultData = await this.client.sendCommand('eval', {
@@ -224,10 +188,11 @@ export class ToolHandler {
         ]
       };
     } catch (err: any) {
-      const errorMessage =
+      let errorMessage =
         err instanceof AbletonClientError || err instanceof CompositionError
           ? err.message
           : `Unexpected error executing tool '${toolName}': ${err.message}`;
+      if (err instanceof AbletonClientError && err.details) errorMessage += `\n${JSON.stringify(err.details, null, 2)}`;
 
       return {
         content: [

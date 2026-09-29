@@ -18,7 +18,9 @@ export class AbletonClientError extends Error {
     /** True when the failure happened before the command was sent, so retrying cannot repeat it. */
     public readonly retryable: boolean = false,
     /** The Remote Script's error code (OUT_OF_RANGE, NOT_FOUND, TYPE_ERROR, ...) for REMOTE_ERROR failures. */
-    public readonly bridgeCode?: string
+    public readonly bridgeCode?: string,
+    /** Extra structured information some errors carry (a failed batch lists every op's outcome). */
+    public readonly details?: unknown
   ) {
     super(message);
     this.name = 'AbletonClientError';
@@ -110,7 +112,8 @@ export class AbletonClient {
                   response.message || `Command '${type}' failed on Live Remote Script`,
                   'REMOTE_ERROR',
                   false,
-                  response.code
+                  response.code,
+                  response.details
                 )
               );
             }
@@ -143,7 +146,8 @@ export class AbletonClient {
                     response.message || `Command '${type}' failed`,
                     'REMOTE_ERROR',
                     false,
-                    response.code
+                    response.code,
+                    response.details
                   )
                 );
               }
