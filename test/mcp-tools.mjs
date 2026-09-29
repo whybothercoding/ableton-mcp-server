@@ -158,6 +158,45 @@ try {
     assert(typeof info.tempo === 'number', 'no tempo');
   });
 
+  console.log('\nAddresses and properties');
+  const clipAddress = `tracks/${T}/slots/${S}/clip`;
+  await check('the property tools are listed with accurate annotations', async () => {
+    for (const [name, readOnly] of [['get_properties', true], ['list_properties', true], ['set_properties', false]]) {
+      const tool = byName[name];
+      assert(tool, `${name} missing`);
+      assert(tool.annotations?.readOnlyHint === readOnly, `${name}.readOnlyHint should be ${readOnly}: ${JSON.stringify(tool.annotations)}`);
+      assert(tool.annotations?.destructiveHint === false, `${name} is not destructive`);
+    }
+    assert(JSON.stringify(byName.get_properties.inputSchema.required) === JSON.stringify(['address']), 'get_properties.required');
+    assert(byName.eval_python === undefined, 'eval_python must be hidden unless ABLETON_MCP_ALLOW_EVAL=1');
+  });
+  await check('get_properties and list_properties return usable data', async () => {
+    const song = await ok('get_properties', { address: 'song', names: ['tempo', 'clip_trigger_quantization'] });
+    assert(typeof song.properties.tempo === 'number' && typeof song.properties.clip_trigger_quantization === 'string', JSON.stringify(song));
+    const listing = await ok('list_properties', { kind: 'clip' });
+    assert(listing.properties.launch_mode.values.includes('gate'), JSON.stringify(listing.properties.launch_mode));
+  });
+  await check('set_properties changes a scratch clip and reports old and new values', async () => {
+    const out = await ok('set_properties', { address: clipAddress, properties: { muted: true, launch_mode: 'toggle' } });
+    assert(out.applied.muted.from === false && out.applied.muted.to === true && out.applied.launch_mode.to === 'toggle', JSON.stringify(out));
+    const back = await ok('set_properties', { address: clipAddress, properties: { muted: false, launch_mode: 'trigger' } });
+    assert(back.applied.muted.to === false, JSON.stringify(back));
+  });
+  await check('argument problems are caught in TypeScript with a readable message', async () => {
+    await fails('get_properties', {}, "missing required argument 'address'");
+    await fails('get_properties', { address: 5 }, 'address must be a string');
+    await fails('get_properties', { address: 'song', names: 'tempo' }, 'names must be an array');
+    await fails('set_properties', { items: [{ address: 'song' }] }, "items[0]: missing required argument 'properties'");
+    await fails('list_properties', { kind: 'device' }, 'must be one of: song, track, scene, slot, clip');
+  });
+  await check('bridge problems come back as tool errors with the reason', async () => {
+    await fails('get_properties', { address: 'tracks/999' }, 'out of range');
+    await fails('get_properties', { address: 'tracks/name:No Such Track' }, "No track named 'No Such Track'");
+    await fails('set_properties', { address: clipAddress, properties: { launch_mode: 'sideways' } }, 'trigger, gate, toggle, repeat');
+    await fails('set_properties', { address: clipAddress, properties: { muted: 'yes' } }, 'muted must be true or false');
+    await fails('set_properties', { address: `tracks/${T}`, properties: { mute: true }, expect: { name: 'Definitely Not This' } }, 'Guard failed');
+  });
+
   console.log('\nTrack types, device paths and parameter details');
   await check('schemas expose track_type and device_path where they apply', async () => {
     for (const name of ['get_track_detail', 'get_device_parameters', 'set_device_parameter', 'load_browser_item', 'set_track_name', 'set_track_color', 'set_track_mute', 'set_track_solo', 'set_track_arm', 'ramp_parameter', 'cancel_ramps', 'draw_automation', 'clear_automation']) {

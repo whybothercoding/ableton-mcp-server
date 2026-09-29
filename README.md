@@ -161,6 +161,16 @@ With Live running and the script enabled, call the `get_health` tool. It should 
 
 Targets are `device_index` (or `device_path`) + `parameter_index`, or `mixer_parameter` (`"volume"`, `"pan"`, `"send:N"`), on any `track_type` (see below). Limits from Live's API: automation envelopes exist only on **Session** clips (not arrangement clips), and only for parameters on the clip's own track.
 
+#### Properties by address
+`get_properties`, `set_properties` and `list_properties` read and write about a hundred properties of the Song, tracks, scenes, clip slots and clips through one address grammar instead of one tool per property:
+
+- **Addresses:** `song`, `master`, `tracks/N`, `returns/N`, `scenes/N`, `tracks/N/slots/M` (clip slot) and `tracks/N/slots/M/clip`; indices are 0-based. A name selector works wherever a number does: `tracks/name:Drift`, `scenes/name:Verse` (exact match; several matches is an `AMBIGUOUS` error listing the indices).
+- **Strict values:** booleans must be `true`/`false`, integers whole numbers, enums are given **by name** (`"launch_mode": "gate"`; `list_properties` shows the valid names and ranges). Wrong types are `TYPE_ERROR`, out-of-range values `OUT_OF_RANGE`, unknown or read-only properties are refused.
+- **Interdependent properties** (`loop_start`/`loop_end`, ...) can be set together in any order, and a call is all-or-nothing: if one write fails, the others are restored.
+- **`get_properties` without `names`** reads everything readable; properties that do not apply to that object (audio-only ones on a MIDI clip, `arm` on a return track) are listed under `unavailable`.
+- **`set_properties` with `items`** changes several objects in one call. `expect: {"name": "Drift"}` refuses to write if the object is not the one you meant (index drift after deletes).
+- Virtual mixer properties on tracks: `volume` and `panning` (device values; volume 0.85 is 0 dB). An unset scene `tempo` or `time_signature_numerator` reads as `-1`.
+
 #### Addressing: track types, racks and parameter details
 Every device-facing tool (`get_track_detail`, `get_device_parameters`, `set_device_parameter`, `bulk_set_device_parameters`, `load_browser_item`, `ramp_parameter`, `cancel_ramps`, and the `set_track_*` tools) takes:
 
@@ -180,7 +190,7 @@ Not covered: device properties Live keeps outside `parameters` (Wavetable's osci
 
 ### Errors, timing and undo
 - Every bridge response carries `elapsed_ms` (time spent inside Live). Errors carry a stable `code`: `OUT_OF_RANGE`, `NOT_FOUND`, `INVALID_ARGUMENT`, `TYPE_ERROR`, `LIVE_ERROR` (Live itself refused), `UNKNOWN_COMMAND`, `INVALID_REQUEST`, `INTERNAL_ERROR`. The Node client exposes it as `error.bridgeCode`.
-- Every writing command runs in its own undo step, so one `undo` in Live reverts exactly one tool call. (Without explicit steps Live coalesces all API edits into a single giant step.) Read-only and no-op commands add no undo entries. Ramps run outside any step and each becomes one undo step of its own.
+- Every writing command runs in its own undo step, so one `undo` in Live reverts exactly one tool call. (Without explicit steps Live coalesces all API edits into a single giant step.) Read-only and no-op commands add no undo entries. One exception: Live records a **track** rename as its own undo entry even inside a grouped call, so undoing a `set_properties` that renames a track can take two undos (clip and scene renames group normally). Ramps run outside any step and each becomes one undo step of its own.
 
 ### Audio Analysis Requirements
 - Install `ffmpeg` and `ffprobe` on the machine running the MCP server. Set `FFMPEG_PATH` and `FFPROBE_PATH` if they are not on `PATH`.

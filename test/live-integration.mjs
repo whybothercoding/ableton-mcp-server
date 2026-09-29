@@ -216,6 +216,144 @@ try {
     assert((await call('eval', { code: name })) === original, 'undo after a failed command should revert only the next successful one');
   });
 
+  console.log('\nAddresses and properties');
+  // Scratch tracks are tracked by Live's stable _live_ptr (names can collide and indices shift after deletes).
+  const scratchPtrs = [];
+  const findScratch = (ptr) => call('eval', { code: `[i for i, t in enumerate(self._song.tracks) if t._live_ptr == ${ptr}]` }).then((r) => r[0]);
+  cleanupsRegistry.push(async () => {
+    for (const ptr of scratchPtrs.reverse()) {
+      const i = await findScratch(ptr);
+      if (i !== undefined) await call('eval', { code: `self._song.delete_track(${i})` });
+    }
+  });
+  const makeScratchTrack = async () => {
+    await call('create_midi_track', { index: -1 });
+    const i = (await call('eval', { code: 'len(self._song.tracks)' })) - 1;
+    scratchPtrs.push(await call('eval', { code: `self._song.tracks[${i}]._live_ptr` }));
+    return i;
+  };
+  const clipAddr = `tracks/${T}/slots/${S}/clip`;
+  await check('get_properties reads song, track, scene and clip with enums as names', async () => {
+    const song = await call('get_properties', { address: 'song', names: ['tempo', 'clip_trigger_quantization', 'scale_name', 'metronome'] });
+    assert(typeof song.properties.tempo === 'number' && typeof song.properties.clip_trigger_quantization === 'string', JSON.stringify(song));
+    const track = await call('get_properties', { address: `tracks/${T}`, names: ['name', 'mute', 'volume', 'current_monitoring_state'] });
+    assert(['IN', 'AUTO', 'OFF'].includes(track.properties.current_monitoring_state), JSON.stringify(track));
+    const clip = await call('get_properties', { address: clipAddr });
+    assert(clip.kind === 'clip' && clip.properties.launch_mode === 'trigger', JSON.stringify(clip.properties.launch_mode));
+    assert('gain' in clip.unavailable, 'audio-only properties should be reported as unavailable on a MIDI clip');
+    const scene = await call('get_properties', { address: 'scenes/0', names: ['name', 'tempo_enabled'] });
+    assert(scene.kind === 'scene', JSON.stringify(scene));
+  });
+  await check('addresses resolve by number and by name, and errors carry codes', async () => {
+    const scratch = await makeScratchTrack();
+    await call('set_properties', { address: `tracks/${scratch}`, properties: { name: 'MCP TEST ADDR' } });
+    const byName = await call('get_properties', { address: 'tracks/name:MCP TEST ADDR', names: ['name'] });
+    assert(byName.address === `tracks/${scratch}`, `canonical address ${byName.address}`);
+    const scratch2 = await makeScratchTrack();
+    await call('set_properties', { address: `tracks/${scratch2}`, properties: { name: 'MCP TEST ADDR' } });
+    for (const [address, code] of [['tracks/name:MCP TEST ADDR', 'AMBIGUOUS'], ['tracks/name:No Such Track', 'NOT_FOUND'], ['tracks/999', 'OUT_OF_RANGE'],
+      [`tracks/${T}/slots/999`, 'OUT_OF_RANGE'], ['nonsense', 'NOT_FOUND'], ['tracks/x', 'INVALID_ARGUMENT']]) {
+      try {
+        await call('get_properties', { address });
+      } catch (err) {
+        assert(err.bridgeCode === code, `${address}: expected ${code}, got ${err.bridgeCode} (${err.message})`);
+        continue;
+      }
+      throw new Error(`${address} should have failed`);
+    }
+  });
+  await check('set_properties on a scratch track: values, virtual mixer properties and the undo step', async () => {
+    const i = await makeScratchTrack();
+    const address = `tracks/${i}`;
+    const out = await call('set_properties', { address, properties: { name: 'MCP TEST PROPS', mute: true, volume: 0.5, panning: -0.25 } });
+    assert(out.applied.name.to === 'MCP TEST PROPS' && out.applied.mute.to === true, JSON.stringify(out));
+    near(await call('eval', { code: `self._song.tracks[${i}].mixer_device.volume.value` }), 0.5, 1e-6, 'volume in Live');
+    near(await call('eval', { code: `self._song.tracks[${i}].mixer_device.panning.value` }), -0.25, 1e-6, 'panning in Live');
+    // One set_properties call is one undo step for everything except a TRACK rename: Live records track names as their
+    // own undo entry even inside a grouped call (clip and scene renames group normally).
+    await call('eval', { code: 'self._song.undo()' });
+    const afterOne = await call('get_properties', { address, names: ['name', 'mute', 'volume', 'panning'] });
+    assert(afterOne.properties.mute === false, `undo should revert mute: ${JSON.stringify(afterOne.properties)}`);
+    near(afterOne.properties.volume, 0.85, 1e-6, 'volume after one undo');
+    near(afterOne.properties.panning, 0, 1e-6, 'panning after one undo');
+    if (afterOne.properties.name === 'MCP TEST PROPS') {
+      await call('eval', { code: 'self._song.undo()' }); // the separate track-rename entry
+      const afterTwo = await call('get_properties', { address, names: ['name'] });
+      assert(afterTwo.properties.name !== 'MCP TEST PROPS', 'a second undo should revert the track rename');
+    }
+  });
+  await check('strict typing, ranges and enum names are enforced with clear codes', async () => {
+    const cases = [
+      [{ address: clipAddr, properties: { muted: 1 } }, 'TYPE_ERROR'], [{ address: clipAddr, properties: { name: 5 } }, 'TYPE_ERROR'],
+      [{ address: clipAddr, properties: { pitch_coarse: 1.5 } }, 'TYPE_ERROR'], [{ address: 'song', properties: { tempo: 5 } }, 'OUT_OF_RANGE'],
+      [{ address: clipAddr, properties: { launch_mode: 'sideways' } }, 'INVALID_ARGUMENT'], [{ address: clipAddr, properties: { launch_mode: 1 } }, 'INVALID_ARGUMENT'],
+      [{ address: clipAddr, properties: { length: 9 } }, 'INVALID_ARGUMENT'], [{ address: clipAddr, properties: { nope: 1 } }, 'NOT_FOUND'],
+      [{ address: clipAddr, properties: {} }, 'INVALID_ARGUMENT']
+    ];
+    for (const [params, code] of cases) {
+      try {
+        await call('set_properties', params);
+      } catch (err) {
+        assert(err.bridgeCode === code, `${JSON.stringify(params)}: expected ${code}, got ${err.bridgeCode} (${err.message})`);
+        continue;
+      }
+      throw new Error(`${JSON.stringify(params)} should have failed`);
+    }
+    const mode = await call('get_properties', { address: clipAddr, names: ['launch_mode', 'muted'] });
+    assert(mode.properties.launch_mode === 'trigger' && mode.properties.muted === false, 'a rejected call must change nothing');
+  });
+  await check('clip launch settings by name; loop markers order themselves; a failing call restores everything', async () => {
+    const set = await call('set_properties', { address: clipAddr, properties: { launch_mode: 'gate', launch_quantization: 'q_bar', legato: true, velocity_amount: 0.5 } });
+    assert(set.applied.launch_mode.to === 'gate' && set.applied.launch_quantization.to === 'q_bar', JSON.stringify(set.applied));
+    assert((await call('eval', { code: `${clipExpr(T, S)}.launch_mode` })) === 1, 'launch_mode should be 1 (gate) in Live');
+    // reverse-dependency order in one call: loop_end first would fail alone
+    await call('set_properties', { address: clipAddr, properties: { loop_start: 1.0, loop_end: 3.0 } });
+    await call('set_properties', { address: clipAddr, properties: { loop_end: 3.5, loop_start: 2.5 } });
+    const loop = await call('get_properties', { address: clipAddr, names: ['loop_start', 'loop_end'] });
+    assert(loop.properties.loop_start === 2.5 && loop.properties.loop_end === 3.5, JSON.stringify(loop.properties));
+    // loop_end below loop_start can never succeed: everything written before it must be restored
+    const before = await call('get_properties', { address: clipAddr, names: ['name', 'muted', 'loop_start', 'loop_end'] });
+    await rejects(call('set_properties', { address: clipAddr, properties: { name: 'MCP TEST ROLLBACK', muted: true, loop_end: 0.1 } }), 'LoopEnd');
+    const after = await call('get_properties', { address: clipAddr, names: ['name', 'muted', 'loop_start', 'loop_end'] });
+    assert(JSON.stringify(after.properties) === JSON.stringify(before.properties), `not restored: ${JSON.stringify(after.properties)} vs ${JSON.stringify(before.properties)}`);
+    // the scratch clip is shared with later tests (its length follows the loop): put every setting back
+    await call('set_properties', { address: clipAddr, properties: { loop_start: 0.0, loop_end: 4.0, launch_mode: 'trigger', launch_quantization: 'q_global', legato: false, velocity_amount: 0.0 } });
+    const restored = await call('get_properties', { address: clipAddr, names: ['length', 'launch_mode'] });
+    assert(restored.properties.length === 4 && restored.properties.launch_mode === 'trigger', JSON.stringify(restored.properties));
+  });
+  await check('the expect guard refuses a stale target and writes nothing', async () => {
+    const i = await makeScratchTrack();
+    const address = `tracks/${i}`;
+    const name = (await call('get_properties', { address, names: ['name'] })).properties.name;
+    try {
+      await call('set_properties', { address, properties: { mute: true }, expect: { name: 'Some Other Track' } });
+      throw new Error('should have been refused');
+    } catch (err) {
+      assert(err.bridgeCode === 'GUARD_FAILED', `${err.bridgeCode}: ${err.message}`);
+    }
+    assert((await call('get_properties', { address, names: ['mute'] })).properties.mute === false, 'the guarded write must not happen');
+    await call('set_properties', { address, properties: { mute: true }, expect: { name } });
+  });
+  await check('same-value writes on your song and scene succeed and change nothing', async () => {
+    const song = await call('get_properties', { address: 'song', names: ['tempo', 'groove_amount', 'clip_trigger_quantization', 'metronome', 'root_note'] });
+    const out = await call('set_properties', { address: 'song', properties: song.properties });
+    assert(Object.keys(out.applied).length === Object.keys(song.properties).length, 'every property should be reported as applied');
+    assert(JSON.stringify((await call('get_properties', { address: 'song', names: Object.keys(song.properties) })).properties) === JSON.stringify(song.properties), 'song changed');
+    const scene = (await call('get_properties', { address: 'scenes/0', names: ['name', 'tempo_enabled', 'time_signature_enabled'] })).properties;
+    await call('set_properties', { address: 'scenes/0', properties: scene });
+    assert(JSON.stringify((await call('get_properties', { address: 'scenes/0', names: Object.keys(scene) })).properties) === JSON.stringify(scene), 'scene changed');
+  });
+  await check('items set several objects in one call, and list_properties describes them', async () => {
+    const a = await makeScratchTrack();
+    const b = await makeScratchTrack();
+    const out = await call('set_properties', { items: [{ address: `tracks/${a}`, properties: { name: 'MCP TEST A' } }, { address: `tracks/${b}`, properties: { name: 'MCP TEST B', mute: true } }] });
+    assert(out.results.length === 2 && out.results[1].applied.mute.to === true, JSON.stringify(out));
+    const list = await call('list_properties', { address: clipAddr });
+    assert(list.kind === 'clip' && list.properties.launch_mode.values.join() === 'trigger,gate,toggle,repeat', JSON.stringify(list.properties.launch_mode));
+    assert(list.properties.length.writable === false && list.properties.name.writable === true, 'writable flags');
+    assert(!list.properties.warp_mode.values.includes('count'), 'the count sentinel must be hidden');
+  });
+
   console.log('\ndraw_automation');
   await check('linear ramp: readback and independent envelope values match', async () => {
     const lo = pA.min + 0.2 * (pA.max - pA.min);

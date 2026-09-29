@@ -39,7 +39,8 @@ export class AbletonMcpServer {
         tools: TOOLS.filter((t) => isToolEnabled(t.name)).map((t) => ({
           name: t.name,
           description: t.description,
-          inputSchema: t.inputSchema
+          inputSchema: t.inputSchema,
+          ...(t.annotations ? { annotations: t.annotations } : {})
         }))
       };
     });

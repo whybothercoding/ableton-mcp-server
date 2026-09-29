@@ -146,6 +146,80 @@ class FakeSlot(object):
         self.has_clip = clip is not None
 
 
+class Typed(object):
+    """Setters mimic Boost.Python: exact C++ types (float takes int/bool, int takes bool but not float, str only str)."""
+    _types = {}
+
+    def __setattr__(self, key, value):
+        expected = self._types.get(key)
+        if expected is not None:
+            accepted = {float: isinstance(value, (int, float)), int: isinstance(value, int) and not isinstance(value, float),
+                        str: isinstance(value, str), bool: isinstance(value, (bool, int))}[expected]
+            if not accepted:
+                raise TypeError("Python argument types in\n    None.None({0}, {1})\ndid not match C++ signature".format(
+                    type(self).__name__, type(value).__name__))
+        object.__setattr__(self, key, value)
+
+
+class PropClip(Typed, FakeClip):
+    """A MIDI clip with Live-like property behaviour: loop marker ordering, launch mode validation, audio-only errors."""
+    _types = {"name": str, "color": int, "muted": bool, "looping": bool, "loop_start": float, "loop_end": float,
+              "start_marker": float, "end_marker": float, "position": float, "legato": bool, "velocity_amount": float,
+              "pitch_coarse": int, "launch_mode": int, "launch_quantization": int, "signature_numerator": int}
+
+    def __init__(self, name="clip", length=4.0):
+        FakeClip.__init__(self, name, length)
+        self._loop_start, self._loop_end, self._launch_mode = 0.0, length, 0
+        self.color, self.muted, self.looping, self.legato = 0, False, True, False
+        self.start_marker, self.end_marker, self.position = 0.0, length, 0.0
+        self.velocity_amount, self.launch_quantization, self.signature_numerator = 0.0, 0, 4
+        self.is_audio_clip, self.is_midi_clip = False, True
+        self.scale_intervals = (0, 2, 4)
+
+    @property
+    def loop_start(self):
+        return self._loop_start
+
+    @loop_start.setter
+    def loop_start(self, value):
+        if value > self._loop_end:
+            raise RuntimeError("Cannot set LoopStart behind LoopEnd")
+        self._loop_start = value
+
+    @property
+    def loop_end(self):
+        return self._loop_end
+
+    @loop_end.setter
+    def loop_end(self, value):
+        if value < self._loop_start:
+            raise RuntimeError("Cannot set LoopEnd before LoopStart")
+        self._loop_end = value
+
+    @property
+    def launch_mode(self):
+        return self._launch_mode
+
+    @launch_mode.setter
+    def launch_mode(self, value):
+        if value not in (0, 1, 2, 3):
+            raise RuntimeError("Invalid launch mode {0}".format(value))
+        self._launch_mode = value
+
+    @property
+    def gain(self):
+        raise RuntimeError("Not an audio clip")
+
+
+class PropScene(Typed):
+    _types = {"name": str, "tempo": float, "tempo_enabled": bool, "time_signature_numerator": int}
+
+    def __init__(self, name):
+        self.name, self.color, self.tempo, self.tempo_enabled = name, 0, 120.0, False
+        self.time_signature_numerator, self.time_signature_denominator, self.time_signature_enabled = 4, 4, False
+        self.is_empty, self.is_triggered = True, False
+
+
 class FakeDevice(object):
     def __init__(self, name, params=None, dev_type=2, chains=None, return_chains=None, drum_pads=None):
         self.name, self.class_name, self.type = name, name.replace(" ", ""), dev_type
@@ -239,9 +313,24 @@ def free_port():
     return port
 
 
+class FakeEnum(object):
+    """Like a Boost.Python enum class: `.names` maps name -> int (and may include a 'count' sentinel)."""
+
+    def __init__(self, **names):
+        self.names = dict(names)
+
+
 def load_module():
     live = types.ModuleType("Live")
     live.Base = types.SimpleNamespace(Timer=FakeTimer)
+    live.Clip = types.SimpleNamespace(
+        LaunchMode=FakeEnum(trigger=0, gate=1, toggle=2, repeat=3),
+        ClipLaunchQuantization=FakeEnum(q_global=0, q_none=1, q_8_bars=2, q_4_bars=3, q_2_bars=4, q_bar=5, q_half=6),
+        WarpMode=FakeEnum(beats=0, tones=1, texture=2, repitch=3, complex=4, rex=5, complex_pro=6, count=7))
+    live.Song = types.SimpleNamespace(
+        Quantization=FakeEnum(q_no_q=0, q_8_bars=1, q_4_bars=2, q_2_bars=3, q_bar=4, q_half=5),
+        RecordingQuantization=FakeEnum(rec_q_no_q=0, quarter=1, eight=2))
+    live.Track = types.SimpleNamespace(Track=types.SimpleNamespace(monitoring_states=FakeEnum(IN=0, AUTO=1, OFF=2)))
     framework = types.ModuleType("_Framework")
     control_surface = types.ModuleType("_Framework.ControlSurface")
     control_surface.ControlSurface = FakeControlSurface
@@ -570,6 +659,209 @@ class RampTests(unittest.TestCase):
         self.advance(100.0)
         self.assertEqual(self.freq.value, 1.0)
         self.assertTrue(all(0.0 <= w <= 1.0 for w in self.freq.writes))
+
+
+# ---------------------------------------------------------------- addressing and properties
+
+class AddressAndPropertyTests(unittest.TestCase):
+    def setUp(self):
+        self.script = make_script()
+        self.addCleanup(self.script._stop_server)
+        song = make_song()
+        song.tracks = [FakeTrack("A"), FakeTrack("B"), FakeTrack("Twin"), FakeTrack("Twin")]
+        song.tracks[0].clip_slots = [FakeSlot(PropClip("loop", 4.0)), FakeSlot()]
+        song.scenes = [PropScene("Verse"), PropScene("Chorus")]
+        song.metronome, song.loop, song.loop_start, song.loop_length = False, False, 0.0, 4.0
+        song.root_note, song.scale_name, song.scale_mode, song.scale_intervals = 0, "Major", True, [0, 2, 4, 5, 7, 9, 11]
+        song.clip_trigger_quantization, song.groove_amount, song.swing_amount = 4, 0.0, 0.0
+        song.is_playing, song.can_undo, song.can_redo = False, True, False
+        self.script._song = self.song = song
+        self.clip = song.tracks[0].clip_slots[0].clip
+
+    def run_command(self, command_type, params):
+        return self.script._process_command({"type": command_type, "params": params})
+
+    def code_of(self, fn, *args):
+        with self.assertRaises(mod.BridgeError) as ctx:
+            fn(*args)
+        return ctx.exception.code
+
+    # ---- addresses
+    def test_resolve_every_address_form(self):
+        r = self.script._resolve
+        self.assertEqual(r("song")[0::2], ("song", "song"))
+        self.assertEqual((r("master")[0], r("master")[2]), ("track", "master"))
+        self.assertEqual((r("tracks/1")[1].name, r("tracks/1")[2]), ("B", "tracks/1"))
+        self.assertEqual((r("tracks/name:B")[1].name, r("tracks/name:B")[2]), ("B", "tracks/1"))
+        self.assertEqual(r("returns/0")[2], "returns/0")
+        self.assertEqual((r("scenes/1")[1].name, r("scenes/1")[2]), ("Chorus", "scenes/1"))
+        self.assertEqual((r("scenes/name:Verse")[2]), "scenes/0")
+        self.assertEqual((r("tracks/0/slots/1")[0], r("tracks/0/slots/1")[2]), ("slot", "tracks/0/slots/1"))
+        kind, clip, canonical = r("tracks/0/slots/0/clip")
+        self.assertEqual((kind, clip is self.clip, canonical), ("clip", True, "tracks/0/slots/0/clip"))
+        self.assertEqual(r(" /tracks/1/ ")[2], "tracks/1")  # whitespace and stray slashes are tolerated
+
+    def test_resolve_errors_carry_codes(self):
+        cases = [("", "INVALID_ARGUMENT"), (None, "INVALID_ARGUMENT"), (5, "INVALID_ARGUMENT"), ("bogus", "NOT_FOUND"),
+                 ("tracks/9", "OUT_OF_RANGE"), ("tracks/-1", "OUT_OF_RANGE"), ("tracks/x", "INVALID_ARGUMENT"),
+                 ("tracks/name:Nope", "NOT_FOUND"), ("tracks/name:Twin", "AMBIGUOUS"), ("returns/3", "OUT_OF_RANGE"),
+                 ("scenes/7", "OUT_OF_RANGE"), ("tracks/0/slots/9", "OUT_OF_RANGE"), ("tracks/0/slots/1/clip", "NOT_FOUND"),
+                 ("tracks/0/slots/0/other", "NOT_FOUND"), ("returns/0/slots/0", "NOT_FOUND"), ("song/extra", "NOT_FOUND")]
+        for address, code in cases:
+            self.assertEqual(self.code_of(self.script._resolve, address), code, address)
+
+    def test_ambiguous_and_missing_names_say_what_exists(self):
+        with self.assertRaises(mod.BridgeError) as ctx:
+            self.script._resolve("tracks/name:Twin")
+        self.assertIn("[2, 3]", str(ctx.exception))
+        with self.assertRaises(mod.BridgeError) as ctx:
+            self.script._resolve("tracks/name:Nope")
+        self.assertIn("'A'", str(ctx.exception))
+
+    def test_address_of_round_trips(self):
+        for address in ("song", "master", "tracks/2", "returns/0", "scenes/1", "tracks/0/slots/0", "tracks/0/slots/0/clip"):
+            self.assertEqual(self.script._address_of(self.script._resolve(address)[1]), address)
+        self.assertIsNone(self.script._address_of(object()))
+
+    def test_guard(self):
+        track = self.song.tracks[1]
+        self.script._guard(track, None, "tracks/1")
+        self.script._guard(track, {"name": "B"}, "tracks/1")
+        self.assertEqual(self.code_of(self.script._guard, track, {"name": "Z"}, "tracks/1"), "GUARD_FAILED")
+        self.assertEqual(self.code_of(self.script._guard, track, {"colour": 1}, "tracks/1"), "INVALID_ARGUMENT")
+        self.assertEqual(self.code_of(self.script._guard, track, ["name"], "tracks/1"), "INVALID_ARGUMENT")
+
+    # ---- reading
+    def test_get_named_properties(self):
+        out = self.script._get_properties("tracks/0", ["name", "mute", "volume", "panning"])
+        self.assertEqual(out["kind"], "track")
+        self.assertEqual(out["properties"], {"name": "A", "mute": False, "volume": 0.85, "panning": 0})
+
+    def test_enums_are_read_as_names_and_lists_as_lists(self):
+        self.assertEqual(self.script._get_properties("song", ["clip_trigger_quantization", "scale_intervals"])["properties"],
+                         {"clip_trigger_quantization": "q_bar", "scale_intervals": [0, 2, 4, 5, 7, 9, 11]})
+        self.assertEqual(self.script._get_properties("tracks/0/slots/0/clip", ["launch_mode"])["properties"], {"launch_mode": "trigger"})
+
+    def test_get_all_reports_unavailable_instead_of_failing(self):
+        out = self.script._get_properties("tracks/0/slots/0/clip")
+        self.assertIn("name", out["properties"])
+        self.assertIn("gain", out["unavailable"])  # audio-only property raising RuntimeError on a MIDI clip
+        self.assertNotIn("gain", out["properties"])
+        ret = self.script._get_properties("returns/0")
+        self.assertIn("arm", ret["unavailable"])   # return tracks have no arm
+
+    def test_get_named_property_that_is_unavailable_raises(self):
+        with self.assertRaises(RuntimeError):
+            self.script._get_properties("tracks/0/slots/0/clip", ["gain"])
+
+    def test_get_unknown_property_names_valid_ones(self):
+        with self.assertRaises(mod.BridgeError) as ctx:
+            self.script._get_properties("tracks/0", ["nope"])
+        self.assertEqual(ctx.exception.code, "NOT_FOUND")
+        self.assertIn("name", str(ctx.exception))
+        self.assertEqual(self.code_of(self.script._get_properties, "tracks/0", "name"), "INVALID_ARGUMENT")
+
+    # ---- writing
+    def test_set_reports_from_and_to(self):
+        out = self.script._set_properties("tracks/1", {"name": "Bass", "mute": True, "volume": 0.5})
+        self.assertEqual(out["applied"]["name"], {"from": "B", "to": "Bass"})
+        self.assertEqual(out["applied"]["mute"], {"from": False, "to": True})
+        self.assertEqual(out["applied"]["volume"], {"from": 0.85, "to": 0.5})
+        self.assertEqual((self.song.tracks[1].name, self.song.tracks[1].mixer_device.volume.value), ("Bass", 0.5))
+
+    def test_type_checks_are_strict_and_come_back_as_type_errors(self):
+        cases = [("tracks/1", {"mute": 1}), ("tracks/1", {"mute": "true"}), ("tracks/1", {"name": 5}),
+                 ("tracks/1", {"color": 1.5}), ("tracks/1", {"color": True}), ("tracks/1", {"volume": "loud"}),
+                 ("tracks/1", {"volume": True}), ("song", {"tempo": None}), ("song", {"root_note": "C"})]
+        for address, values in cases:
+            self.assertEqual(self.code_of(self.script._set_properties, address, values), "TYPE_ERROR", str(values))
+
+    def test_ranges(self):
+        for values in ({"tempo": 10.0}, {"tempo": 1000}, {"groove_amount": 2.0}, {"root_note": 12}):
+            self.assertEqual(self.code_of(self.script._set_properties, "song", values), "OUT_OF_RANGE", str(values))
+        self.assertEqual(self.code_of(self.script._set_properties, "tracks/1", {"volume": 1.5}), "OUT_OF_RANGE")
+        self.script._set_properties("song", {"tempo": 20})          # inclusive bounds; int accepted for float
+        self.assertEqual(self.song.tempo, 20.0)
+
+    def test_enums_by_name(self):
+        self.script._set_properties("song", {"clip_trigger_quantization": "q_half"})
+        self.assertEqual(self.song.clip_trigger_quantization, 5)
+        self.script._set_properties("tracks/0/slots/0/clip", {"launch_mode": "gate"})
+        self.assertEqual(self.clip.launch_mode, 1)
+        with self.assertRaises(mod.BridgeError) as ctx:
+            self.script._set_properties("tracks/0/slots/0/clip", {"launch_mode": "sideways"})
+        self.assertEqual(ctx.exception.code, "INVALID_ARGUMENT")
+        self.assertIn("trigger, gate, toggle, repeat", str(ctx.exception))          # valid names, in value order
+        self.assertEqual(self.code_of(self.script._set_properties, "tracks/0/slots/0/clip", {"launch_mode": 1}), "INVALID_ARGUMENT")
+        self.assertEqual(self.code_of(self.script._set_properties, "tracks/0/slots/0/clip", {"warp_mode": "count"}), "INVALID_ARGUMENT")  # sentinel hidden
+
+    def test_read_only_and_unknown_properties_are_refused(self):
+        self.assertEqual(self.code_of(self.script._set_properties, "song", {"can_undo": False}), "INVALID_ARGUMENT")
+        self.assertEqual(self.code_of(self.script._set_properties, "tracks/0/slots/0/clip", {"length": 9.0}), "INVALID_ARGUMENT")
+        self.assertEqual(self.code_of(self.script._set_properties, "tracks/0", {"nope": 1}), "NOT_FOUND")
+        self.assertEqual(self.code_of(self.script._set_properties, "tracks/0", {}), "INVALID_ARGUMENT")
+        self.assertEqual(self.code_of(self.script._set_properties, "tracks/0", None), "INVALID_ARGUMENT")
+
+    def test_dependent_writes_order_themselves(self):
+        # loop_start=3 needs loop_end raised first; the reverse dict order forces a retry pass
+        self.script._set_properties("tracks/0/slots/0/clip", {"loop_start": 3.0, "loop_end": 8.0})
+        self.assertEqual((self.clip.loop_start, self.clip.loop_end), (3.0, 8.0))
+        self.script._set_properties("tracks/0/slots/0/clip", {"loop_end": 1.0, "loop_start": 0.5})
+        self.assertEqual((self.clip.loop_start, self.clip.loop_end), (0.5, 1.0))
+
+    def test_a_failing_write_restores_what_was_already_written(self):
+        with self.assertRaises(RuntimeError):
+            self.script._set_properties("tracks/0/slots/0/clip", {"name": "Renamed", "muted": True, "loop_end": -1.0})
+        self.assertEqual((self.clip.name, self.clip.muted, self.clip.loop_end), ("loop", False, 4.0))
+
+    def test_expect_guard_blocks_a_stale_target(self):
+        with self.assertRaises(mod.BridgeError) as ctx:
+            self.script._set_properties("tracks/1", {"mute": True}, {"name": "Someone Else"})
+        self.assertEqual(ctx.exception.code, "GUARD_FAILED")
+        self.assertFalse(self.song.tracks[1].mute)
+        self.script._set_properties("tracks/1", {"mute": True}, {"name": "B"})
+        self.assertTrue(self.song.tracks[1].mute)
+
+    def test_scene_and_song_writes(self):
+        self.script._set_properties("scenes/name:Chorus", {"tempo": 90, "tempo_enabled": True, "time_signature_numerator": 7})
+        scene = self.song.scenes[1]
+        self.assertEqual((scene.tempo, scene.tempo_enabled, scene.time_signature_numerator), (90.0, True, 7))
+        self.script._set_properties("song", {"metronome": True, "scale_name": "Minor", "loop_length": 8})
+        self.assertEqual((self.song.metronome, self.song.scale_name, self.song.loop_length), (True, "Minor", 8.0))
+
+    # ---- listing
+    def test_list_properties(self):
+        out = self.script._list_properties(kind="clip")
+        self.assertEqual(out["properties"]["launch_mode"]["values"], ["trigger", "gate", "toggle", "repeat"])
+        self.assertTrue(out["properties"]["name"]["writable"])
+        self.assertFalse(out["properties"]["length"]["writable"])
+        self.assertNotIn("count", out["properties"]["warp_mode"]["values"])
+        self.assertEqual(self.script._list_properties("tracks/0")["kind"], "track")
+        self.assertEqual(self.code_of(self.script._list_properties, None, "device"), "INVALID_ARGUMENT")
+
+    # ---- commands
+    def test_commands_and_undo_behaviour(self):
+        self.song.undo_log.clear()
+        ok = self.run_command("get_properties", {"address": "tracks/0", "names": ["name"]})
+        self.assertEqual(ok["result"]["properties"], {"name": "A"})
+        self.assertEqual(self.song.undo_log, [])                                     # reads open no undo step
+        ok = self.run_command("set_properties", {"address": "tracks/0", "properties": {"name": "Lead"}})
+        self.assertEqual(ok["status"], "success")
+        self.assertEqual(self.song.undo_log, ["begin", "end"])                       # one write = one undo step
+        batch = self.run_command("set_properties", {"items": [
+            {"address": "tracks/0", "properties": {"mute": True}}, {"address": "scenes/0", "properties": {"name": "Intro"}}]})
+        self.assertEqual([r["address"] for r in batch["result"]["results"]], ["tracks/0", "scenes/0"])
+        bad = self.run_command("set_properties", {"address": "tracks/0", "properties": {"mute": "yes"}})
+        self.assertEqual((bad["status"], bad["code"]), ("error", "TYPE_ERROR"))
+        listing = self.run_command("list_properties", {"kind": "scene"})
+        self.assertIn("tempo", listing["result"]["properties"])
+
+    def test_new_commands_are_registered_and_advertised(self):
+        for name in ("get_properties", "set_properties", "list_properties"):
+            self.assertIn(name, mod._COMMANDS)
+            self.assertIn(name, self.script._get_script_info()["capabilities"])
+        self.assertTrue(mod._COMMANDS["set_properties"]["writes"])
+        self.assertFalse(mod._COMMANDS["get_properties"]["writes"])
 
 
 # ---------------------------------------------------------------- package hygiene

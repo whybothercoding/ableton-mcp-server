@@ -8,6 +8,8 @@ from . import clock, config
 from .registry import _COMMANDS, BridgeError, _error_code, _error_response, command
 from .helpers import _as_index, _is_number, _safe_attr
 from .curves import CURVES, MAX_AUTOMATION_STEPS, _EPS, _build_steps, _ease, _normalize_points
+from .addressing import AddressingMixin
+from .properties import PropertiesMixin
 from .server import ServerMixin
 from .session import SessionMixin
 from .tracks import TracksMixin
@@ -35,7 +37,7 @@ def create_instance(c_instance):
     return AbletonMCP(c_instance)
 
 
-class AbletonMCP(ServerMixin, SessionMixin, TracksMixin, ClipsMixin, DevicesMixin, AutomationMixin, BrowserMixin,
+class AbletonMCP(ServerMixin, AddressingMixin, PropertiesMixin, SessionMixin, TracksMixin, ClipsMixin, DevicesMixin, AutomationMixin, BrowserMixin,
                  ControlSurface):
     """AbletonMCP Remote Script for Ableton Live"""
 

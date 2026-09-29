@@ -1,6 +1,9 @@
+import { TOOL_SPECS, ToolAnnotations } from './spec.js';
+
 export interface ToolDefinition {
   name: string;
   description: string;
+  annotations?: ToolAnnotations;
   inputSchema: {
     type: 'object';
     properties: Record<string, any>;
@@ -32,7 +35,7 @@ const PARAMETER_TARGET_PROPERTIES = {
   mixer_parameter: { type: 'string', description: "Mixer target instead of a device parameter: 'volume', 'pan' or 'send:N' (0-indexed send)" }
 };
 
-export const TOOLS: ToolDefinition[] = [
+const LEGACY_TOOLS: ToolDefinition[] = [
   {
     name: 'get_health',
     description: 'Ping Ableton Live Remote Script TCP bridge, report connection status, script version, and available capabilities.',
@@ -629,3 +632,15 @@ export function isToolEnabled(name: string, env: NodeJS.ProcessEnv = process.env
   const variable = GATED_TOOLS[name];
   return variable === undefined || env[variable] === '1';
 }
+
+/** Legacy tools (switch in handlers.ts) followed by the declarative specs (spec.ts). */
+export const TOOLS: ToolDefinition[] = [
+  ...LEGACY_TOOLS,
+  ...TOOL_SPECS.map((spec) => ({
+    name: spec.name,
+    description: spec.description,
+    inputSchema: spec.inputSchema,
+    annotations: spec.annotations,
+    requiredCapability: spec.bridge.command
+  }))
+];

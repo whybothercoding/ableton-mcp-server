@@ -11,11 +11,12 @@
     "build": "tsc",
     "start": "node dist/index.js",
     "dev": "tsx src/index.ts",
-    "test": "python3 -m unittest discover -s test -p \"remote_script_test.py\"",
+    "test": "python3 -m unittest discover -s test -p \"remote_script_test.py\" && npm run test:ts",
     "test:live": "node test/live-integration.mjs",
     "test:mcp": "node test/mcp-tools.mjs",
     "deploy": "node scripts/deploy.mjs",
-    "hotswap": "node scripts/hotswap.mjs"
+    "hotswap": "node scripts/hotswap.mjs",
+    "test:ts": "node --import tsx --test test/ts/*.test.ts"
   },
   "keywords": [
     "mcp",
