@@ -16,7 +16,10 @@
     "test:mcp": "node test/mcp-tools.mjs",
     "deploy": "node scripts/deploy.mjs",
     "hotswap": "node scripts/hotswap.mjs",
-    "test:ts": "node --import tsx --test test/ts/*.test.ts"
+    "test:ts": "node --import tsx --test test/ts/*.test.ts",
+    "dump-api": "node scripts/dump-api.mjs",
+    "build-registry": "node scripts/build-registry.mjs",
+    "test:drift": "node scripts/dump-api.mjs --check"
   },
   "keywords": [
     "mcp",

@@ -1,0 +1,860 @@
+{
+ "classes": {
+  "Live.Clip.Clip": {
+   "properties": {
+    "automation_envelopes": {
+     "get": "Base.Vector",
+     "set": null
+    },
+    "available_warp_modes": {
+     "get": "Base.IntVector",
+     "set": null
+    },
+    "canonical_parent": {
+     "get": "LomObject.LomObject",
+     "set": null
+    },
+    "color": {
+     "get": "int",
+     "set": "int"
+    },
+    "color_index": {
+     "get": "int",
+     "set": "int"
+    },
+    "end_marker": {
+     "get": "float",
+     "set": "float"
+    },
+    "end_time": {
+     "get": "float",
+     "set": null
+    },
+    "file_path": {
+     "get": "str",
+     "set": null
+    },
+    "gain": {
+     "get": "float",
+     "set": "float"
+    },
+    "gain_display_string": {
+     "get": "str",
+     "set": null
+    },
+    "groove": {
+     "get": "Groove.Groove",
+     "set": "Groove.Groove"
+    },
+    "has_envelopes": {
+     "get": "bool",
+     "set": null
+    },
+    "has_groove": {
+     "get": "bool",
+     "set": null
+    },
+    "is_arrangement_clip": {
+     "get": "bool",
+     "set": null
+    },
+    "is_audio_clip": {
+     "get": "bool",
+     "set": null
+    },
+    "is_midi_clip": {
+     "get": "bool",
+     "set": null
+    },
+    "is_overdubbing": {
+     "get": "bool",
+     "set": null
+    },
+    "is_playing": {
+     "get": "bool",
+     "set": "bool"
+    },
+    "is_recording": {
+     "get": "bool",
+     "set": null
+    },
+    "is_session_clip": {
+     "get": "bool",
+     "set": null
+    },
+    "is_take_lane_clip": {
+     "get": "bool",
+     "set": null
+    },
+    "is_triggered": {
+     "get": "bool",
+     "set": null
+    },
+    "launch_mode": {
+     "get": "int",
+     "set": "int"
+    },
+    "launch_quantization": {
+     "get": "int",
+     "set": "int"
+    },
+    "legato": {
+     "get": "bool",
+     "set": "bool"
+    },
+    "length": {
+     "get": "float",
+     "set": null
+    },
+    "loop_end": {
+     "get": "float",
+     "set": "float"
+    },
+    "loop_start": {
+     "get": "float",
+     "set": "float"
+    },
+    "looping": {
+     "get": "bool",
+     "set": "bool"
+    },
+    "muted": {
+     "get": "bool",
+     "set": "bool"
+    },
+    "name": {
+     "get": "str",
+     "set": "object"
+    },
+    "pitch_coarse": {
+     "get": "int",
+     "set": "int"
+    },
+    "pitch_fine": {
+     "get": "float",
+     "set": "float"
+    },
+    "playing_position": {
+     "get": "float",
+     "set": null
+    },
+    "position": {
+     "get": "float",
+     "set": "float"
+    },
+    "ram_mode": {
+     "get": "bool",
+     "set": "bool"
+    },
+    "root_note": {
+     "get": "int",
+     "set": "int"
+    },
+    "sample_length": {
+     "get": "int",
+     "set": null
+    },
+    "sample_rate": {
+     "get": "float",
+     "set": null
+    },
+    "scale_intervals": {
+     "get": "Base.IntVector",
+     "set": null
+    },
+    "scale_mode": {
+     "get": "bool",
+     "set": "bool"
+    },
+    "scale_name": {
+     "get": "str",
+     "set": "object"
+    },
+    "signature_denominator": {
+     "get": "int",
+     "set": "int"
+    },
+    "signature_numerator": {
+     "get": "int",
+     "set": "int"
+    },
+    "start_marker": {
+     "get": "float",
+     "set": "float"
+    },
+    "start_time": {
+     "get": "float",
+     "set": null
+    },
+    "velocity_amount": {
+     "get": "float",
+     "set": "float"
+    },
+    "view": {
+     "get": "Clip.Clip.View",
+     "set": null
+    },
+    "warp_markers": {
+     "get": "Clip.WarpMarkerVector",
+     "set": null
+    },
+    "warp_mode": {
+     "get": "int",
+     "set": "int"
+    },
+    "warping": {
+     "get": "bool",
+     "set": "bool"
+    },
+    "will_record_on_start": {
+     "get": "bool",
+     "set": null
+    }
+   }
+  },
+  "Live.ClipSlot.ClipSlot": {
+   "properties": {
+    "canonical_parent": {
+     "get": "Track.Track",
+     "set": null
+    },
+    "clip": {
+     "get": "Clip.Clip",
+     "set": null
+    },
+    "color": {
+     "get": "object",
+     "set": null
+    },
+    "color_index": {
+     "get": "object",
+     "set": null
+    },
+    "controls_other_clips": {
+     "get": "bool",
+     "set": null
+    },
+    "has_clip": {
+     "get": "bool",
+     "set": null
+    },
+    "has_stop_button": {
+     "get": "bool",
+     "set": "bool"
+    },
+    "is_group_slot": {
+     "get": "bool",
+     "set": null
+    },
+    "is_playing": {
+     "get": "bool",
+     "set": null
+    },
+    "is_recording": {
+     "get": "bool",
+     "set": null
+    },
+    "is_triggered": {
+     "get": "bool",
+     "set": null
+    },
+    "playing_status": {
+     "get": "ClipSlot.ClipSlotPlayingState",
+     "set": null
+    },
+    "will_record_on_start": {
+     "get": "bool",
+     "set": null
+    }
+   }
+  },
+  "Live.Scene.Scene": {
+   "properties": {
+    "canonical_parent": {
+     "get": "Song.Song",
+     "set": null
+    },
+    "clip_slots": {
+     "get": "Base.Vector",
+     "set": null
+    },
+    "color": {
+     "get": "int",
+     "set": "int"
+    },
+    "color_index": {
+     "get": "object",
+     "set": "object"
+    },
+    "is_empty": {
+     "get": "bool",
+     "set": null
+    },
+    "is_triggered": {
+     "get": "bool",
+     "set": null
+    },
+    "name": {
+     "get": "str",
+     "set": "object"
+    },
+    "tempo": {
+     "get": "float",
+     "set": "float"
+    },
+    "tempo_enabled": {
+     "get": "bool",
+     "set": "bool"
+    },
+    "time_signature_denominator": {
+     "get": "int",
+     "set": "int"
+    },
+    "time_signature_enabled": {
+     "get": "bool",
+     "set": "bool"
+    },
+    "time_signature_numerator": {
+     "get": "int",
+     "set": "int"
+    }
+   }
+  },
+  "Live.Song.Song": {
+   "properties": {
+    "appointed_device": {
+     "get": "Device.Device",
+     "set": "object"
+    },
+    "arrangement_overdub": {
+     "get": "bool",
+     "set": "bool"
+    },
+    "back_to_arranger": {
+     "get": "bool",
+     "set": "bool"
+    },
+    "can_capture_midi": {
+     "get": "bool",
+     "set": null
+    },
+    "can_jump_to_next_cue": {
+     "get": "bool",
+     "set": null
+    },
+    "can_jump_to_prev_cue": {
+     "get": "bool",
+     "set": null
+    },
+    "can_redo": {
+     "get": "bool",
+     "set": null
+    },
+    "can_undo": {
+     "get": "bool",
+     "set": null
+    },
+    "canonical_parent": {
+     "get": "Song.Song",
+     "set": null
+    },
+    "clip_trigger_quantization": {
+     "get": "Song.Quantization",
+     "set": "int"
+    },
+    "count_in_duration": {
+     "get": "int",
+     "set": null
+    },
+    "cue_points": {
+     "get": "Base.Vector",
+     "set": null
+    },
+    "current_song_time": {
+     "get": "float",
+     "set": "float"
+    },
+    "exclusive_arm": {
+     "get": "bool",
+     "set": null
+    },
+    "exclusive_solo": {
+     "get": "bool",
+     "set": null
+    },
+    "file_path": {
+     "get": "str",
+     "set": null
+    },
+    "groove_amount": {
+     "get": "float",
+     "set": "float"
+    },
+    "groove_pool": {
+     "get": "LomObject.LomObject",
+     "set": null
+    },
+    "is_ableton_link_enabled": {
+     "get": "bool",
+     "set": "bool"
+    },
+    "is_ableton_link_start_stop_sync_enabled": {
+     "get": "bool",
+     "set": "bool"
+    },
+    "is_counting_in": {
+     "get": "bool",
+     "set": null
+    },
+    "is_playing": {
+     "get": "bool",
+     "set": "bool"
+    },
+    "last_event_time": {
+     "get": "float",
+     "set": null
+    },
+    "loop": {
+     "get": "bool",
+     "set": "bool"
+    },
+    "loop_length": {
+     "get": "float",
+     "set": "float"
+    },
+    "loop_start": {
+     "get": "float",
+     "set": "float"
+    },
+    "master_track": {
+     "get": "Track.Track",
+     "set": null
+    },
+    "metronome": {
+     "get": "bool",
+     "set": "bool"
+    },
+    "midi_recording_quantization": {
+     "get": "Song.RecordingQuantization",
+     "set": "int"
+    },
+    "name": {
+     "get": "str",
+     "set": null
+    },
+    "nudge_down": {
+     "get": "bool",
+     "set": "bool"
+    },
+    "nudge_up": {
+     "get": "bool",
+     "set": "bool"
+    },
+    "overdub": {
+     "get": "bool",
+     "set": "bool"
+    },
+    "punch_in": {
+     "get": "bool",
+     "set": "bool"
+    },
+    "punch_out": {
+     "get": "bool",
+     "set": "bool"
+    },
+    "re_enable_automation_enabled": {
+     "get": "bool",
+     "set": null
+    },
+    "record_mode": {
+     "get": "bool",
+     "set": "bool"
+    },
+    "return_tracks": {
+     "get": "Base.Vector",
+     "set": null
+    },
+    "root_note": {
+     "get": "int",
+     "set": "int"
+    },
+    "scale_intervals": {
+     "get": "Base.IntVector",
+     "set": null
+    },
+    "scale_mode": {
+     "get": "bool",
+     "set": "bool"
+    },
+    "scale_name": {
+     "get": "str",
+     "set": "object"
+    },
+    "scenes": {
+     "get": "Base.Vector",
+     "set": null
+    },
+    "select_on_launch": {
+     "get": "bool",
+     "set": null
+    },
+    "session_automation_record": {
+     "get": "bool",
+     "set": "bool"
+    },
+    "session_record": {
+     "get": "bool",
+     "set": "bool"
+    },
+    "session_record_status": {
+     "get": "int",
+     "set": null
+    },
+    "signature_denominator": {
+     "get": "int",
+     "set": "int"
+    },
+    "signature_numerator": {
+     "get": "int",
+     "set": "int"
+    },
+    "song_length": {
+     "get": "float",
+     "set": null
+    },
+    "start_time": {
+     "get": "float",
+     "set": "float"
+    },
+    "swing_amount": {
+     "get": "float",
+     "set": "float"
+    },
+    "tempo": {
+     "get": "float",
+     "set": "float"
+    },
+    "tempo_follower_enabled": {
+     "get": "bool",
+     "set": "bool"
+    },
+    "tracks": {
+     "get": "Base.Vector",
+     "set": null
+    },
+    "tuning_system": {
+     "get": "TuningSystem.TuningSystem",
+     "set": null
+    },
+    "view": {
+     "get": "Song.Song.View",
+     "set": null
+    },
+    "visible_tracks": {
+     "get": "Base.Vector",
+     "set": null
+    }
+   }
+  },
+  "Live.Track.Track": {
+   "properties": {
+    "arm": {
+     "get": "bool",
+     "set": "bool"
+    },
+    "arrangement_clips": {
+     "get": "Base.Vector",
+     "set": null
+    },
+    "available_input_routing_channels": {
+     "get": "Track.RoutingChannelVector",
+     "set": null
+    },
+    "available_input_routing_types": {
+     "get": "Track.RoutingTypeVector",
+     "set": null
+    },
+    "available_output_routing_channels": {
+     "get": "Track.RoutingChannelVector",
+     "set": null
+    },
+    "available_output_routing_types": {
+     "get": "Track.RoutingTypeVector",
+     "set": null
+    },
+    "back_to_arranger": {
+     "get": "bool",
+     "set": "bool"
+    },
+    "can_be_armed": {
+     "get": "bool",
+     "set": null
+    },
+    "can_be_frozen": {
+     "get": "bool",
+     "set": null
+    },
+    "can_show_chains": {
+     "get": "bool",
+     "set": null
+    },
+    "canonical_parent": {
+     "get": "Song.Song",
+     "set": null
+    },
+    "clip_slots": {
+     "get": "Base.Vector",
+     "set": null
+    },
+    "color": {
+     "get": "int",
+     "set": "int"
+    },
+    "color_index": {
+     "get": "object",
+     "set": "object"
+    },
+    "current_input_routing": {
+     "get": "str",
+     "set": "object"
+    },
+    "current_input_sub_routing": {
+     "get": "str",
+     "set": "object"
+    },
+    "current_monitoring_state": {
+     "get": "int",
+     "set": "int"
+    },
+    "current_output_routing": {
+     "get": "str",
+     "set": "object"
+    },
+    "current_output_sub_routing": {
+     "get": "str",
+     "set": "object"
+    },
+    "devices": {
+     "get": "Base.Vector",
+     "set": null
+    },
+    "fired_slot_index": {
+     "get": "int",
+     "set": null
+    },
+    "fold_state": {
+     "get": "bool",
+     "set": "bool"
+    },
+    "group_track": {
+     "get": "Track.Track",
+     "set": null
+    },
+    "has_audio_input": {
+     "get": "bool",
+     "set": null
+    },
+    "has_audio_output": {
+     "get": "bool",
+     "set": null
+    },
+    "has_midi_input": {
+     "get": "bool",
+     "set": null
+    },
+    "has_midi_output": {
+     "get": "bool",
+     "set": null
+    },
+    "implicit_arm": {
+     "get": "bool",
+     "set": "bool"
+    },
+    "input_meter_left": {
+     "get": "float",
+     "set": null
+    },
+    "input_meter_level": {
+     "get": "float",
+     "set": null
+    },
+    "input_meter_right": {
+     "get": "float",
+     "set": null
+    },
+    "input_routing_channel": {
+     "get": "Track.RoutingChannel",
+     "set": "Track.RoutingChannel"
+    },
+    "input_routing_type": {
+     "get": "Track.RoutingType",
+     "set": "Track.RoutingType"
+    },
+    "input_routings": {
+     "get": "Base.StringVector",
+     "set": null
+    },
+    "input_sub_routings": {
+     "get": "Base.StringVector",
+     "set": null
+    },
+    "is_foldable": {
+     "get": "bool",
+     "set": null
+    },
+    "is_frozen": {
+     "get": "bool",
+     "set": null
+    },
+    "is_grouped": {
+     "get": "bool",
+     "set": null
+    },
+    "is_part_of_selection": {
+     "get": "bool",
+     "set": null
+    },
+    "is_showing_chains": {
+     "get": "bool",
+     "set": "bool"
+    },
+    "is_visible": {
+     "get": "bool",
+     "set": null
+    },
+    "mixer_device": {
+     "get": "MixerDevice.MixerDevice",
+     "set": null
+    },
+    "mute": {
+     "get": "bool",
+     "set": "bool"
+    },
+    "muted_via_solo": {
+     "get": "bool",
+     "set": null
+    },
+    "name": {
+     "get": "str",
+     "set": "object"
+    },
+    "output_meter_left": {
+     "get": "float",
+     "set": null
+    },
+    "output_meter_level": {
+     "get": "float",
+     "set": null
+    },
+    "output_meter_right": {
+     "get": "float",
+     "set": null
+    },
+    "output_routing_channel": {
+     "get": "Track.RoutingChannel",
+     "set": "Track.RoutingChannel"
+    },
+    "output_routing_type": {
+     "get": "Track.RoutingType",
+     "set": "Track.RoutingType"
+    },
+    "output_routings": {
+     "get": "Base.StringVector",
+     "set": null
+    },
+    "output_sub_routings": {
+     "get": "Base.StringVector",
+     "set": null
+    },
+    "performance_impact": {
+     "get": "float",
+     "set": null
+    },
+    "playing_slot_index": {
+     "get": "int",
+     "set": null
+    },
+    "solo": {
+     "get": "bool",
+     "set": "bool"
+    },
+    "take_lanes": {
+     "get": "Base.Vector",
+     "set": null
+    },
+    "view": {
+     "get": "Track.Track.View",
+     "set": null
+    }
+   }
+  }
+ },
+ "enums": {
+  "Live.Clip.ClipLaunchQuantization": {
+   "q_2_bars": 4,
+   "q_4_bars": 3,
+   "q_8_bars": 2,
+   "q_bar": 5,
+   "q_eighth": 10,
+   "q_eighth_triplet": 11,
+   "q_global": 0,
+   "q_half": 6,
+   "q_half_triplet": 7,
+   "q_none": 1,
+   "q_quarter": 8,
+   "q_quarter_triplet": 9,
+   "q_sixteenth": 12,
+   "q_sixteenth_triplet": 13,
+   "q_thirtysecond": 14
+  },
+  "Live.Clip.LaunchMode": {
+   "gate": 1,
+   "repeat": 3,
+   "toggle": 2,
+   "trigger": 0
+  },
+  "Live.Clip.WarpMode": {
+   "beats": 0,
+   "complex": 4,
+   "complex_pro": 6,
+   "count": 7,
+   "repitch": 3,
+   "rex": 5,
+   "texture": 2,
+   "tones": 1
+  },
+  "Live.Song.Quantization": {
+   "q_2_bars": 3,
+   "q_4_bars": 2,
+   "q_8_bars": 1,
+   "q_bar": 4,
+   "q_eight": 9,
+   "q_eight_triplet": 10,
+   "q_half": 5,
+   "q_half_triplet": 6,
+   "q_no_q": 0,
+   "q_quarter": 7,
+   "q_quarter_triplet": 8,
+   "q_sixtenth": 11,
+   "q_sixtenth_triplet": 12,
+   "q_thirtytwoth": 13
+  },
+  "Live.Song.RecordingQuantization": {
+   "rec_q_eight": 2,
+   "rec_q_eight_eight_triplet": 4,
+   "rec_q_eight_triplet": 3,
+   "rec_q_no_q": 0,
+   "rec_q_quarter": 1,
+   "rec_q_sixtenth": 5,
+   "rec_q_sixtenth_sixtenth_triplet": 7,
+   "rec_q_sixtenth_triplet": 6,
+   "rec_q_thirtysecond": 8
+  },
+  "Live.Track.Track.monitoring_states": {
+   "AUTO": 1,
+   "IN": 0,
+   "OFF": 2
+  }
+ },
+ "live_version": "12.4.15b4"
+}

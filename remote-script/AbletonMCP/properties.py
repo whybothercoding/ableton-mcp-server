@@ -7,6 +7,7 @@ themselves, and reads every value back. It is a curated table now; a generated r
 """
 import Live
 
+from . import api_registry
 from .helpers import _is_number
 from .registry import BridgeError, command
 
@@ -316,7 +317,12 @@ class PropertiesMixin(object):
                 if spec[key] not in (None, ""):
                     entry[key] = spec[key]
             listing[name] = entry
-        return {"kind": kind, "properties": listing}
+        result = {"kind": kind, "properties": listing}
+        # What Live exposes that this tool does not (yet): visible gaps instead of hidden ones
+        known = api_registry.class_properties(api_registry.KIND_CLASSES[kind])
+        result["not_exposed"] = dict((name, {"type": info["get"], "writable": info["set"] is not None})
+                                     for name, info in sorted(known.items()) if name not in PROPERTY_SPECS[kind])
+        return result
 
     @command("get_properties")
     def _cmd_get_properties(self, params):

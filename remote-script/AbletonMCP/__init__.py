@@ -12,6 +12,7 @@ from .addressing import AddressingMixin
 from .properties import PropertiesMixin
 from .structure import StructureMixin
 from .lifecycle import LifecycleMixin
+from .introspect import IntrospectMixin
 from .server import ServerMixin
 from .session import SessionMixin
 from .tracks import TracksMixin
@@ -22,10 +23,10 @@ from .browser import BrowserMixin
 
 
 def _compute_build_id():
-    """Hash of every source file, so a stale or partial deploy is visible in the handshake."""
+    """Hash of every source and data file, so a stale or partial deploy is visible in the handshake."""
     here = os.path.dirname(os.path.abspath(__file__))
     digest = hashlib.sha1()
-    for name in sorted(n for n in os.listdir(here) if n.endswith(".py")):
+    for name in sorted(n for n in os.listdir(here) if n.endswith((".py", ".json"))):
         with open(os.path.join(here, name), "rb") as handle:
             digest.update(name.encode("utf-8") + b"\0" + handle.read() + b"\0")
     return digest.hexdigest()[:12]
@@ -39,7 +40,7 @@ def create_instance(c_instance):
     return AbletonMCP(c_instance)
 
 
-class AbletonMCP(ServerMixin, AddressingMixin, PropertiesMixin, StructureMixin, LifecycleMixin, SessionMixin, TracksMixin, ClipsMixin, DevicesMixin, AutomationMixin, BrowserMixin,
+class AbletonMCP(ServerMixin, AddressingMixin, PropertiesMixin, StructureMixin, LifecycleMixin, IntrospectMixin, SessionMixin, TracksMixin, ClipsMixin, DevicesMixin, AutomationMixin, BrowserMixin,
                  ControlSurface):
     """AbletonMCP Remote Script for Ableton Live"""
 

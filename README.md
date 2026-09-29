@@ -167,6 +167,7 @@ Targets are `device_index` (or `device_path`) + `parameter_index`, or `mixer_par
 - **Addresses:** `song`, `master`, `tracks/N`, `returns/N`, `scenes/N`, `tracks/N/slots/M` (clip slot) and `tracks/N/slots/M/clip`; indices are 0-based. A name selector works wherever a number does: `tracks/name:Drift`, `scenes/name:Verse` (exact match; several matches is an `AMBIGUOUS` error listing the indices).
 - **Strict values:** booleans must be `true`/`false`, integers whole numbers, enums are given **by name** (`"launch_mode": "gate"`; `list_properties` shows the valid names and ranges). Wrong types are `TYPE_ERROR`, out-of-range values `OUT_OF_RANGE`, unknown or read-only properties are refused.
 - **Interdependent properties** (`loop_start`/`loop_end`, ...) can be set together in any order, and a call is all-or-nothing: if one write fails, the others are restored.
+- **`list_properties`** shows every curated property with its type, range and enum names, plus `not_exposed`: the properties Live's API has on that class that this server does not expose yet (from the generated registry, see "Live API reference and drift").
 - **`get_properties` without `names`** reads everything readable; properties that do not apply to that object (audio-only ones on a MIDI clip, `arm` on a return track) are listed under `unavailable`.
 - **`set_properties` with `items`** changes several objects in one call. `expect: {"name": "Drift"}` refuses to write if the object is not the one you meant (index drift after deletes).
 - Virtual mixer properties on tracks: `volume` and `panning` (device values; volume 0.85 is 0 dB). An unset scene `tempo` or `time_signature_numerator` reads as `-1`.
@@ -194,6 +195,7 @@ Every device-facing tool (`get_track_detail`, `get_device_parameters`, `set_devi
 Not covered: device properties Live keeps outside `parameters` (Wavetable's oscillator wavetable selection, Drift's mod matrix, unison and voice modes), and VST/AU plugin parameters beyond the ones Live has configured.
 
 #### Development
+- `introspect_api` (bridge command, no MCP tool): without `module`, returns the running Live's version and the API module list; with `module`, describes every class in it (properties with getter/setter types, method signatures, listeners, enums). It reads class-level descriptors only, so it cannot change the Set. It feeds `npm run dump-api`.
 - `eval_python`: Evaluate raw Python on the Remote Script instance. Executes arbitrary code inside Live, so the tool is **hidden and refused unless `ABLETON_MCP_ALLOW_EVAL=1`** is set in the MCP server's environment (this repo's `.mcp.json` sets it for development). Failures come back as errors, not success strings.
 
 ---
@@ -236,6 +238,18 @@ npm test            # offline: Remote Script logic against a mocked Live API (no
 npm run test:live   # integration: a running Live with AbletonMCP enabled
 npm run test:mcp    # MCP layer: tool schemas, handlers and errors over stdio (needs Live)
 ```
+
+### Live API reference and drift
+
+Live's Python API is undocumented and changes between versions (a beta most of all), so the repo keeps a machine-readable copy and checks it:
+
+```bash
+npm run dump-api         # write docs/live-api/<live version>.json from the running Live (243 KB, sorted, diff-friendly)
+npm run build-registry   # regenerate remote-script/AbletonMCP/registry_data.json from the newest dump (-- --check to verify)
+npm run test:drift       # compare the running Live with the committed dump; exit 1 and list added/removed/changed entries
+```
+
+`registry_data.json` ships inside the Remote Script: it records, for the Song, Track, Scene, ClipSlot and Clip classes, the type Live reports for every property's getter and setter, plus the enum tables the property table refers to. The offline tests check the hand-written property table against it (a property must exist, be writable when we say so, and have a compatible type) and generate fakes from it that behave like Boost.Python (a wrong setter type raises), so every writable property gets an automatic set/read-back. After a Live update, run `npm run test:drift`; on drift, review the list, run `dump-api` and `build-registry`, fix any property the offline tests now flag, and commit the new dump.
 
 The live suites use a scratch clip on a MIDI track with a device, restore every parameter they touch, and delete what they create. Run them with the transport playing to include the check that Live's parameter follows a drawn envelope during playback. Audio will briefly change while they run.
 

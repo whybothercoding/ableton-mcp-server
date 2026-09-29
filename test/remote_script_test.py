@@ -1213,6 +1213,203 @@ class LifecycleTests(unittest.TestCase):
         self.assertEqual(self.song.undo_log, ["begin", "end"])
 
 
+# ---------------------------------------------------------------- generated API registry
+
+class RegistryTests(unittest.TestCase):
+    """The curated property table must agree with the registry generated from Live's real API."""
+
+    def setUp(self):
+        self.registry = mod.api_registry
+        self.specs = mod.properties.PROPERTY_SPECS
+
+    def test_every_curated_property_exists_in_live_with_a_compatible_type(self):
+        problems = []
+        for kind, specs in self.specs.items():
+            live = self.registry.class_properties(self.registry.KIND_CLASSES[kind])
+            for name, spec in specs.items():
+                if spec["get"]:                       # virtual properties (track volume/panning) are ours
+                    continue
+                if name not in live:
+                    problems.append("{0}.{1}: not in Live's {2}".format(kind, name, self.registry.KIND_CLASSES[kind]))
+                    continue
+                info = live[name]
+                got = self.registry.family(info["get"])
+                wanted = {"float": {"float"}, "int": {"int", "object"}, "bool": {"bool"}, "str": {"str", "object"},
+                          "list": {"list"}, "enum": {"int", "enum"}}[spec["type"]]
+                if got not in wanted:
+                    problems.append("{0}.{1}: overlay type {2} but Live's getter returns {3}".format(kind, name, spec["type"], info["get"]))
+                if spec["rw"] and info["set"] is None:
+                    problems.append("{0}.{1}: overlay says writable but Live's property is read-only".format(kind, name))
+                if spec["rw"] and info["set"] is not None and spec["type"] != "enum":
+                    if self.registry.family(info["set"]) not in (spec["type"], "object"):
+                        problems.append("{0}.{1}: overlay type {2} but Live's setter takes {3}".format(kind, name, spec["type"], info["set"]))
+        self.assertEqual(problems, [])
+
+    def test_enum_tables_match_what_the_overlay_references(self):
+        for kind, specs in self.specs.items():
+            for name, spec in specs.items():
+                if spec["enum"]:
+                    self.assertIn(spec["enum"], self.registry.data()["enums"], "{0}.{1}".format(kind, name))
+                    table = self.registry.enum_table(spec["enum"])
+                    self.assertGreater(len(table), 1, spec["enum"])
+
+    def test_enum_typed_getters_agree_with_the_overlays_enum(self):
+        """Where Live's getter names its enum type (Song.Quantization), the overlay must point at the same enum."""
+        for kind, specs in self.specs.items():
+            live = self.registry.class_properties(self.registry.KIND_CLASSES[kind])
+            for name, spec in specs.items():
+                if spec["enum"] and name in live and self.registry.family(live[name]["get"]) == "enum":
+                    self.assertEqual("Live." + live[name]["get"], spec["enum"], "{0}.{1}".format(kind, name))
+
+    def test_registry_lists_what_is_not_exposed(self):
+        script = make_script()
+        self.addCleanup(script._stop_server)
+        script._song = make_song()
+        listing = script._list_properties(kind="clip")
+        self.assertIn("groove", listing["not_exposed"])          # a reference property we do not expose yet
+        self.assertEqual(listing["not_exposed"]["groove"]["writable"], True)
+        self.assertNotIn("name", listing["not_exposed"])          # exposed properties are not repeated
+        for kind in self.specs:
+            self.assertIn("not_exposed", script._list_properties(kind=kind))
+
+    def test_registry_metadata(self):
+        self.assertRegex(self.registry.data()["live_version"], r"^12\.")
+        for qualname in self.registry.KIND_CLASSES.values():
+            self.assertGreater(len(self.registry.class_properties(qualname)), 5, qualname)
+
+    # ---- sweep: every writable curated property round-trips on fakes generated from the registry
+    def make_fake(self, kind, **extra):
+        live = self.registry.class_properties(self.registry.KIND_CLASSES[kind])
+        types_by_family = {"float": float, "int": int, "bool": bool, "str": str}
+        typed = dict((n, types_by_family[self.registry.family(i["set"])]) for n, i in live.items()
+                     if i["set"] is not None and self.registry.family(i["set"]) in types_by_family)
+        defaults = {"float": 0.0, "int": 0, "bool": False, "str": "", "list": [], "enum": 0, "ref": None, "object": None}
+        cls = type(kind.capitalize() + "Fake", (Typed,), {"_types": typed})
+        obj = cls()
+        for name, info in live.items():
+            object.__setattr__(obj, name, defaults[self.registry.family(info["get"])])
+        for name, value in extra.items():
+            object.__setattr__(obj, name, value)
+        return obj
+
+    @staticmethod
+    def sample_value(spec):
+        kind = spec["type"]
+        if kind == "bool":
+            return True
+        if kind == "str":
+            return "sweep"
+        if kind == "enum":
+            names = mod.properties._enum_names(spec["enum"])
+            return sorted(names, key=names.get)[-1]
+        if kind == "int":
+            low, high = spec["min"], spec["max"]
+            return int((low + high) // 2) if low is not None and high is not None else 1
+        low, high = spec["min"], spec["max"]
+        return (low + high) / 2.0 if low is not None and high is not None else 0.5
+
+    def test_every_writable_property_round_trips_on_registry_generated_fakes(self):
+        script = make_script()
+        self.addCleanup(script._stop_server)
+        clip = self.make_fake("clip")
+        slot = self.make_fake("slot", clip=clip, has_clip=True)
+        scene = self.make_fake("scene")
+        track = self.make_fake("track", clip_slots=[slot], mixer_device=make_mixer())
+        master = self.make_fake("track", mixer_device=make_mixer(sends=False))
+        song = self.make_fake("song", tracks=[track], return_tracks=[], scenes=[scene], master_track=master)
+        script._song = song
+        addresses = {"song": "song", "track": "tracks/0", "scene": "scenes/0", "slot": "tracks/0/slots/0", "clip": "tracks/0/slots/0/clip"}
+        checked = 0
+        for kind, specs in self.specs.items():
+            for name, spec in sorted(specs.items()):
+                if not spec["rw"]:
+                    continue
+                value = self.sample_value(spec)
+                script._set_properties(addresses[kind], {name: value})
+                got = script._get_properties(addresses[kind], [name])["properties"][name]
+                if spec["type"] == "float":
+                    self.assertAlmostEqual(got, value, places=6, msg="{0}.{1}".format(kind, name))
+                else:
+                    self.assertEqual(got, value, "{0}.{1}".format(kind, name))
+                checked += 1
+        self.assertGreater(checked, 60)
+
+    def test_generated_fakes_reject_wrong_types_like_boost(self):
+        clip = self.make_fake("clip")
+        with self.assertRaises(TypeError):
+            clip.loop_start = "x"
+        with self.assertRaises(TypeError):
+            clip.pitch_coarse = 1.5
+        clip.velocity_amount = 1                                   # int is accepted for a float property
+        clip.muted = 1                                             # so is int for a bool property
+
+
+# ---------------------------------------------------------------- introspection parsing
+
+class IntrospectTests(unittest.TestCase):
+    def test_property_types_come_from_getter_and_setter_signatures(self):
+        def fget(self):
+            pass
+
+        def fset(self, value):
+            pass
+        fget.__doc__ = "\nNone( (Clip.Clip)arg1) -> float :\n\n    C++ signature :\n        double None(TPyHandle<AClip>)"
+        fset.__doc__ = "\nNone( (Clip.Clip)arg1, (float)arg2) -> None :\n\n    C++ signature :\n        void None(TPyHandle<AClip>,double)"
+        record = mod.introspect._property_record(property(fget, fset, doc="Get/Set the loop start.\nMore text."))
+        self.assertEqual(record, {"get": "float", "set": "float", "doc": "Get/Set the loop start."})
+        readonly = mod.introspect._property_record(property(fget))
+        self.assertEqual((readonly["get"], readonly["set"]), ("float", None))
+
+    def test_methods_keep_signatures_and_a_description(self):
+        def jump(self):
+            pass
+        jump.__doc__ = "\njump_by( (Song)arg1, (float)arg2) -> None :\n    Set a new playing pos, relative to the current one.\n\n    C++ signature :\n        void jump_by(TPyHandle<ASong>,double)"
+        record = mod.introspect._method_record(jump)
+        self.assertEqual(record["signatures"], ["jump_by( (Song)arg1, (float)arg2) -> None"])
+        self.assertEqual(record["doc"], "Set a new playing pos, relative to the current one.")
+
+    def test_describe_class_collects_properties_methods_enums_listeners_and_nested_classes(self):
+        class Enum(object):
+            names = {"a": 0, "b": 1}
+            values = {0: "a", 1: "b"}
+
+        class Nested(object):
+            width = property(lambda self: 1)
+
+        class Thing(object):
+            size = property(lambda self: 1, lambda self, v: None)
+            Mode = Enum
+            View = Nested
+
+            def fire(self):
+                pass
+
+            def add_size_listener(self, fn):
+                pass
+
+            def remove_size_listener(self, fn):
+                pass
+
+            def size_has_listener(self, fn):
+                pass
+
+        record = mod.introspect.describe_class(Thing, "Live.X.Thing")
+        self.assertEqual(sorted(record["properties"]), ["size"])
+        self.assertEqual(sorted(record["methods"]), ["fire"])
+        self.assertEqual(record["listeners"], ["size"])          # add/remove/has_listener collapse into one entry
+        self.assertEqual(record["enums"], {"Mode": {"a": 0, "b": 1}})
+        self.assertEqual(sorted(record["nested"]["View"]["properties"]), ["width"])
+        self.assertEqual(record["qualname"], "Live.X.Thing")
+
+    def test_command_is_registered_and_read_only(self):
+        self.assertIn("introspect_api", mod._COMMANDS)
+        self.assertFalse(mod._COMMANDS["introspect_api"]["writes"])
+        script = make_script()
+        self.addCleanup(script._stop_server)
+        response = script._process_command({"type": "introspect_api", "params": {"module": "NoSuchModule"}})
+        self.assertEqual((response["status"], response["code"]), ("error", "NOT_FOUND"))
+
+
 # ---------------------------------------------------------------- package hygiene
 
 class PackageTests(unittest.TestCase):
@@ -1265,7 +1462,7 @@ class PackageTests(unittest.TestCase):
     def test_build_id_changes_when_a_source_file_changes(self):
         import hashlib
         digest = hashlib.sha1()
-        for name in sorted(n for n in os.listdir(self.PACKAGE) if n.endswith(".py")):
+        for name in sorted(n for n in os.listdir(self.PACKAGE) if n.endswith((".py", ".json"))):
             with open(os.path.join(self.PACKAGE, name), "rb") as handle:
                 digest.update(name.encode("utf-8") + b"\0" + handle.read() + b"\0")
         self.assertEqual(digest.hexdigest()[:12], mod.BUILD_ID)  # the algorithm scripts/deploy.mjs mirrors
