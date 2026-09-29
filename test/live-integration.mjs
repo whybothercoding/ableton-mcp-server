@@ -23,12 +23,32 @@ const percentile = (a, p) => [...a].sort((x, y) => x - y)[Math.min(a.length - 1,
 
 let passed = 0;
 const failures = [];
+const skips = [];
+// A check that cannot run on this Set or in this transport state throws Skip, so it is counted apart from the passes: 'content' means the Set
+// lacks something the check needs (MCP_TEST_STRICT=1 turns those into failures), 'state' means the transport is in the wrong state for it.
+class Skip extends Error {
+  constructor(reason, kind) {
+    super(reason);
+    this.kind = kind;
+  }
+}
+const skip = (reason, kind = 'content') => {
+  throw new Skip(reason, kind);
+};
+const recordSkip = (name, reason, kind = 'content') => {
+  skips.push({ name, reason, kind });
+  console.log(`  skip ${name}\n       ${reason}`);
+};
 async function check(name, fn) {
   try {
     await fn();
     passed += 1;
     console.log(`  ok   ${name}`);
   } catch (err) {
+    if (err instanceof Skip) {
+      recordSkip(name, err.message, err.kind);
+      return;
+    }
     failures.push(`${name}: ${err.message}`);
     console.log(`  FAIL ${name}\n       ${err.message}`);
   }
@@ -724,8 +744,7 @@ try {
   await check('grooves: a clip always has one, addressed as grooves/N; assignment and parameters round-trip and are restored', async () => {
     const pool = await call('eval', { code: 'len(self._song.groove_pool.grooves)' });
     if (pool === 0) {
-      console.log('       the groove pool is empty: skipped (Live cannot create grooves through its API)');
-      return;
+      skip('the groove pool is empty and Live cannot create grooves through its API');
     }
     const clip = await clipState(['groove', 'has_groove']);
     assert(/^grooves\/\d+$/.test(clip.properties.groove) && clip.properties.has_groove === true, JSON.stringify(clip.properties));
@@ -858,8 +877,7 @@ try {
     const set = await call('describe_set');
     const audio = set.tracks.flatMap((t) => (t.clips ?? []).filter((c) => c.kind === 'audio').map((c) => `${t.address}/slots/${c.slot}/clip`))[0];
     if (!audio) {
-      console.log('       no audio clip in the Set: skipped');
-      return;
+      skip('no audio clip in the Set');
     }
     await rejectsWith('get_notes', { address: audio }, 'INVALID_ARGUMENT');
   });
@@ -870,17 +888,16 @@ try {
     await rejectsCode(() => call('create', { kind: 'cue_point', time: 1 }), 'UNAVAILABLE');
     const before = (await call('describe_set')).cue_points;
     if (await isPlaying()) {
-      console.log('       transport is playing: the cue toggle acts at the moving playhead, skipped');
-      return;
+      skip('the transport is playing and the cue toggle acts at the moving playhead', 'state');
     }
     if (before.length > 0) {
       // toggling could remove one of the user's own cues (and lose its name), so only read, and jump to the first
-      console.log('       the Set already has cue points: toggle skipped, jump only');
+      // (the jump below still runs; the check is then reported as skipped because the toggle was not exercised)
       const playhead = await call('eval', { code: 'self._song.current_song_time' });
       await call('launch', { address: before[0].address });
       assert(Math.abs((await call('eval', { code: 'self._song.current_song_time' })) - before[0].time) < 1e-3, 'launching a cue point should jump the playhead to it');
       await call('set_properties', { address: 'song', properties: { current_song_time: playhead } });
-      return;
+      skip('the Set already has cue points, so toggling could remove one of yours: only the jump was checked');
     }
     const playhead = await call('eval', { code: 'self._song.current_song_time' });
     const cues = () => call('eval', { code: 'len(self._song.cue_points)' });
@@ -1064,8 +1081,7 @@ try {
     const drift = `${dt}/devices/${(await devicesOf(dt)).indexOf('Drift')}`;
     const can = (await call('get_properties', { address: drift, names: ['can_compare_ab'] })).properties.can_compare_ab;
     if (!can) {
-      console.log('       this device cannot A/B compare: skipped');
-      return;
+      skip('this device cannot A/B compare');
     }
     const out = await call('device_action', { action: 'save_ab', address: drift });
     assert(out.is_using_compare_preset_b === false || out.is_using_compare_preset_b === true, JSON.stringify(out));
@@ -1202,8 +1218,7 @@ try {
     const inputs = (await call('routing', { address: audio.address, direction: 'input' })).available_types;
     const resampling = inputs.find((t) => t.category === 'resampling');
     if (!resampling) {
-      console.log('       no resampling input on this track: skipped');
-      return;
+      skip('no resampling input on this track');
     }
     const original = (await call('routing', { address: audio.address, direction: 'input' })).type.display_name;
     await call('set_properties', { address: audio.address, properties: { current_monitoring_state: 'IN' } });
@@ -1297,7 +1312,7 @@ try {
   console.log('\nAudio clips, warp markers and conversions');
   const sourceClip = await call('eval', { code: "[sl.clip.file_path for t in self._song.tracks for sl in getattr(t, 'clip_slots', []) if sl.has_clip and sl.clip.is_audio_clip][:1]" });
   if (sourceClip.length === 0) {
-    console.log('  (no audio clip in the Set to borrow a file from: audio tests skipped)');
+    recordSkip('audio clips, warp markers and conversions (whole section)', 'no audio clip in the Set to borrow a file from');
   } else {
     const file = sourceClip[0];
     const audioTrack = await call('create', { kind: 'audio_track', name: 'MCP TEST AUDIO' });
@@ -1425,8 +1440,7 @@ try {
   await check('an arrangement audio clip is created from a file path on an audio track', async () => {
     const file = (await call('eval', { code: "[sl.clip.file_path for t in self._song.tracks for sl in getattr(t, 'clip_slots', []) if sl.has_clip and sl.clip.is_audio_clip][:1]" }))[0];
     if (!file) {
-      console.log('       no audio clip in the Set to borrow a file from: skipped');
-      return;
+      skip('no audio clip in the Set to borrow a file from');
     }
     const audioTrack = await call('create', { kind: 'audio_track', name: 'MCP TEST ARR AUDIO' });
     await trackPtr(audioTrack.address, 'tracks');
@@ -1460,8 +1474,7 @@ try {
     await failsCode(() => call('set_properties', { address: simpler.address, properties: { playback_mode: 'loud' } }), 'INVALID_ARGUMENT');
     await failsCode(() => call('get_properties', { address: `${simpler.address}/sample` }), 'NOT_FOUND', 'no sample');
     if (!file) {
-      console.log('       no audio file to borrow: sample checks skipped');
-      return;
+      skip('no audio file to borrow, so the sample checks did not run');
     }
     await call('device_action', { action: 'call', address: simpler.address, method: 'replace_sample', args: { path: file } });
     const sample = await call('get_properties', { address: `${simpler.address}/sample`, names: ['file_path', 'length', 'sample_rate', 'start_marker', 'end_marker', 'gain', 'warping', 'slicing_style', 'warp_mode'] });
@@ -1684,8 +1697,7 @@ try {
   });
   await check('during playback the live parameter follows the drawn envelope', async () => {
     if (!(await call('eval', { code: 'self._song.is_playing' }))) {
-      console.log('       transport stopped: skipped');
-      return;
+      skip('the transport is stopped', 'state');
     }
     const lo = pA.min + 0.1 * (pA.max - pA.min);
     const hi = pA.min + 0.9 * (pA.max - pA.min);
@@ -1815,14 +1827,14 @@ try {
     assert(await waitFor(async () => (await stateOf()) === 1, 8000), 'the clip automation should take the parameter over once the clip plays');
     assert(!(await songCanReEnable()), 'nothing is overridden yet');
     await call('set_properties', { address: autoParam, properties: { value: pA.min + 0.9 * spanA } });   // a write while the automation plays is an override
-    assert((await stateOf()) === 2 && (await songCanReEnable()), 'a write during playback should override the clip automation');
+    assert(await waitFor(async () => (await stateOf()) === 2 && (await songCanReEnable()), 2000), `a write during playback should override the clip automation (state ${await stateOf()})`);
     await call('device_action', { action: 're_enable_automation', address: autoParam });
-    assert((await stateOf()) === 1 && !(await songCanReEnable()), 're_enable_automation on the parameter should hand it back to the clip');
+    assert(await waitFor(async () => (await stateOf()) === 1 && !(await songCanReEnable()), 2000), 're_enable_automation on the parameter should hand it back to the clip');
     await call('ramp_parameter', { parameter: autoParam, from: pA.min + 0.9 * spanA, to: pA.min + 0.95 * spanA, seconds: 0.3 });
     assert(await waitFor(async () => (await stateOf()) === 2, 2000), 'a ramp should override it too');
     await sleep(400);
     await call('device_action', { action: 're_enable_automation', address: 'song' });
-    assert((await stateOf()) === 1 && !(await songCanReEnable()), 're_enable_automation on the song should hand back everything');
+    assert(await waitFor(async () => (await stateOf()) === 1 && !(await songCanReEnable()), 2000), 're_enable_automation on the song should hand back everything');
     await call('launch', { address: autoClip, action: 'stop', quantized: false });
     await call('clear_automation', { clip: autoClip });
   });
@@ -2144,8 +2156,7 @@ try {
     const session = await call('get_bulk_session_structure');
     const spare = session.tracks.find((t) => t.is_midi_track && t.device_count === 0);
     if (!spare) {
-      console.log('       no empty MIDI track: skipped');
-      return;
+      skip('no empty MIDI track');
     }
     const listing = await call('get_browser_items_at_path', { path: 'drums', limit: 150 });
     const kits = listing.items.filter((item) => item.is_loadable && /Kit\.adg$/.test(item.name)).slice(0, 14);
@@ -2261,9 +2272,12 @@ try {
   });
 }
 
-console.log(`\n${passed} passed, ${failures.length} failed`);
+console.log(`\n${passed} passed, ${failures.length} failed, ${skips.length} skipped`);
+if (skips.length) console.log(skips.map((k) => ` - skipped (${k.kind}): ${k.name}: ${k.reason}`).join('\n'));
+const strictSkips = process.env.MCP_TEST_STRICT === '1' ? skips.filter((k) => k.kind === 'content') : [];
+if (strictSkips.length) console.log(`MCP_TEST_STRICT=1: ${strictSkips.length} check(s) could not run for lack of content in this Set`);
 if (failures.length) {
   console.log(failures.map((f) => ` - ${f}`).join('\n'));
-  process.exit(1);
 }
+if (failures.length || strictSkips.length) process.exit(1);
 process.exit(0);

@@ -13,6 +13,7 @@ await client.connect(new StdioClientTransport({ command: 'node', args: [path.joi
 
 let passed = 0;
 const failures = [];
+const skips = [];      // parts of a check that could not run on this Set (MCP_TEST_STRICT=1 turns them into failures)
 async function check(name, fn) {
   try {
     await fn();
@@ -347,7 +348,8 @@ try {
   await check('analyze_audio_clip works by address: settings and file analysis together, and MIDI clips are refused readably', async () => {
     const audioClip = (await ok('describe_set')).tracks.flatMap((t) => (t.clips ?? []).filter((c) => c.kind === 'audio').map((c) => `${t.address}/slots/${c.slot}/clip`))[0];
     if (!audioClip) {
-      console.log('       no audio clip in the Set: skipped');
+      skips.push('analyze_audio_clip on an audio clip: no audio clip in the Set');
+      console.log('       no audio clip in the Set: that part skipped');
     } else {
       const out = await ok('analyze_audio_clip', { address: audioClip });
       assert(out.clip.address === audioClip && out.clip.file_path && out.analysis, JSON.stringify(out).slice(0, 200));
@@ -438,9 +440,10 @@ try {
   await client.close();
 }
 
-console.log(`\n${passed} passed, ${failures.length} failed`);
+console.log(`\n${passed} passed, ${failures.length} failed, ${skips.length} partly skipped`);
+if (skips.length) console.log(skips.map((k) => ` - skipped: ${k}`).join('\n'));
 if (failures.length) {
   console.log(failures.map((f) => ` - ${f}`).join('\n'));
-  process.exit(1);
 }
+if (failures.length || (process.env.MCP_TEST_STRICT === '1' && skips.length)) process.exit(1);
 process.exit(0);
