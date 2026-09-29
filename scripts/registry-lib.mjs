@@ -1,7 +1,7 @@
 // Turns an API dump (docs/live-api/<version>.json) into the compact registry the Remote Script ships, and diffs dumps.
 
 /** Classes whose properties the property engine knows about (qualified names as Live.<Module>.<Class>[.<Nested>]). */
-export const INCLUDE_CLASSES = ['Live.Song.Song', 'Live.Track.Track', 'Live.Scene.Scene', 'Live.ClipSlot.ClipSlot', 'Live.Clip.Clip', 'Live.Groove.Groove'];
+export const INCLUDE_CLASSES = ['Live.Song.Song', 'Live.Track.Track', 'Live.Scene.Scene', 'Live.ClipSlot.ClipSlot', 'Live.Clip.Clip', 'Live.Groove.Groove', 'Live.Clip.MidiNote'];
 
 /** Enum types referenced by property overlays (an int property has no enum type of its own). */
 export const INCLUDE_ENUMS = [

@@ -212,6 +212,46 @@
     }
    }
   },
+  "Live.Clip.MidiNote": {
+   "properties": {
+    "duration": {
+     "get": "float",
+     "set": "float"
+    },
+    "mute": {
+     "get": "bool",
+     "set": "bool"
+    },
+    "note_id": {
+     "get": "int",
+     "set": null
+    },
+    "pitch": {
+     "get": "int",
+     "set": "int"
+    },
+    "probability": {
+     "get": "float",
+     "set": "float"
+    },
+    "release_velocity": {
+     "get": "float",
+     "set": "float"
+    },
+    "start_time": {
+     "get": "float",
+     "set": "float"
+    },
+    "velocity": {
+     "get": "float",
+     "set": "float"
+    },
+    "velocity_deviation": {
+     "get": "float",
+     "set": "float"
+    }
+   }
+  },
   "Live.ClipSlot.ClipSlot": {
    "properties": {
     "canonical_parent": {

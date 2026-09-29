@@ -279,6 +279,94 @@ export const TOOL_SPECS: ToolSpec[] = [
     bridge: { command: 'clip_action' }
   },
   {
+    name: 'get_notes',
+    description:
+      "Read the MIDI notes of a clip (`address`: 'tracks/N/slots/M/clip', MIDI clips only) with every field Live stores: `id` (stable while the note exists; use it with edit_notes), " +
+      "pitch, start_time and duration (beats), velocity (1-127), mute, probability (0-1), velocity_deviation (-127..127) and release_velocity (0-127). " +
+      "Sorted by start_time then pitch. Without filters it returns all notes (capped by `limit`, default 2000; `truncated` says if more exist). Filter by a range " +
+      "(`from_time`/`time_span` in beats, `from_pitch`/`pitch_span`), by `ids`, or with selected: true for the notes selected in Live's editor. Also returns the clip's length and loop.",
+    inputSchema: {
+      type: 'object',
+      properties: {
+        address: { type: 'string', description: "A MIDI clip, e.g. 'tracks/2/slots/0/clip'" },
+        from_time: { type: 'number', description: 'Range start in beats (notes that start in the range)' },
+        time_span: { type: 'number', description: 'Range length in beats' },
+        from_pitch: { type: 'number', description: 'Lowest MIDI pitch of the range' },
+        pitch_span: { type: 'number', description: 'Number of pitches in the range' },
+        ids: { type: 'array', items: { type: 'number' }, description: 'Only these note ids' },
+        selected: { type: 'boolean', description: "Only notes selected in Live's editor" },
+        limit: { type: 'number', description: 'Maximum notes returned (default 2000)' }
+      },
+      required: ['address']
+    },
+    annotations: { readOnlyHint: true, destructiveHint: false, idempotentHint: true },
+    bridge: { command: 'get_notes' }
+  },
+  {
+    name: 'write_notes',
+    description:
+      "Add MIDI notes to a clip (additive: existing notes stay). Each note: pitch (0-127), start_time and duration (beats, duration > 0) and optionally velocity (1-127, default 100), " +
+      "mute, probability (0-1, default 1), velocity_deviation (-127..127, default 0), release_velocity (0-127, default 64). Every note is validated before anything is written, so a bad note " +
+      "rejects the whole call (up to 5000 notes per call). Live never lets notes of one pitch overlap: a new note shortens an earlier note of that pitch that runs into it, and one starting at exactly the same time replaces it, so `note_count` " +
+      "in the result can be lower than expected. Returns the new note ids. One undo step. To replace or change existing notes use edit_notes.",
+    inputSchema: {
+      type: 'object',
+      properties: {
+        address: { type: 'string', description: 'A MIDI clip' },
+        notes: {
+          type: 'array',
+          description: 'Notes to add',
+          items: {
+            type: 'object',
+            properties: {
+              pitch: { type: 'number' }, start_time: { type: 'number' }, duration: { type: 'number' }, velocity: { type: 'number' },
+              mute: { type: 'boolean' }, probability: { type: 'number' }, velocity_deviation: { type: 'number' }, release_velocity: { type: 'number' }
+            },
+            required: ['pitch', 'start_time', 'duration']
+          }
+        },
+        expect: { type: 'object', description: 'Guard: {"name": "..."} must match the clip' }
+      },
+      required: ['address', 'notes']
+    },
+    annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: false },
+    bridge: { command: 'write_notes' }
+  },
+  {
+    name: 'edit_notes',
+    description:
+      "Change notes that already exist in a MIDI clip. `action`: modify (`changes`: [{id, <fields>}] or `ids` + `set`: {field: value}; keeps note ids and per-note events), " +
+      "remove (exactly one of `ids`, a range from_time/time_span/from_pitch/pitch_span, or all: true), replace (swap the notes in a range, or all notes, for `notes` in one step; if Live refuses the new notes the old ones are restored; " +
+      "omit `notes` to clear the range), duplicate (`ids`, optional `destination_time` and `transposition` semitones), duplicate_region (`start`, `length`, `destination_time`, optional `pitch` and `transposition`) " +
+      "and select (`ids`, all: true or none: true, for the editor's selection). Get ids from get_notes; unknown ids are refused (NOT_FOUND) with nothing changed. `expect` ({name}) guards against the wrong clip. One undo step; DESTRUCTIVE (remove, replace).",
+    inputSchema: {
+      type: 'object',
+      properties: {
+        address: { type: 'string', description: 'A MIDI clip' },
+        action: { type: 'string', enum: ['modify', 'remove', 'replace', 'duplicate', 'duplicate_region', 'select'], description: 'What to do' },
+        ids: { type: 'array', items: { type: 'number' }, description: 'Note ids (modify with set, remove, duplicate, select)' },
+        changes: { type: 'array', description: 'modify: [{id, pitch?, start_time?, duration?, velocity?, mute?, probability?, velocity_deviation?, release_velocity?}]', items: { type: 'object', properties: { id: { type: 'number' } }, required: ['id'] } },
+        set: { type: 'object', description: 'modify with ids: fields to set on all of them' },
+        notes: { type: 'array', description: 'replace: the new notes (same fields as write_notes)', items: { type: 'object' } },
+        all: { type: 'boolean', description: 'remove or select every note' },
+        none: { type: 'boolean', description: 'select: clear the selection' },
+        from_time: { type: 'number', description: 'Range start (remove, replace)' },
+        time_span: { type: 'number', description: 'Range length (remove, replace)' },
+        from_pitch: { type: 'number', description: 'Lowest pitch (remove, replace)' },
+        pitch_span: { type: 'number', description: 'Pitch count (remove, replace)' },
+        start: { type: 'number', description: 'duplicate_region: source start in beats' },
+        length: { type: 'number', description: 'duplicate_region: source length in beats' },
+        destination_time: { type: 'number', description: 'duplicate, duplicate_region: where the copies start' },
+        pitch: { type: 'number', description: 'duplicate_region: only this pitch (-1 = all)' },
+        transposition: { type: 'number', description: 'duplicate, duplicate_region: semitones' },
+        expect: { type: 'object', description: 'Guard: {"name": "..."} must match the clip' }
+      },
+      required: ['address', 'action']
+    },
+    annotations: { readOnlyHint: false, destructiveHint: true, idempotentHint: false },
+    bridge: { command: 'edit_notes' }
+  },
+  {
     name: 'list_properties',
     description:
       'List the properties get_properties/set_properties know for an object kind: type, whether it is writable, allowed enum values ' +

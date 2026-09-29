@@ -143,3 +143,18 @@ test('launch and clip_action schemas and risk annotations', () => {
   assert.equal(validateArgs(launch.inputSchema, { address: 'tracks/0/slots/0', legato: 'yes' }), 'legato must be true or false');
   assert.equal(validateArgs(action.inputSchema, { address: 'tracks/0/slots/0/clip', action: 'quantize', amount: 0.5 }), null);
 });
+
+test('note tools: schemas, required arguments and risk annotations', () => {
+  const get = TOOL_SPEC_BY_NAME.get_notes;
+  const write = TOOL_SPEC_BY_NAME.write_notes;
+  const edit = TOOL_SPEC_BY_NAME.edit_notes;
+  assert.equal(get.annotations.readOnlyHint, true);
+  assert.equal(write.annotations.destructiveHint, false);
+  assert.equal(edit.annotations.destructiveHint, true);
+  assert.deepEqual(write.inputSchema.required, ['address', 'notes']);
+  assert.deepEqual(write.inputSchema.properties.notes.items.required, ['pitch', 'start_time', 'duration']);
+  assert.deepEqual(edit.inputSchema.properties.action.enum, ['modify', 'remove', 'replace', 'duplicate', 'duplicate_region', 'select']);
+  assert.match(validateArgs(write.inputSchema, { address: 'tracks/0/slots/0/clip', notes: [{ pitch: 60, start_time: 0 }] }) ?? '', /notes\[0\]: missing required argument 'duration'/);
+  assert.equal(validateArgs(edit.inputSchema, { address: 'a', action: 'modify', changes: [{ id: 3, velocity: 50 }] }), null);
+  assert.match(validateArgs(edit.inputSchema, { address: 'a', action: 'modify', changes: [{ velocity: 50 }] }) ?? '', /missing required argument 'id'/);
+});

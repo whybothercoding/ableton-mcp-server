@@ -327,6 +327,124 @@ class FakeReturnTrack(FakeTrack):
         raise RuntimeError("Main, Group and Return Tracks have no clip slots")
 
 
+class FakeNoteVector(list):
+    """Like Live's MidiNoteVector: apply_note_modifications accepts only this type, not a plain list."""
+
+
+class FakeMidiNote(object):
+    """A note with Live's validation: setters raise IndexError for out-of-range values (Live's message style)."""
+    _ranges = {"pitch": (0, 127), "velocity": (1, 127), "probability": (0.0, 1.0), "velocity_deviation": (-127, 127),
+               "release_velocity": (0, 127)}
+
+    def __init__(self, pitch, start_time, duration, velocity=100.0, mute=False, probability=1.0, velocity_deviation=0.0,
+                 release_velocity=64.0, note_id=None):
+        object.__setattr__(self, "note_id", note_id)
+        for name, value in (("pitch", pitch), ("start_time", start_time), ("duration", duration), ("velocity", velocity),
+                            ("mute", mute), ("probability", probability), ("velocity_deviation", velocity_deviation),
+                            ("release_velocity", release_velocity)):
+            object.__setattr__(self, name, value)
+
+    def validate(self):
+        for name, (low, high) in self._ranges.items():
+            if not low <= getattr(self, name) <= high:
+                raise IndexError("Invalid note {0} {1}".format(name.replace("_", " "), getattr(self, name)))
+        if self.duration < 0:
+            raise IndexError("A negative note duration is not allowed")
+
+    def __setattr__(self, name, value):
+        if name == "note_id":
+            raise AttributeError("note_id is read-only")
+        object.__setattr__(self, name, value)
+        self.validate()
+
+    def copy(self):
+        return FakeMidiNote(self.pitch, self.start_time, self.duration, self.velocity, self.mute, self.probability,
+                            self.velocity_deviation, self.release_velocity, self.note_id)
+
+
+class NoteClip(PropClip):
+    """A MIDI clip with the extended note API: ids, one note per pitch at any time, vectors, selection."""
+
+    def __init__(self, name="notes", length=4.0):
+        PropClip.__init__(self, name, length)
+        self._notes, self._next_id, self._selected = [], 1, set()
+        self.add_calls = 0
+
+    def _store(self, spec):
+        note = FakeMidiNote(spec.pitch, spec.start_time, spec.duration, spec.velocity, spec.mute, spec.probability,
+                            spec.velocity_deviation, spec.release_velocity, self._next_id)
+        note.validate()
+        self._next_id += 1
+        kept = []
+        for n in self._notes:                          # Live: same start replaces, an earlier note running into the new one is cut short
+            if n.pitch == note.pitch and n.start_time == note.start_time:
+                continue
+            if n.pitch == note.pitch and n.start_time < note.start_time < n.start_time + n.duration:
+                n = n.copy()
+                n.duration = note.start_time - n.start_time
+            kept.append(n)
+        self._notes = kept + [note]
+        return note.note_id
+
+    def add_new_notes(self, specs):
+        self.add_calls += 1
+        return [self._store(spec) for spec in specs]
+
+    def _vector(self, notes):
+        return FakeNoteVector(n.copy() for n in sorted(notes, key=lambda n: (n.pitch, n.start_time)))
+
+    def get_all_notes_extended(self):
+        return self._vector(self._notes)
+
+    def get_notes_extended(self, from_pitch, pitch_span, from_time, time_span):
+        return self._vector(n for n in self._notes if from_pitch <= n.pitch < from_pitch + pitch_span
+                            and from_time <= n.start_time < from_time + time_span)
+
+    def get_notes_by_id(self, ids):
+        found = [n for n in self._notes if n.note_id in ids]
+        if len(found) != len(set(ids)):
+            raise ValueError("All given IDs must be present in clip")
+        return self._vector(found)
+
+    def apply_note_modifications(self, vector):
+        if not isinstance(vector, FakeNoteVector):
+            raise TypeError("Python argument types did not match C++ signature: apply_note_modifications(Clip, list)")
+        by_id = dict((n.note_id, n) for n in self._notes)
+        for note in vector:
+            if note.note_id not in by_id:
+                raise ValueError("All given IDs must be present in clip")
+        for note in vector:
+            self._notes[self._notes.index(by_id[note.note_id])] = note.copy()
+
+    def remove_notes_by_id(self, ids):
+        if set(ids) - set(n.note_id for n in self._notes):
+            raise ValueError("All given IDs must be present in clip")
+        self._notes = [n for n in self._notes if n.note_id not in ids]
+
+    def duplicate_notes_by_id(self, ids, destination_time=None, transposition=0):
+        sources = self.get_notes_by_id(ids)
+        offset = (destination_time - min(n.start_time for n in sources)) if destination_time is not None else self.length
+        return [self._store(FakeMidiNote(n.pitch + transposition, n.start_time + offset, n.duration, n.velocity, n.mute,
+                                         n.probability, n.velocity_deviation, n.release_velocity)) for n in sources]
+
+    def duplicate_region(self, start, length, destination, pitch=-1, transposition=0):
+        for n in list(self.get_notes_extended(0, 128, start, length)):
+            if pitch in (-1, n.pitch):
+                self._store(FakeMidiNote(n.pitch + transposition, destination + (n.start_time - start), n.duration, n.velocity))
+
+    def select_notes_by_id(self, ids):
+        self._selected = set(ids)
+
+    def select_all_notes(self):
+        self._selected = set(n.note_id for n in self._notes)
+
+    def deselect_all_notes(self):
+        self._selected = set()
+
+    def get_selected_notes_extended(self):
+        return self._vector(n for n in self._notes if n.note_id in self._selected)
+
+
 def make_song():
     ret = FakeReturnTrack("Return A", with_clips=False)
     ret.devices = [FakeDevice("Return Reverb")]
@@ -372,6 +490,7 @@ def load_module():
         Quantization=FakeEnum(q_no_q=0, q_8_bars=1, q_4_bars=2, q_2_bars=3, q_bar=4, q_half=5),
         RecordingQuantization=FakeEnum(rec_q_no_q=0, rec_q_quarter=1, rec_q_eight=2, rec_q_eight_triplet=3,
                                        rec_q_sixtenth=5, rec_q_thirtysecond=8))
+    live.Clip.MidiNoteSpecification = FakeMidiNote
     live.Groove = types.SimpleNamespace(Base=FakeEnum(gb_four=0, gb_eight=1, gb_eight_triplet=2, gb_sixteen=3, count=6))
     live.Track = types.SimpleNamespace(Track=types.SimpleNamespace(monitoring_states=FakeEnum(IN=0, AUTO=1, OFF=2)))
     live.Application = types.SimpleNamespace(UnavailableFeature=FakeEnum(note_velocity_ranges_and_probabilities=0))
@@ -1426,6 +1545,247 @@ class ClipActionTests(unittest.TestCase):
         listing = self.run_command("list_properties", {"kind": "clip"})["result"]["properties"]
         self.assertEqual(listing["groove"]["refers_to"], "groove")
         self.assertIn("base", self.run_command("list_properties", {"kind": "groove"})["result"]["properties"])
+
+
+# ---------------------------------------------------------------- notes
+
+class NotesTests(unittest.TestCase):
+    ADDR = "tracks/0/slots/0/clip"
+
+    def setUp(self):
+        self.script = make_script()
+        self.addCleanup(self.script._stop_server)
+        song = make_song()
+        self.clip = NoteClip("notes", 4.0)
+        audio = PropClip("audio", 4.0)
+        audio.is_midi_clip, audio.is_audio_clip = False, True
+        song.tracks[0].clip_slots = [FakeSlot(self.clip), FakeSlot(audio)]
+        self.script._song = self.song = song
+
+    def call(self, name, **params):
+        response = self.script._process_command({"type": name, "params": dict({"address": self.ADDR}, **params)})
+        return response
+
+    def ok(self, name, **params):
+        response = self.call(name, **params)
+        self.assertEqual(response["status"], "success", response)
+        return response["result"]
+
+    def code(self, name, **params):
+        response = self.call(name, **params)
+        self.assertEqual(response["status"], "error", response)
+        return response["code"]
+
+    def seed(self):
+        return self.ok("write_notes", notes=[
+            {"pitch": 64, "start_time": 1.0, "duration": 0.5, "velocity": 80, "probability": 0.5},
+            {"pitch": 60, "start_time": 0.0, "duration": 1.0},
+            {"pitch": 67, "start_time": 1.0, "duration": 0.25, "mute": True, "velocity_deviation": -20, "release_velocity": 10}])["ids"]
+
+    # ---- write_notes / get_notes
+    def test_write_applies_defaults_and_reports_ids_and_count(self):
+        result = self.ok("write_notes", notes=[{"pitch": 60, "start_time": 0, "duration": 1}])
+        self.assertEqual((result["written"], result["ids"], result["note_count"]), (1, [1], 1))
+        note = self.ok("get_notes")["notes"][0]
+        self.assertEqual(note, {"id": 1, "pitch": 60, "start_time": 0.0, "duration": 1.0, "velocity": 100.0, "mute": False,
+                                "probability": 1.0, "velocity_deviation": 0.0, "release_velocity": 64.0})
+
+    def test_get_notes_returns_every_field_sorted_by_time_then_pitch(self):
+        self.seed()
+        got = self.ok("get_notes")
+        self.assertEqual([(n["start_time"], n["pitch"]) for n in got["notes"]], [(0.0, 60), (1.0, 64), (1.0, 67)])
+        self.assertEqual((got["count"], got["truncated"], got["clip"]["length"]), (3, False, 4.0))
+        by_pitch = dict((n["pitch"], n) for n in got["notes"])
+        self.assertEqual((by_pitch[64]["probability"], by_pitch[64]["velocity"]), (0.5, 80.0))
+        self.assertEqual((by_pitch[67]["mute"], by_pitch[67]["velocity_deviation"], by_pitch[67]["release_velocity"]), (True, -20.0, 10.0))
+
+    def test_get_notes_by_range_ids_selection_and_limit(self):
+        ids = self.seed()
+        self.assertEqual([n["pitch"] for n in self.ok("get_notes", from_time=1.0, time_span=1.0)["notes"]], [64, 67])
+        self.assertEqual([n["pitch"] for n in self.ok("get_notes", from_pitch=64, pitch_span=1)["notes"]], [64])
+        self.assertEqual([n["id"] for n in self.ok("get_notes", ids=ids[:1])["notes"]], ids[:1])
+        self.ok("edit_notes", action="select", ids=[ids[1]])
+        self.assertEqual([n["id"] for n in self.ok("get_notes", selected=True)["notes"]], [ids[1]])
+        limited = self.ok("get_notes", limit=2)
+        self.assertEqual((limited["count"], limited["truncated"], len(limited["notes"])), (3, True, 2))
+        self.assertEqual(self.code("get_notes", limit=0), "INVALID_ARGUMENT")
+        self.assertEqual(self.code("get_notes", ids=[999]), "NOT_FOUND")
+        self.assertEqual(self.code("get_notes", time_span=-1), "INVALID_ARGUMENT")
+        self.assertEqual(self.code("get_notes", from_time="soon"), "TYPE_ERROR")
+
+    def test_only_midi_clips_have_notes(self):
+        self.assertEqual(self.code("get_notes", address="tracks/0/slots/1/clip"), "INVALID_ARGUMENT")
+        self.assertEqual(self.code("write_notes", address="tracks/0/slots/1/clip", notes=[{"pitch": 60, "start_time": 0, "duration": 1}]), "INVALID_ARGUMENT")
+        self.assertEqual(self.code("get_notes", address="tracks/0"), "INVALID_ARGUMENT")
+        self.assertEqual(self.code("get_notes", address="tracks/0/slots/1"), "INVALID_ARGUMENT")
+
+    def test_write_validates_every_note_before_writing_any(self):
+        good = {"pitch": 60, "start_time": 0, "duration": 1}
+        cases = [({"pitch": 128, "start_time": 0, "duration": 1}, "OUT_OF_RANGE"), ({"pitch": 60.5, "start_time": 0, "duration": 1}, "TYPE_ERROR"),
+                 ({"pitch": True, "start_time": 0, "duration": 1}, "TYPE_ERROR"), ({"pitch": 60, "start_time": "0", "duration": 1}, "TYPE_ERROR"),
+                 ({"pitch": 60, "start_time": 0, "duration": 0}, "OUT_OF_RANGE"), ({"pitch": 60, "start_time": 0, "duration": -1}, "OUT_OF_RANGE"),
+                 ({**good, "velocity": 0}, "OUT_OF_RANGE"), ({**good, "velocity": 128}, "OUT_OF_RANGE"),
+                 ({**good, "probability": 1.5}, "OUT_OF_RANGE"), ({**good, "probability": -0.1}, "OUT_OF_RANGE"),
+                 ({**good, "velocity_deviation": 128}, "OUT_OF_RANGE"), ({**good, "release_velocity": -1}, "OUT_OF_RANGE"),
+                 ({**good, "mute": 1}, "TYPE_ERROR"), ({**good, "colour": 3}, "INVALID_ARGUMENT"),
+                 ({"pitch": 60, "duration": 1}, "INVALID_ARGUMENT"), ("C3", "TYPE_ERROR")]
+        for bad, code in cases:
+            self.assertEqual(self.code("write_notes", notes=[good, bad]), code, bad)
+            self.assertEqual(self.clip.add_calls, 0, "a rejected batch must not reach Live: {0}".format(bad))
+        for notes in ([], None, "x"):
+            self.assertEqual(self.code("write_notes", notes=notes), "INVALID_ARGUMENT")
+        self.assertEqual(self.code("write_notes", notes=[good] * 5001), "INVALID_ARGUMENT")
+        self.assertEqual(self.ok("get_notes")["count"], 0)
+
+    def test_the_error_names_the_note_and_the_field(self):
+        response = self.call("write_notes", notes=[{"pitch": 60, "start_time": 0, "duration": 1}, {"pitch": 60, "start_time": 0, "duration": 1, "velocity": 300}])
+        self.assertIn("notes[1]: velocity 300 is outside 1 to 127", response["message"])
+
+    def test_overlapping_notes_of_one_pitch_are_trimmed_or_replaced_and_the_count_says_so(self):
+        result = self.ok("write_notes", notes=[{"pitch": 60, "start_time": 0, "duration": 2}, {"pitch": 60, "start_time": 1, "duration": 2}])
+        self.assertEqual((result["written"], result["note_count"]), (2, 2))
+        self.assertEqual([(n["start_time"], n["duration"]) for n in self.ok("get_notes")["notes"]], [(0.0, 1.0), (1.0, 2.0)])
+        result = self.ok("write_notes", notes=[{"pitch": 60, "start_time": 1, "duration": 0.5}])
+        self.assertEqual((result["written"], result["note_count"]), (1, 2))            # same start time: replaced
+
+    def test_write_guard(self):
+        self.assertEqual(self.code("write_notes", notes=[{"pitch": 60, "start_time": 0, "duration": 1}], expect={"name": "other"}), "GUARD_FAILED")
+        self.assertEqual(self.clip.add_calls, 0)
+
+    # ---- edit_notes: modify
+    def test_modify_changes_only_the_given_fields_through_a_note_vector(self):
+        ids = self.seed()
+        result = self.ok("edit_notes", action="modify", changes=[{"id": ids[0], "velocity": 20, "start_time": 1.5}, {"id": ids[1], "probability": 0.25}])
+        self.assertEqual(result["modified"], 2)
+        notes = dict((n["id"], n) for n in self.ok("get_notes")["notes"])
+        self.assertEqual((notes[ids[0]]["velocity"], notes[ids[0]]["start_time"], notes[ids[0]]["probability"]), (20.0, 1.5, 0.5))
+        self.assertEqual((notes[ids[1]]["probability"], notes[ids[1]]["pitch"]), (0.25, 60))
+        self.assertEqual(notes[ids[2]]["mute"], True)                       # untouched
+        self.assertEqual(sorted(notes), sorted(ids))                          # ids survive a modification
+
+    def test_modify_many_notes_with_one_set(self):
+        ids = self.seed()
+        self.ok("edit_notes", action="modify", ids=ids, set={"velocity": 64, "mute": False})
+        self.assertEqual(set((n["velocity"], n["mute"]) for n in self.ok("get_notes")["notes"]), {(64.0, False)})
+
+    def test_modify_validates_before_touching_anything(self):
+        ids = self.seed()
+        before = self.ok("get_notes")["notes"]
+        cases = [dict(changes=[{"id": ids[0], "velocity": 5}, {"id": 999, "velocity": 5}]),
+                 dict(changes=[{"id": ids[0], "velocity": 500}]), dict(changes=[{"id": ids[0]}]), dict(changes=[{"velocity": 5}]),
+                 dict(changes=[{"id": ids[0], "velocity": 5}, {"id": ids[0], "velocity": 6}]), dict(changes=[{"id": "1", "velocity": 5}]),
+                 dict(changes=[]), dict(ids=ids, set={}), dict(ids=ids), dict(changes=[{"id": ids[0], "velocity": 5}], ids=ids, set={"velocity": 5})]
+        for params in cases:
+            response = self.call("edit_notes", action="modify", **params)
+            self.assertEqual(response["status"], "error", params)
+        self.assertEqual(self.ok("get_notes")["notes"], before)
+        self.assertEqual(self.code("edit_notes", action="modify", changes=[{"id": 999, "velocity": 5}]), "NOT_FOUND")
+
+    # ---- remove
+    def test_remove_by_ids_by_range_or_everything(self):
+        ids = self.seed()
+        self.assertEqual(self.ok("edit_notes", action="remove", ids=[ids[0]])["removed"], 1)
+        self.assertEqual(self.ok("edit_notes", action="remove", from_time=0.0, time_span=0.5)["removed"], 1)
+        self.assertEqual(self.ok("edit_notes", action="remove", from_time=50.0, time_span=1.0)["removed"], 0)
+        result = self.ok("edit_notes", action="remove", all=True)
+        self.assertEqual((result["removed"], result["note_count"]), (1, 0))
+
+    def test_remove_needs_exactly_one_selector_so_nothing_is_cleared_by_accident(self):
+        self.seed()
+        for params in (dict(), dict(all=False), dict(ids=[1], all=True), dict(ids=[1], from_time=0.0), dict(ids=[])):
+            self.assertEqual(self.code("edit_notes", action="remove", **params), "INVALID_ARGUMENT", params)
+        self.assertEqual(self.code("edit_notes", action="remove", ids=[404]), "NOT_FOUND")
+        self.assertEqual(self.ok("get_notes")["count"], 3)
+
+    # ---- duplicate
+    def test_duplicate_copies_notes_to_a_time_with_transposition(self):
+        ids = self.seed()
+        result = self.ok("edit_notes", action="duplicate", ids=[ids[1]], destination_time=2.0, transposition=12)
+        self.assertEqual(result["duplicated"], 1)
+        copy = [n for n in self.ok("get_notes")["notes"] if n["id"] == result["ids"][0]][0]
+        self.assertEqual((copy["pitch"], copy["start_time"]), (72, 2.0))
+        self.assertEqual(self.code("edit_notes", action="duplicate", ids=[ids[1]], destination_time="x"), "TYPE_ERROR")
+        self.assertEqual(self.code("edit_notes", action="duplicate", ids=[ids[1]], transposition=1.5), "TYPE_ERROR")
+        self.assertEqual(self.code("edit_notes", action="duplicate", ids=[]), "INVALID_ARGUMENT")
+
+    def test_duplicate_region_reports_the_new_ids(self):
+        self.seed()
+        result = self.ok("edit_notes", action="duplicate_region", start=0.0, length=1.0, destination_time=3.0, transposition=2)
+        self.assertEqual(result["duplicated"], 1)
+        copy = [n for n in self.ok("get_notes")["notes"] if n["id"] in result["ids"]][0]
+        self.assertEqual((copy["pitch"], copy["start_time"]), (62, 3.0))
+        for params in (dict(start=0, length=0, destination_time=1), dict(start=0, length=1), dict(start=0, length=1, destination_time=1, pitch=200),
+                       dict(start=0, length=1, destination_time=1, transposition=True)):
+            self.assertIn(self.code("edit_notes", action="duplicate_region", **params), ("INVALID_ARGUMENT", "TYPE_ERROR"), params)
+
+    # ---- select
+    def test_select_by_ids_all_or_none(self):
+        ids = self.seed()
+        self.assertEqual(self.ok("edit_notes", action="select", ids=ids[:2])["selected"], sorted(ids[:2]))
+        self.assertEqual(self.ok("edit_notes", action="select", all=True)["selected"], sorted(ids))
+        self.assertEqual(self.ok("edit_notes", action="select", none=True)["selected"], [])
+        self.assertEqual(self.code("edit_notes", action="select"), "INVALID_ARGUMENT")
+        self.assertEqual(self.code("edit_notes", action="select", ids=ids, all=True), "INVALID_ARGUMENT")
+
+    # ---- replace
+    def test_replace_swaps_all_notes_in_one_call(self):
+        self.seed()
+        result = self.ok("edit_notes", action="replace", notes=[{"pitch": 72, "start_time": 0, "duration": 1}, {"pitch": 74, "start_time": 1, "duration": 1}])
+        self.assertEqual((result["removed"], result["written"], result["note_count"]), (3, 2, 2))
+        self.assertEqual([n["pitch"] for n in self.ok("get_notes")["notes"]], [72, 74])
+
+    def test_replace_a_range_leaves_the_rest_alone_and_no_notes_clears(self):
+        self.seed()
+        result = self.ok("edit_notes", action="replace", from_time=1.0, time_span=1.0, notes=[{"pitch": 70, "start_time": 1.5, "duration": 0.25}])
+        self.assertEqual((result["removed"], result["written"], result["note_count"]), (2, 1, 2))
+        self.assertEqual(sorted(n["pitch"] for n in self.ok("get_notes")["notes"]), [60, 70])
+        self.assertEqual(self.ok("edit_notes", action="replace")["note_count"], 0)
+
+    def test_a_replace_that_fails_inside_live_puts_the_old_notes_back(self):
+        ids = self.seed()
+        before = [dict(n, id=None) for n in self.ok("get_notes")["notes"]]
+        real_add, calls = self.clip.add_new_notes, []
+
+        def flaky(specs):
+            calls.append(len(specs))
+            if len(calls) == 1:
+                raise RuntimeError("Live refused the notes")
+            return real_add(specs)
+        self.clip.add_new_notes = flaky
+        response = self.call("edit_notes", action="replace", notes=[{"pitch": 72, "start_time": 0, "duration": 1}])
+        self.assertEqual(response["status"], "error")
+        self.assertIn("Live refused", response["message"])
+        after = [dict(n, id=None) for n in self.ok("get_notes")["notes"]]
+        self.assertEqual(after, before)
+        self.assertEqual(calls, [1, 3])
+
+    def test_an_invalid_replacement_note_removes_nothing(self):
+        self.seed()
+        self.assertEqual(self.code("edit_notes", action="replace", notes=[{"pitch": 72, "start_time": 0, "duration": 1}, {"pitch": 300, "start_time": 0, "duration": 1}]), "OUT_OF_RANGE")
+        self.assertEqual(self.ok("get_notes")["count"], 3)
+
+    def test_edit_guard_and_action_validation(self):
+        self.seed()
+        self.assertEqual(self.code("edit_notes", action="remove", all=True, expect={"name": "other"}), "GUARD_FAILED")
+        self.assertEqual(self.ok("get_notes")["count"], 3)
+        self.assertEqual(self.code("edit_notes", action="explode"), "INVALID_ARGUMENT")
+        self.assertEqual(self.code("edit_notes"), "INVALID_ARGUMENT")
+
+    def test_note_writes_are_one_undo_step_each(self):
+        self.song.undo_log.clear()
+        ids = self.seed()
+        self.ok("edit_notes", action="modify", changes=[{"id": ids[0], "velocity": 10}])
+        self.ok("get_notes")
+        self.assertEqual(self.song.undo_log, ["begin", "end", "begin", "end"])
+
+    def test_the_note_field_table_matches_what_live_reports_for_a_note(self):
+        live = mod.api_registry.class_properties("Live.Clip.MidiNote")
+        self.assertEqual(set(mod.notes.NOTE_FIELDS) | {"note_id"}, set(live))
+        kinds = {"int": "int", "float": "float", "bool": "bool"}
+        for name, rule in mod.notes.NOTE_FIELDS.items():
+            self.assertEqual(mod.api_registry.family(live[name]["get"]), kinds[rule["type"]], name)
+            self.assertEqual(mod.api_registry.family(live[name]["set"]), kinds[rule["type"]], name)
+        self.assertIsNone(live["note_id"]["set"])
 
 
 # ---------------------------------------------------------------- generated API registry

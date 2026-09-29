@@ -729,6 +729,120 @@ try {
     }
   });
 
+  console.log('\nNotes: get_notes, write_notes, edit_notes');
+  await call('create_clip', { track_index: launchTrack, clip_index: 1, length: 4 });
+  const nc = `${lt}/slots/1/clip`;
+  const notesOf = async (params = {}) => (await call('get_notes', { address: nc, ...params })).notes;
+  const byId = (notes) => Object.fromEntries(notes.map((n) => [n.id, n]));
+  const rejectsWith = async (name, params, code) => {
+    try {
+      await call(name, params);
+    } catch (err) {
+      assert(err.bridgeCode === code, `${name} ${JSON.stringify(params).slice(0, 120)}: expected ${code}, got ${err.bridgeCode} (${err.message})`);
+      return;
+    }
+    throw new Error(`${name} ${JSON.stringify(params).slice(0, 120)} should have failed with ${code}`);
+  };
+  await check('write_notes stores every field and get_notes reads it back with stable ids', async () => {
+    const written = await call('write_notes', { address: nc, notes: [
+      { pitch: 60, start_time: 0, duration: 1, velocity: 90, probability: 0.5, velocity_deviation: 12, release_velocity: 33 },
+      { pitch: 64, start_time: 1, duration: 0.5 },
+      { pitch: 67, start_time: 2, duration: 1.5, mute: true, velocity: 127 }] });
+    assert(written.written === 3 && written.ids.length === 3 && written.note_count === 3, JSON.stringify(written));
+    const notes = byId(await notesOf());
+    const [a, b, c] = written.ids.map((id) => notes[id]);
+    assert(a && b && c, 'ids from write_notes should identify the notes get_notes returns');
+    near(a.velocity, 90, 1e-6, 'velocity'); near(a.probability, 0.5, 1e-6, 'probability'); near(a.velocity_deviation, 12, 1e-6, 'velocity_deviation'); near(a.release_velocity, 33, 1e-6, 'release_velocity');
+    assert(b.velocity === 100 && b.probability === 1 && b.mute === false && b.release_velocity === 64, `defaults: ${JSON.stringify(b)}`);
+    assert(c.mute === true && c.velocity === 127, JSON.stringify(c));
+    const sorted = (await notesOf()).map((n) => n.start_time);
+    assert(JSON.stringify(sorted) === JSON.stringify([...sorted].sort((x, y) => x - y)), 'notes come back sorted by start_time');
+  });
+  await check('get_notes filters by range, ids and pitch; limit truncates', async () => {
+    const all = await notesOf();
+    assert((await notesOf({ from_time: 1, time_span: 1 })).map((n) => n.pitch).join() === '64', 'range');
+    assert((await notesOf({ from_pitch: 66, pitch_span: 5 })).map((n) => n.pitch).join() === '67', 'pitch range');
+    assert((await notesOf({ ids: [all[0].id] })).length === 1, 'ids');
+    const limited = await call('get_notes', { address: nc, limit: 2 });
+    assert(limited.truncated === true && limited.notes.length === 2 && limited.count === 3, JSON.stringify(limited).slice(0, 200));
+    await rejectsWith('get_notes', { address: nc, ids: [987654] }, 'NOT_FOUND');
+  });
+  await check('invalid notes are refused before anything is written (our checks, then Live never sees them)', async () => {
+    const before = await notesOf();
+    for (const bad of [{ pitch: 128, start_time: 0, duration: 1 }, { pitch: 60, start_time: 0, duration: 0 }, { pitch: 60, start_time: 0, duration: 1, velocity: 0 },
+      { pitch: 60, start_time: 0, duration: 1, probability: 2 }, { pitch: 60, start_time: 0, duration: 1, velocity_deviation: 200 }]) {
+      await rejectsWith('write_notes', { address: nc, notes: [{ pitch: 70, start_time: 3, duration: 0.5 }, bad] }, 'OUT_OF_RANGE');
+    }
+    await rejectsWith('write_notes', { address: nc, notes: [{ pitch: 60, start_time: 0 }] }, 'INVALID_ARGUMENT');
+    assert(JSON.stringify(await notesOf()) === JSON.stringify(before), 'a rejected write changed the clip');
+  });
+  await check('overlapping notes of one pitch are trimmed or replaced, and the reported count is the real one', async () => {
+    const result = await call('write_notes', { address: nc, notes: [{ pitch: 72, start_time: 0, duration: 2 }, { pitch: 72, start_time: 1, duration: 2 }] });
+    assert(result.written === 2 && result.note_count === 5, `written ${result.written}, note_count ${result.note_count} (3 seeded + 2)`);
+    const first = (await notesOf({ from_pitch: 72, pitch_span: 1 })).find((n) => n.start_time === 0);
+    near(first.duration, 1, 1e-6, 'the earlier note is cut short where the later one starts');
+    const replaced = await call('write_notes', { address: nc, notes: [{ pitch: 72, start_time: 1, duration: 0.5 }] });
+    assert(replaced.written === 1 && replaced.note_count === 5, `a note at the same start time replaces the old one: note_count ${replaced.note_count}`);
+    await call('edit_notes', { address: nc, action: 'remove', from_pitch: 72, pitch_span: 1 });
+  });
+  await check('modify changes chosen fields by id, keeps ids and the other fields; a bad id changes nothing', async () => {
+    const before = byId(await notesOf());
+    const [first, second] = Object.keys(before).map(Number);
+    const r = await call('edit_notes', { address: nc, action: 'modify', changes: [{ id: first, velocity: 40, start_time: before[first].start_time + 0.25 }, { id: second, probability: 0.75 }] });
+    assert(r.modified === 2 && r.notes.length === 2, JSON.stringify(r).slice(0, 200));
+    const after = byId(await notesOf());
+    near(after[first].velocity, 40, 1e-6, 'velocity'); near(after[first].start_time, before[first].start_time + 0.25, 1e-6, 'start_time');
+    assert(after[first].pitch === before[first].pitch && after[first].duration === before[first].duration, 'unrelated fields changed');
+    near(after[second].probability, 0.75, 1e-6, 'probability');
+    await rejectsWith('edit_notes', { address: nc, action: 'modify', changes: [{ id: first, velocity: 1 }, { id: 987654, velocity: 1 }] }, 'NOT_FOUND');
+    near(byId(await notesOf())[first].velocity, 40, 1e-6, 'a refused modify must not change the valid note');
+    await call('edit_notes', { address: nc, action: 'modify', ids: [first, second], set: { velocity: 64, mute: false } });
+    assert(Object.values(byId(await notesOf())).filter((n) => [first, second].includes(n.id)).every((n) => n.velocity === 64 && n.mute === false), 'uniform set');
+    await rejectsWith('edit_notes', { address: nc, action: 'modify', changes: [{ id: first, velocity: 500 }] }, 'OUT_OF_RANGE');
+  });
+  await check('duplicate and duplicate_region copy notes with transposition and report the new ids', async () => {
+    const before = await notesOf();
+    const src = before.find((n) => n.pitch === 64);
+    const dup = await call('edit_notes', { address: nc, action: 'duplicate', ids: [src.id], destination_time: 3, transposition: 7 });
+    assert(dup.duplicated === 1 && dup.ids.length === 1, JSON.stringify(dup).slice(0, 200));
+    const copy = (await notesOf({ ids: dup.ids }))[0];
+    assert(copy.pitch === 71 && Math.abs(copy.start_time - 3) < 1e-6, JSON.stringify(copy));
+    const region = await call('edit_notes', { address: nc, action: 'duplicate_region', start: 0, length: 1, destination_time: 3.5 });
+    assert(region.duplicated >= 1 && region.ids.length === region.duplicated, JSON.stringify(region).slice(0, 200));
+    await call('edit_notes', { address: nc, action: 'remove', ids: [...dup.ids, ...region.ids] });
+    assert((await notesOf()).length === before.length, 'cleanup of the copies');
+  });
+  await check('select drives the editor selection and get_notes selected reads it', async () => {
+    const all = await notesOf();
+    const sel = await call('edit_notes', { address: nc, action: 'select', ids: [all[0].id] });
+    assert(sel.selected.join() === String(all[0].id), JSON.stringify(sel.selected));
+    assert((await notesOf({ selected: true })).map((n) => n.id).join() === String(all[0].id), 'selected filter');
+    assert((await call('edit_notes', { address: nc, action: 'select', none: true })).selected.length === 0, 'none');
+  });
+  await check('replace swaps a range in one step; remove needs an explicit selector; one undo reverts each', async () => {
+    const before = await notesOf();
+    const r = await call('edit_notes', { address: nc, action: 'replace', from_time: 0, time_span: 1.5, notes: [{ pitch: 48, start_time: 0.5, duration: 0.5 }] });
+    assert(r.removed >= 1 && r.written === 1, JSON.stringify(r).slice(0, 200));
+    assert((await notesOf()).some((n) => n.pitch === 48), 'the replacement note is there');
+    await call('history', { action: 'undo' });
+    assert(JSON.stringify((await notesOf()).map((n) => [n.pitch, n.start_time])) === JSON.stringify(before.map((n) => [n.pitch, n.start_time])), 'one undo should revert the whole replace');
+    await rejectsWith('edit_notes', { address: nc, action: 'remove' }, 'INVALID_ARGUMENT');
+    await call('edit_notes', { address: nc, action: 'remove', all: true });
+    assert((await notesOf()).length === 0, 'remove all');
+    await call('history', { action: 'undo' });
+    assert((await notesOf()).length === before.length, 'undo brings the removed notes back');
+    await call('edit_notes', { address: nc, action: 'remove', all: true, expect: { name: (await call('get_properties', { address: nc, names: ['name'] })).properties.name } });
+  });
+  await check('audio clips have no notes: refused with a clear error (read-only probe on an existing audio clip)', async () => {
+    const set = await call('describe_set');
+    const audio = set.tracks.flatMap((t) => (t.clips ?? []).filter((c) => c.kind === 'audio').map((c) => `${t.address}/slots/${c.slot}/clip`))[0];
+    if (!audio) {
+      console.log('       no audio clip in the Set: skipped');
+      return;
+    }
+    await rejectsWith('get_notes', { address: audio }, 'INVALID_ARGUMENT');
+  });
+
   console.log('\ndraw_automation');
   await check('linear ramp: readback and independent envelope values match', async () => {
     const lo = pA.min + 0.2 * (pA.max - pA.min);

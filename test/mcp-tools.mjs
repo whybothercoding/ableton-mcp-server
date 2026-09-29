@@ -262,6 +262,25 @@ try {
     await ok('history', { action: 'undo' });
     assert((await ok('get_properties', { address: clipAddress, names: ['length'] })).properties.length === before.properties.length, 'undo should restore the length');
   });
+  await check('note tools are listed with the right risk annotations and required arguments', async () => {
+    assert(byName.get_notes.annotations.readOnlyHint === true, 'get_notes is read-only');
+    assert(byName.write_notes.annotations.destructiveHint === false && byName.write_notes.annotations.readOnlyHint === false, 'write_notes only adds');
+    assert(byName.edit_notes.annotations.destructiveHint === true, 'edit_notes removes and replaces: destructive');
+    assert(JSON.stringify(byName.write_notes.inputSchema.required) === JSON.stringify(['address', 'notes']), 'write_notes requires address and notes');
+  });
+  await check('the note tools work end to end through MCP on the scratch clip and reject bad calls readably', async () => {
+    await fails('write_notes', { address: clipAddress, notes: [{ pitch: 60, start_time: 0 }] }, "notes[0]: missing required argument 'duration'");
+    await fails('write_notes', { address: clipAddress, notes: [{ pitch: 200, start_time: 0, duration: 1 }] }, 'notes[0]: pitch 200 is outside 0 to 127');
+    await fails('edit_notes', { address: clipAddress, action: 'remove' }, 'remove needs exactly one of');
+    await fails('edit_notes', { address: clipAddress, action: 'modify', changes: [{ id: 987654, velocity: 5 }] }, 'No notes with ids [987654]');
+    const before = (await ok('get_notes', { address: clipAddress })).count;
+    const written = await ok('write_notes', { address: clipAddress, notes: [{ pitch: 61, start_time: 0.5, duration: 0.5, probability: 0.6 }] });
+    assert(written.ids.length === 1 && written.note_count === before + 1, JSON.stringify(written));
+    const note = (await ok('get_notes', { address: clipAddress, ids: written.ids })).notes[0];
+    near(note.probability, 0.6, 1e-6, 'probability');
+    await ok('edit_notes', { address: clipAddress, action: 'remove', ids: written.ids });
+    assert((await ok('get_notes', { address: clipAddress })).count === before, 'the scratch note should be gone');
+  });
   await check('argument problems are caught in TypeScript with a readable message', async () => {
     await fails('get_properties', {}, "missing required argument 'address'");
     await fails('get_properties', { address: 5 }, 'address must be a string');
