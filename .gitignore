@@ -7,3 +7,8 @@ dist/
 .codex/
 __pycache__/
 *.pyc
+AGENTS.md
+CLAUDE.md
+GEMINI.md
+.claude/
+.mcp.json

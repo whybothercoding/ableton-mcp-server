@@ -95,7 +95,7 @@ claude mcp add ableton -- node "$(pwd)/dist/index.js"
 }
 ```
 
-The repo's `.mcp.json` uses a relative path and works for Claude Code sessions started in the repo root.
+For Claude Code, a project `.mcp.json` in the repo root with `"args": ["dist/index.js"]` (a relative path) works for sessions started there. The repo does not ship one (it is git-ignored, so each checkout keeps its own).
 
 ### 5. Verify
 
@@ -259,7 +259,7 @@ Not covered: device properties Live keeps outside `parameters` (Wavetable's osci
 
 #### Development
 - `introspect_api` (bridge command, no MCP tool): without `module`, returns the running Live's version and the API module list; with `module`, describes every class in it (properties with getter/setter types, method signatures, listeners, enums). It reads class-level descriptors only, so it cannot change the Set. It feeds `npm run dump-api`.
-- `eval_python`: Evaluate raw Python on the Remote Script instance. Executes arbitrary code inside Live, so the tool is **hidden and refused unless `ABLETON_MCP_ALLOW_EVAL=1`** is set in the MCP server's environment (this repo's `.mcp.json` sets it for development). Failures come back as errors, not success strings.
+- `eval_python`: Evaluate raw Python on the Remote Script instance. Executes arbitrary code inside Live, so the tool is **hidden and refused unless `ABLETON_MCP_ALLOW_EVAL=1`** is set in the MCP server's environment (set it in your MCP config's `env` for development). Failures come back as errors, not success strings.
 
 ---
 
