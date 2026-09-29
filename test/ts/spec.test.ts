@@ -225,3 +225,12 @@ test('record is gated like eval_python and destructive; arrangement kinds are de
   assert.ok(TOOL_SPEC_BY_NAME.create.inputSchema.properties.time);
   assert.ok(TOOL_SPEC_BY_NAME.clip_action.inputSchema.properties.time);
 });
+
+test('device_action call and the device-specific vocabulary are declared', () => {
+  const action = TOOL_SPEC_BY_NAME.device_action;
+  assert.ok(action.inputSchema.properties.action.enum.includes('call'));
+  assert.ok(action.inputSchema.properties.method && action.inputSchema.properties.args);
+  assert.equal(validateArgs(action.inputSchema, { address: 'tracks/0/devices/0', action: 'call', method: 'crop', args: {} }), null);
+  assert.match(TOOL_SPEC_BY_NAME.get_device.description, /`specific` block/);
+  assert.ok(TOOL_SPEC_BY_NAME.list_properties.inputSchema.properties.kind.enum.includes('sample'));
+});

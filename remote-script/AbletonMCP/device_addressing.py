@@ -5,6 +5,7 @@
     <device>/parameters/5                     a parameter by index, or parameters/name:Frequency
     <device>/chains/1                         a rack chain (chains/name:Wide);  <device>/return_chains/0
     <device>/drum_pads/36                     a drum pad, by MIDI note
+    <device>/sample                           a Simpler's sample (slices, markers, warp settings)
     <device>/drum_pads/36/chains/0            a chain of that pad
     <chain>/devices/2                         a device inside a chain (racks nest as deep as they go)
     tracks/3/mixer/volume                     mixer parameters of a track or chain: volume, panning, sends/0, crossfader,
@@ -49,6 +50,11 @@ class DeviceAddressingMixin(object):
         if not rest:
             return "device", device, canonical
         head = rest[0]
+        if head == "sample" and len(rest) == 1:
+            sample = _safe_attr(device, "sample")
+            if sample is None:
+                raise BridgeError("'{0}' has no sample loaded".format(device.name), "NOT_FOUND")
+            return "sample", sample, canonical + "/sample"
         if head == "parameters" and len(rest) == 2:
             parameters = list(device.parameters)
             index = self._select(parameters, rest[1], "parameter", lambda p: p.name)
@@ -131,6 +137,9 @@ class DeviceAddressingMixin(object):
                     if chain == obj:
                         return "{0}/drum_pads/{1}/chains/{2}".format(base, pad.note, index)
             return None
+        if _is(obj, "Sample", "Sample"):
+            base = self._address_of(parent) if parent is not None else None
+            return None if base is None else base + "/sample"
         if _is(obj, "DrumPad", "DrumPad"):
             base = self._address_of(parent) if parent is not None else None
             return None if base is None else "{0}/drum_pads/{1}".format(base, obj.note)

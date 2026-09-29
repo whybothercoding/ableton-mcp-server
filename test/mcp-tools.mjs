@@ -357,7 +357,7 @@ try {
     await fails('get_properties', { address: 5 }, 'address must be a string');
     await fails('get_properties', { address: 'song', names: 'tempo' }, 'names must be an array');
     await fails('set_properties', { items: [{ address: 'song' }] }, "items[0]: missing required argument 'properties'");
-    await fails('list_properties', { kind: 'plugin' }, 'must be one of: song, track, scene, slot, clip, lane, groove, cue, app, device, chain, pad, parameter');
+    await fails('list_properties', { kind: 'plugin' }, 'must be one of: song, track, scene, slot, clip, lane, groove, cue, app, device, chain, pad, parameter, sample');
   });
   await check('bridge problems come back as tool errors with the reason', async () => {
     await fails('get_properties', { address: 'tracks/999' }, 'out of range');

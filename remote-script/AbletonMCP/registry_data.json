@@ -476,6 +476,246 @@
     }
    }
   },
+  "Live.DriftDevice.DriftDevice": {
+   "properties": {
+    "can_compare_ab": {
+     "get": "bool",
+     "set": null
+    },
+    "can_have_chains": {
+     "get": "bool",
+     "set": null
+    },
+    "can_have_drum_pads": {
+     "get": "bool",
+     "set": null
+    },
+    "canonical_parent": {
+     "get": "LomObject.LomObject",
+     "set": null
+    },
+    "class_display_name": {
+     "get": "str",
+     "set": null
+    },
+    "class_name": {
+     "get": "str",
+     "set": null
+    },
+    "is_active": {
+     "get": "bool",
+     "set": null
+    },
+    "is_using_compare_preset_b": {
+     "get": "bool",
+     "set": "bool"
+    },
+    "latency_in_ms": {
+     "get": "float",
+     "set": null
+    },
+    "latency_in_samples": {
+     "get": "int",
+     "set": null
+    },
+    "mod_matrix_filter_source_1_index": {
+     "get": "int",
+     "set": "int"
+    },
+    "mod_matrix_filter_source_1_list": {
+     "get": "Base.StringVector",
+     "set": null
+    },
+    "mod_matrix_filter_source_2_index": {
+     "get": "int",
+     "set": "int"
+    },
+    "mod_matrix_filter_source_2_list": {
+     "get": "Base.StringVector",
+     "set": null
+    },
+    "mod_matrix_lfo_source_index": {
+     "get": "int",
+     "set": "int"
+    },
+    "mod_matrix_lfo_source_list": {
+     "get": "Base.StringVector",
+     "set": null
+    },
+    "mod_matrix_pitch_source_1_index": {
+     "get": "int",
+     "set": "int"
+    },
+    "mod_matrix_pitch_source_1_list": {
+     "get": "Base.StringVector",
+     "set": null
+    },
+    "mod_matrix_pitch_source_2_index": {
+     "get": "int",
+     "set": "int"
+    },
+    "mod_matrix_pitch_source_2_list": {
+     "get": "Base.StringVector",
+     "set": null
+    },
+    "mod_matrix_shape_source_index": {
+     "get": "int",
+     "set": "int"
+    },
+    "mod_matrix_shape_source_list": {
+     "get": "Base.StringVector",
+     "set": null
+    },
+    "mod_matrix_source_1_index": {
+     "get": "int",
+     "set": "int"
+    },
+    "mod_matrix_source_1_list": {
+     "get": "Base.StringVector",
+     "set": null
+    },
+    "mod_matrix_source_2_index": {
+     "get": "int",
+     "set": "int"
+    },
+    "mod_matrix_source_2_list": {
+     "get": "Base.StringVector",
+     "set": null
+    },
+    "mod_matrix_source_3_index": {
+     "get": "int",
+     "set": "int"
+    },
+    "mod_matrix_source_3_list": {
+     "get": "Base.StringVector",
+     "set": null
+    },
+    "mod_matrix_target_1_index": {
+     "get": "int",
+     "set": "int"
+    },
+    "mod_matrix_target_1_list": {
+     "get": "Base.StringVector",
+     "set": null
+    },
+    "mod_matrix_target_2_index": {
+     "get": "int",
+     "set": "int"
+    },
+    "mod_matrix_target_2_list": {
+     "get": "Base.StringVector",
+     "set": null
+    },
+    "mod_matrix_target_3_index": {
+     "get": "int",
+     "set": "int"
+    },
+    "mod_matrix_target_3_list": {
+     "get": "Base.StringVector",
+     "set": null
+    },
+    "name": {
+     "get": "str",
+     "set": "object"
+    },
+    "parameters": {
+     "get": "Device.ATimeableValueVector",
+     "set": null
+    },
+    "pitch_bend_range": {
+     "get": "int",
+     "set": "int"
+    },
+    "type": {
+     "get": "Device.DeviceType",
+     "set": null
+    },
+    "view": {
+     "get": "LomObject.LomObject",
+     "set": null
+    },
+    "voice_count_index": {
+     "get": "int",
+     "set": "int"
+    },
+    "voice_count_list": {
+     "get": "Base.StringVector",
+     "set": null
+    },
+    "voice_mode_index": {
+     "get": "int",
+     "set": "int"
+    },
+    "voice_mode_list": {
+     "get": "Base.StringVector",
+     "set": null
+    }
+   }
+  },
+  "Live.DrumCellDevice.DrumCellDevice": {
+   "properties": {
+    "can_compare_ab": {
+     "get": "bool",
+     "set": null
+    },
+    "can_have_chains": {
+     "get": "bool",
+     "set": null
+    },
+    "can_have_drum_pads": {
+     "get": "bool",
+     "set": null
+    },
+    "canonical_parent": {
+     "get": "LomObject.LomObject",
+     "set": null
+    },
+    "class_display_name": {
+     "get": "str",
+     "set": null
+    },
+    "class_name": {
+     "get": "str",
+     "set": null
+    },
+    "gain": {
+     "get": "float",
+     "set": "float"
+    },
+    "is_active": {
+     "get": "bool",
+     "set": null
+    },
+    "is_using_compare_preset_b": {
+     "get": "bool",
+     "set": "bool"
+    },
+    "latency_in_ms": {
+     "get": "float",
+     "set": null
+    },
+    "latency_in_samples": {
+     "get": "int",
+     "set": null
+    },
+    "name": {
+     "get": "str",
+     "set": "object"
+    },
+    "parameters": {
+     "get": "Device.ATimeableValueVector",
+     "set": null
+    },
+    "type": {
+     "get": "Device.DeviceType",
+     "set": null
+    },
+    "view": {
+     "get": "LomObject.LomObject",
+     "set": null
+    }
+   }
+  },
   "Live.DrumPad.DrumPad": {
    "properties": {
     "canonical_parent": {
@@ -501,6 +741,78 @@
     "solo": {
      "get": "bool",
      "set": "bool"
+    }
+   }
+  },
+  "Live.Eq8Device.Eq8Device": {
+   "properties": {
+    "can_compare_ab": {
+     "get": "bool",
+     "set": null
+    },
+    "can_have_chains": {
+     "get": "bool",
+     "set": null
+    },
+    "can_have_drum_pads": {
+     "get": "bool",
+     "set": null
+    },
+    "canonical_parent": {
+     "get": "LomObject.LomObject",
+     "set": null
+    },
+    "class_display_name": {
+     "get": "str",
+     "set": null
+    },
+    "class_name": {
+     "get": "str",
+     "set": null
+    },
+    "edit_mode": {
+     "get": "bool",
+     "set": "bool"
+    },
+    "global_mode": {
+     "get": "int",
+     "set": "int"
+    },
+    "is_active": {
+     "get": "bool",
+     "set": null
+    },
+    "is_using_compare_preset_b": {
+     "get": "bool",
+     "set": "bool"
+    },
+    "latency_in_ms": {
+     "get": "float",
+     "set": null
+    },
+    "latency_in_samples": {
+     "get": "int",
+     "set": null
+    },
+    "name": {
+     "get": "str",
+     "set": "object"
+    },
+    "oversample": {
+     "get": "bool",
+     "set": "bool"
+    },
+    "parameters": {
+     "get": "Device.ATimeableValueVector",
+     "set": null
+    },
+    "type": {
+     "get": "Device.DeviceType",
+     "set": null
+    },
+    "view": {
+     "get": "LomObject.LomObject",
+     "set": null
     }
    }
   },
@@ -533,6 +845,326 @@
     "velocity_amount": {
      "get": "float",
      "set": "float"
+    }
+   }
+  },
+  "Live.HybridReverbDevice.HybridReverbDevice": {
+   "properties": {
+    "can_compare_ab": {
+     "get": "bool",
+     "set": null
+    },
+    "can_have_chains": {
+     "get": "bool",
+     "set": null
+    },
+    "can_have_drum_pads": {
+     "get": "bool",
+     "set": null
+    },
+    "canonical_parent": {
+     "get": "LomObject.LomObject",
+     "set": null
+    },
+    "class_display_name": {
+     "get": "str",
+     "set": null
+    },
+    "class_name": {
+     "get": "str",
+     "set": null
+    },
+    "ir_attack_time": {
+     "get": "float",
+     "set": "float"
+    },
+    "ir_category_index": {
+     "get": "int",
+     "set": "int"
+    },
+    "ir_category_list": {
+     "get": "Base.StringVector",
+     "set": null
+    },
+    "ir_decay_time": {
+     "get": "float",
+     "set": "float"
+    },
+    "ir_file_index": {
+     "get": "int",
+     "set": "int"
+    },
+    "ir_file_list": {
+     "get": "Base.StringVector",
+     "set": null
+    },
+    "ir_size_factor": {
+     "get": "float",
+     "set": "float"
+    },
+    "ir_time_shaping_on": {
+     "get": "bool",
+     "set": "bool"
+    },
+    "is_active": {
+     "get": "bool",
+     "set": null
+    },
+    "is_using_compare_preset_b": {
+     "get": "bool",
+     "set": "bool"
+    },
+    "latency_in_ms": {
+     "get": "float",
+     "set": null
+    },
+    "latency_in_samples": {
+     "get": "int",
+     "set": null
+    },
+    "name": {
+     "get": "str",
+     "set": "object"
+    },
+    "parameters": {
+     "get": "Device.ATimeableValueVector",
+     "set": null
+    },
+    "type": {
+     "get": "Device.DeviceType",
+     "set": null
+    },
+    "view": {
+     "get": "LomObject.LomObject",
+     "set": null
+    }
+   }
+  },
+  "Live.LooperDevice.LooperDevice": {
+   "properties": {
+    "can_compare_ab": {
+     "get": "bool",
+     "set": null
+    },
+    "can_have_chains": {
+     "get": "bool",
+     "set": null
+    },
+    "can_have_drum_pads": {
+     "get": "bool",
+     "set": null
+    },
+    "canonical_parent": {
+     "get": "LomObject.LomObject",
+     "set": null
+    },
+    "class_display_name": {
+     "get": "str",
+     "set": null
+    },
+    "class_name": {
+     "get": "str",
+     "set": null
+    },
+    "is_active": {
+     "get": "bool",
+     "set": null
+    },
+    "is_using_compare_preset_b": {
+     "get": "bool",
+     "set": "bool"
+    },
+    "latency_in_ms": {
+     "get": "float",
+     "set": null
+    },
+    "latency_in_samples": {
+     "get": "int",
+     "set": null
+    },
+    "loop_length": {
+     "get": "float",
+     "set": null
+    },
+    "name": {
+     "get": "str",
+     "set": "object"
+    },
+    "overdub_after_record": {
+     "get": "bool",
+     "set": "bool"
+    },
+    "parameters": {
+     "get": "Device.ATimeableValueVector",
+     "set": null
+    },
+    "record_length_index": {
+     "get": "int",
+     "set": "int"
+    },
+    "record_length_list": {
+     "get": "Base.StringVector",
+     "set": null
+    },
+    "tempo": {
+     "get": "float",
+     "set": null
+    },
+    "type": {
+     "get": "Device.DeviceType",
+     "set": null
+    },
+    "view": {
+     "get": "LomObject.LomObject",
+     "set": null
+    }
+   }
+  },
+  "Live.MeldDevice.MeldDevice": {
+   "properties": {
+    "can_compare_ab": {
+     "get": "bool",
+     "set": null
+    },
+    "can_have_chains": {
+     "get": "bool",
+     "set": null
+    },
+    "can_have_drum_pads": {
+     "get": "bool",
+     "set": null
+    },
+    "canonical_parent": {
+     "get": "LomObject.LomObject",
+     "set": null
+    },
+    "class_display_name": {
+     "get": "str",
+     "set": null
+    },
+    "class_name": {
+     "get": "str",
+     "set": null
+    },
+    "is_active": {
+     "get": "bool",
+     "set": null
+    },
+    "is_using_compare_preset_b": {
+     "get": "bool",
+     "set": "bool"
+    },
+    "latency_in_ms": {
+     "get": "float",
+     "set": null
+    },
+    "latency_in_samples": {
+     "get": "int",
+     "set": null
+    },
+    "mono_poly": {
+     "get": "int",
+     "set": "int"
+    },
+    "name": {
+     "get": "str",
+     "set": "object"
+    },
+    "parameters": {
+     "get": "Device.ATimeableValueVector",
+     "set": null
+    },
+    "poly_voices": {
+     "get": "int",
+     "set": "int"
+    },
+    "selected_engine": {
+     "get": "bool",
+     "set": "bool"
+    },
+    "type": {
+     "get": "Device.DeviceType",
+     "set": null
+    },
+    "unison_voices": {
+     "get": "int",
+     "set": "int"
+    },
+    "view": {
+     "get": "LomObject.LomObject",
+     "set": null
+    }
+   }
+  },
+  "Live.PluginDevice.PluginDevice": {
+   "properties": {
+    "can_compare_ab": {
+     "get": "bool",
+     "set": null
+    },
+    "can_have_chains": {
+     "get": "bool",
+     "set": null
+    },
+    "can_have_drum_pads": {
+     "get": "bool",
+     "set": null
+    },
+    "canonical_parent": {
+     "get": "LomObject.LomObject",
+     "set": null
+    },
+    "class_display_name": {
+     "get": "str",
+     "set": null
+    },
+    "class_name": {
+     "get": "str",
+     "set": null
+    },
+    "is_active": {
+     "get": "bool",
+     "set": null
+    },
+    "is_editor_open": {
+     "get": "bool",
+     "set": "bool"
+    },
+    "is_using_compare_preset_b": {
+     "get": "bool",
+     "set": "bool"
+    },
+    "latency_in_ms": {
+     "get": "float",
+     "set": null
+    },
+    "latency_in_samples": {
+     "get": "int",
+     "set": null
+    },
+    "name": {
+     "get": "str",
+     "set": "object"
+    },
+    "parameters": {
+     "get": "Device.ATimeableValueVector",
+     "set": null
+    },
+    "presets": {
+     "get": "Base.StringVector",
+     "set": null
+    },
+    "selected_preset_index": {
+     "get": "int",
+     "set": "int"
+    },
+    "type": {
+     "get": "Device.DeviceType",
+     "set": null
+    },
+    "view": {
+     "get": "LomObject.LomObject",
+     "set": null
     }
    }
   },
@@ -648,6 +1280,174 @@
     }
    }
   },
+  "Live.RoarDevice.RoarDevice": {
+   "properties": {
+    "can_compare_ab": {
+     "get": "bool",
+     "set": null
+    },
+    "can_have_chains": {
+     "get": "bool",
+     "set": null
+    },
+    "can_have_drum_pads": {
+     "get": "bool",
+     "set": null
+    },
+    "canonical_parent": {
+     "get": "LomObject.LomObject",
+     "set": null
+    },
+    "class_display_name": {
+     "get": "str",
+     "set": null
+    },
+    "class_name": {
+     "get": "str",
+     "set": null
+    },
+    "env_listen": {
+     "get": "bool",
+     "set": "bool"
+    },
+    "is_active": {
+     "get": "bool",
+     "set": null
+    },
+    "is_using_compare_preset_b": {
+     "get": "bool",
+     "set": "bool"
+    },
+    "latency_in_ms": {
+     "get": "float",
+     "set": null
+    },
+    "latency_in_samples": {
+     "get": "int",
+     "set": null
+    },
+    "name": {
+     "get": "str",
+     "set": "object"
+    },
+    "parameters": {
+     "get": "Device.ATimeableValueVector",
+     "set": null
+    },
+    "routing_mode_index": {
+     "get": "int",
+     "set": "int"
+    },
+    "routing_mode_list": {
+     "get": "Base.StringVector",
+     "set": null
+    },
+    "type": {
+     "get": "Device.DeviceType",
+     "set": null
+    },
+    "view": {
+     "get": "LomObject.LomObject",
+     "set": null
+    }
+   }
+  },
+  "Live.Sample.Sample": {
+   "properties": {
+    "beats_granulation_resolution": {
+     "get": "int",
+     "set": "int"
+    },
+    "beats_transient_envelope": {
+     "get": "float",
+     "set": "float"
+    },
+    "beats_transient_loop_mode": {
+     "get": "int",
+     "set": "int"
+    },
+    "canonical_parent": {
+     "get": "LomObject.LomObject",
+     "set": null
+    },
+    "complex_pro_envelope": {
+     "get": "float",
+     "set": "float"
+    },
+    "complex_pro_formants": {
+     "get": "float",
+     "set": "float"
+    },
+    "end_marker": {
+     "get": "int",
+     "set": "int"
+    },
+    "file_path": {
+     "get": "str",
+     "set": null
+    },
+    "gain": {
+     "get": "float",
+     "set": "float"
+    },
+    "length": {
+     "get": "int",
+     "set": null
+    },
+    "sample_rate": {
+     "get": "float",
+     "set": null
+    },
+    "slices": {
+     "get": "tuple",
+     "set": null
+    },
+    "slicing_beat_division": {
+     "get": "int",
+     "set": "int"
+    },
+    "slicing_region_count": {
+     "get": "int",
+     "set": "int"
+    },
+    "slicing_sensitivity": {
+     "get": "float",
+     "set": "float"
+    },
+    "slicing_style": {
+     "get": "int",
+     "set": "int"
+    },
+    "start_marker": {
+     "get": "int",
+     "set": "int"
+    },
+    "texture_flux": {
+     "get": "float",
+     "set": "float"
+    },
+    "texture_grain_size": {
+     "get": "float",
+     "set": "float"
+    },
+    "tones_grain_size": {
+     "get": "float",
+     "set": "float"
+    },
+    "warp_markers": {
+     "get": "Clip.WarpMarkerVector",
+     "set": null
+    },
+    "warp_mode": {
+     "get": "int",
+     "set": "int"
+    },
+    "warping": {
+     "get": "bool",
+     "set": "bool"
+    }
+   }
+  },
   "Live.Scene.Scene": {
    "properties": {
     "canonical_parent": {
@@ -695,6 +1495,194 @@
      "set": "bool"
     },
     "time_signature_numerator": {
+     "get": "int",
+     "set": "int"
+    }
+   }
+  },
+  "Live.ShifterDevice.ShifterDevice": {
+   "properties": {
+    "can_compare_ab": {
+     "get": "bool",
+     "set": null
+    },
+    "can_have_chains": {
+     "get": "bool",
+     "set": null
+    },
+    "can_have_drum_pads": {
+     "get": "bool",
+     "set": null
+    },
+    "canonical_parent": {
+     "get": "LomObject.LomObject",
+     "set": null
+    },
+    "class_display_name": {
+     "get": "str",
+     "set": null
+    },
+    "class_name": {
+     "get": "str",
+     "set": null
+    },
+    "is_active": {
+     "get": "bool",
+     "set": null
+    },
+    "is_using_compare_preset_b": {
+     "get": "bool",
+     "set": "bool"
+    },
+    "latency_in_ms": {
+     "get": "float",
+     "set": null
+    },
+    "latency_in_samples": {
+     "get": "int",
+     "set": null
+    },
+    "name": {
+     "get": "str",
+     "set": "object"
+    },
+    "parameters": {
+     "get": "Device.ATimeableValueVector",
+     "set": null
+    },
+    "pitch_bend_range": {
+     "get": "int",
+     "set": "int"
+    },
+    "pitch_mode_index": {
+     "get": "int",
+     "set": "int"
+    },
+    "pitch_mode_list": {
+     "get": "Base.StringVector",
+     "set": null
+    },
+    "type": {
+     "get": "Device.DeviceType",
+     "set": null
+    },
+    "view": {
+     "get": "LomObject.LomObject",
+     "set": null
+    }
+   }
+  },
+  "Live.SimplerDevice.SimplerDevice": {
+   "properties": {
+    "can_compare_ab": {
+     "get": "bool",
+     "set": null
+    },
+    "can_have_chains": {
+     "get": "bool",
+     "set": null
+    },
+    "can_have_drum_pads": {
+     "get": "bool",
+     "set": null
+    },
+    "can_warp_as": {
+     "get": "bool",
+     "set": null
+    },
+    "can_warp_double": {
+     "get": "bool",
+     "set": null
+    },
+    "can_warp_half": {
+     "get": "bool",
+     "set": null
+    },
+    "canonical_parent": {
+     "get": "LomObject.LomObject",
+     "set": null
+    },
+    "class_display_name": {
+     "get": "str",
+     "set": null
+    },
+    "class_name": {
+     "get": "str",
+     "set": null
+    },
+    "is_active": {
+     "get": "bool",
+     "set": null
+    },
+    "is_using_compare_preset_b": {
+     "get": "bool",
+     "set": "bool"
+    },
+    "latency_in_ms": {
+     "get": "float",
+     "set": null
+    },
+    "latency_in_samples": {
+     "get": "int",
+     "set": null
+    },
+    "multi_sample_mode": {
+     "get": "bool",
+     "set": null
+    },
+    "name": {
+     "get": "str",
+     "set": "object"
+    },
+    "note_pitch_bend_range": {
+     "get": "int",
+     "set": "int"
+    },
+    "pad_slicing": {
+     "get": "bool",
+     "set": "bool"
+    },
+    "parameters": {
+     "get": "Device.ATimeableValueVector",
+     "set": null
+    },
+    "pitch_bend_range": {
+     "get": "int",
+     "set": "int"
+    },
+    "playback_mode": {
+     "get": "int",
+     "set": "int"
+    },
+    "playing_position": {
+     "get": "float",
+     "set": null
+    },
+    "playing_position_enabled": {
+     "get": "bool",
+     "set": null
+    },
+    "retrigger": {
+     "get": "bool",
+     "set": "bool"
+    },
+    "sample": {
+     "get": "LomObject.LomObject",
+     "set": null
+    },
+    "slicing_playback_mode": {
+     "get": "int",
+     "set": "int"
+    },
+    "type": {
+     "get": "Device.DeviceType",
+     "set": null
+    },
+    "view": {
+     "get": "LomObject.LomObject",
+     "set": null
+    },
+    "voices": {
      "get": "int",
      "set": "int"
     }
@@ -952,6 +1940,114 @@
     }
    }
   },
+  "Live.SpectralResonatorDevice.SpectralResonatorDevice": {
+   "properties": {
+    "can_compare_ab": {
+     "get": "bool",
+     "set": null
+    },
+    "can_have_chains": {
+     "get": "bool",
+     "set": null
+    },
+    "can_have_drum_pads": {
+     "get": "bool",
+     "set": null
+    },
+    "canonical_parent": {
+     "get": "LomObject.LomObject",
+     "set": null
+    },
+    "class_display_name": {
+     "get": "str",
+     "set": null
+    },
+    "class_name": {
+     "get": "str",
+     "set": null
+    },
+    "frequency_dial_mode": {
+     "get": "int",
+     "set": "int"
+    },
+    "frequency_dial_mode_list": {
+     "get": "Base.StringVector",
+     "set": null
+    },
+    "is_active": {
+     "get": "bool",
+     "set": null
+    },
+    "is_using_compare_preset_b": {
+     "get": "bool",
+     "set": "bool"
+    },
+    "latency_in_ms": {
+     "get": "float",
+     "set": null
+    },
+    "latency_in_samples": {
+     "get": "int",
+     "set": null
+    },
+    "midi_gate": {
+     "get": "int",
+     "set": "int"
+    },
+    "midi_gate_list": {
+     "get": "Base.StringVector",
+     "set": null
+    },
+    "mod_mode": {
+     "get": "int",
+     "set": "int"
+    },
+    "mod_mode_list": {
+     "get": "Base.StringVector",
+     "set": null
+    },
+    "mono_poly": {
+     "get": "int",
+     "set": "int"
+    },
+    "mono_poly_list": {
+     "get": "Base.StringVector",
+     "set": null
+    },
+    "name": {
+     "get": "str",
+     "set": "object"
+    },
+    "parameters": {
+     "get": "Device.ATimeableValueVector",
+     "set": null
+    },
+    "pitch_bend_range": {
+     "get": "int",
+     "set": "int"
+    },
+    "pitch_mode": {
+     "get": "int",
+     "set": "int"
+    },
+    "pitch_mode_list": {
+     "get": "Base.StringVector",
+     "set": null
+    },
+    "polyphony": {
+     "get": "int",
+     "set": "int"
+    },
+    "type": {
+     "get": "Device.DeviceType",
+     "set": null
+    },
+    "view": {
+     "get": "LomObject.LomObject",
+     "set": null
+    }
+   }
+  },
   "Live.TakeLane.TakeLane": {
    "properties": {
     "arrangement_clips": {
@@ -1199,6 +2295,126 @@
      "set": null
     }
    }
+  },
+  "Live.WavetableDevice.WavetableDevice": {
+   "properties": {
+    "can_compare_ab": {
+     "get": "bool",
+     "set": null
+    },
+    "can_have_chains": {
+     "get": "bool",
+     "set": null
+    },
+    "can_have_drum_pads": {
+     "get": "bool",
+     "set": null
+    },
+    "canonical_parent": {
+     "get": "LomObject.LomObject",
+     "set": null
+    },
+    "class_display_name": {
+     "get": "str",
+     "set": null
+    },
+    "class_name": {
+     "get": "str",
+     "set": null
+    },
+    "filter_routing": {
+     "get": "int",
+     "set": "int"
+    },
+    "is_active": {
+     "get": "bool",
+     "set": null
+    },
+    "is_using_compare_preset_b": {
+     "get": "bool",
+     "set": "bool"
+    },
+    "latency_in_ms": {
+     "get": "float",
+     "set": null
+    },
+    "latency_in_samples": {
+     "get": "int",
+     "set": null
+    },
+    "mono_poly": {
+     "get": "int",
+     "set": "int"
+    },
+    "name": {
+     "get": "str",
+     "set": "object"
+    },
+    "oscillator_1_effect_mode": {
+     "get": "int",
+     "set": "int"
+    },
+    "oscillator_1_wavetable_category": {
+     "get": "int",
+     "set": "int"
+    },
+    "oscillator_1_wavetable_index": {
+     "get": "int",
+     "set": "int"
+    },
+    "oscillator_1_wavetables": {
+     "get": "Base.StringVector",
+     "set": null
+    },
+    "oscillator_2_effect_mode": {
+     "get": "int",
+     "set": "int"
+    },
+    "oscillator_2_wavetable_category": {
+     "get": "int",
+     "set": "int"
+    },
+    "oscillator_2_wavetable_index": {
+     "get": "int",
+     "set": "int"
+    },
+    "oscillator_2_wavetables": {
+     "get": "Base.StringVector",
+     "set": null
+    },
+    "oscillator_wavetable_categories": {
+     "get": "Base.StringVector",
+     "set": null
+    },
+    "parameters": {
+     "get": "Device.ATimeableValueVector",
+     "set": null
+    },
+    "poly_voices": {
+     "get": "int",
+     "set": "int"
+    },
+    "type": {
+     "get": "Device.DeviceType",
+     "set": null
+    },
+    "unison_mode": {
+     "get": "int",
+     "set": "int"
+    },
+    "unison_voice_count": {
+     "get": "int",
+     "set": "int"
+    },
+    "view": {
+     "get": "LomObject.LomObject",
+     "set": null
+    },
+    "visible_modulation_target_names": {
+     "get": "Base.StringVector",
+     "set": null
+    }
+   }
   }
  },
  "enums": {
@@ -1246,6 +2462,11 @@
    "midi_effect": 4,
    "undefined": 0
   },
+  "Live.Eq8Device.GlobalMode": {
+   "left_right": 1,
+   "mid_side": 2,
+   "stereo": 0
+  },
   "Live.Groove.Base": {
    "count": 6,
    "gb_eight": 1,
@@ -1263,6 +2484,40 @@
   "Live.MixerDevice.MixerDevice.panning_modes": {
    "stereo": 0,
    "stereo_split": 1
+  },
+  "Live.Sample.SlicingBeatDivision": {
+   "eighth": 2,
+   "eighth_triplett": 3,
+   "four_bars": 10,
+   "half": 6,
+   "half_triplett": 7,
+   "one_bar": 8,
+   "quarter": 4,
+   "quarter_triplett": 5,
+   "sixteenth": 0,
+   "sixteenth_triplett": 1,
+   "two_bars": 9
+  },
+  "Live.Sample.SlicingStyle": {
+   "beat": 1,
+   "manual": 3,
+   "region": 2,
+   "transient": 0
+  },
+  "Live.Sample.TransientLoopMode": {
+   "alternate": 2,
+   "forward": 1,
+   "off": 0
+  },
+  "Live.SimplerDevice.PlaybackMode": {
+   "classic": 0,
+   "one_shot": 1,
+   "slicing": 2
+  },
+  "Live.SimplerDevice.SlicingPlaybackMode": {
+   "mono": 0,
+   "poly": 1,
+   "thru": 2
   },
   "Live.Song.Quantization": {
    "q_2_bars": 3,
@@ -1300,6 +2555,53 @@
    "AUTO": 1,
    "IN": 0,
    "OFF": 2
+  },
+  "Live.WavetableDevice.EffectMode": {
+   "frequency_modulation": 1,
+   "none": 0,
+   "sync_and_pulse_width": 2,
+   "warp_and_fold": 3
+  },
+  "Live.WavetableDevice.FilterRouting": {
+   "parallel": 1,
+   "serial": 0,
+   "split": 2
+  },
+  "Live.WavetableDevice.ModulationSource": {
+   "amp_envelope": 0,
+   "envelope_2": 1,
+   "envelope_3": 2,
+   "lfo_1": 3,
+   "lfo_2": 4,
+   "midi_channel_pressure": 8,
+   "midi_mod_wheel": 9,
+   "midi_note": 6,
+   "midi_pitch_bend": 7,
+   "midi_random": 10,
+   "midi_velocity": 5
+  },
+  "Live.WavetableDevice.UnisonMode": {
+   "classic": 1,
+   "fast_shimmer": 3,
+   "none": 0,
+   "phase_sync": 4,
+   "position_spread": 5,
+   "random_note": 6,
+   "slow_shimmer": 2
+  },
+  "Live.WavetableDevice.VoiceCount": {
+   "eight": 6,
+   "five": 3,
+   "four": 2,
+   "seven": 5,
+   "six": 4,
+   "sixteen": 7,
+   "three": 1,
+   "two": 0
+  },
+  "Live.WavetableDevice.Voicing": {
+   "mono": 0,
+   "poly": 1
   }
  },
  "live_version": "12.4.15b4"

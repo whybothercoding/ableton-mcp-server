@@ -14,7 +14,7 @@ KIND_CLASSES = {"song": "Live.Song.Song", "track": "Live.Track.Track", "scene": 
                 "slot": "Live.ClipSlot.ClipSlot", "clip": "Live.Clip.Clip",
                 "groove": "Live.Groove.Groove", "cue": "Live.Song.CuePoint", "app": "Live.Application.Application",
                 "device": "Live.RackDevice.RackDevice", "chain": "Live.Chain.Chain", "pad": "Live.DrumPad.DrumPad",
-                "parameter": "Live.DeviceParameter.DeviceParameter", "lane": "Live.TakeLane.TakeLane"}
+                "parameter": "Live.DeviceParameter.DeviceParameter", "lane": "Live.TakeLane.TakeLane", "sample": "Live.Sample.Sample"}
 
 
 def data():

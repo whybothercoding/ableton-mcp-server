@@ -566,6 +566,9 @@ def load_module():
     live.ClipSlot = types.SimpleNamespace(ClipSlotPlayingState=FakeEnum(stopped=0, started=1, recording=2))
     live.Device = types.SimpleNamespace(Device=FakeDevice, DeviceType=FakeEnum(undefined=0, instrument=1, audio_effect=2, midi_effect=4))
     live.Envelope = types.SimpleNamespace(EnvelopeEvent=FakeEnvelopeEvent)
+    live.Sample = types.SimpleNamespace(SlicingStyle=FakeEnum(transient=0, beat=1, region=2, manual=3),
+                                        SlicingBeatDivision=FakeEnum(sixteenth=0, eighth=2, quarter=4),
+                                        TransientLoopMode=FakeEnum(off=0, forward=1, alternate=2))
     live.Clip.WarpMarker = FakeWarpMarker
     live.Conversions = FakeConversions()
     live.Chain = types.SimpleNamespace(Chain=FakeChain)
@@ -3080,6 +3083,285 @@ class AudioTests(unittest.TestCase):
         self.song.undo_log.clear()
         self.ok("convert", action="simpler_track", address="tracks/0/slots/0/clip")
         self.assertEqual(self.song.undo_log, ["begin", "end"])
+
+
+# ---------------------------------------------------------------- device-specific properties and methods
+
+class FakeSample(Typed):
+    _types = {"gain": float, "start_marker": int, "end_marker": int, "warping": bool, "warp_mode": int, "slicing_style": int}
+
+    def __init__(self, parent):
+        self.canonical_parent, self.calls = parent, []
+        self.gain, self.start_marker, self.end_marker, self.warping, self.warp_mode, self.slicing_style = 0.5, 0, 1000, True, 0, 1
+        self.length, self.sample_rate, self.file_path, self.slices = 1000, 44100.0, "/x/sample.wav", (0, 250, 500)
+        self.slicing_beat_division, self.slicing_region_count, self.slicing_sensitivity = 4, 8, 0.5
+        self.beats_transient_loop_mode = 0
+
+    def insert_slice(self, time):
+        self.calls.append(("insert_slice", time))
+
+    def move_slice(self, old, new):
+        self.calls.append(("move_slice", old, new))
+        return new
+
+    def gain_display_string(self):
+        return "-6 dB"
+
+
+class FakeSimpler(DevDevice):
+    _types = {"retrigger": bool, "voices": int, "playback_mode": int}
+
+    def __init__(self):
+        DevDevice.__init__(self, "Simpler", dev_type=1)
+        self.playback_mode, self.slicing_playback_mode, self.retrigger, self.voices = 0, 1, False, 6
+        self.pad_slicing, self.pitch_bend_range, self.note_pitch_bend_range, self.multi_sample_mode = False, 5, 5, False
+        self.playing_position, self.playing_position_enabled = 0.0, False
+        self.can_warp_as = self.can_warp_double = self.can_warp_half = True
+        self.sample, self.calls = FakeSample(self), []
+
+    def __setattr__(self, key, value):
+        expected = self._types.get(key) if hasattr(type(self), "_types") else None
+        if expected is int and isinstance(value, float):
+            raise TypeError("float given for an int property")
+        object.__setattr__(self, key, value)
+
+    def crop(self):
+        self.calls.append("crop")
+
+    def warp_as(self, beats):
+        self.calls.append(("warp_as", beats))
+
+    def replace_sample(self, path):
+        self.calls.append(("replace_sample", path))
+
+
+class FakeWavetable(DevDevice):
+    def __init__(self):
+        DevDevice.__init__(self, "Wavetable", dev_type=1)
+        self.oscillator_1_effect_mode, self.oscillator_2_effect_mode, self.filter_routing, self.unison_mode = 0, 0, 1, 2
+        self.poly_voices, self.mono_poly = 3, 1
+        self.oscillator_1_wavetable_index, self.oscillator_1_wavetables = 1, ["Basic Shapes", "Vowels", "Growl"]
+        self.oscillator_2_wavetable_index, self.oscillator_2_wavetables = 0, ["Basic Shapes", "Vowels", "Growl"]
+        self.oscillator_1_wavetable_category, self.oscillator_2_wavetable_category = 0, 1
+        self.oscillator_wavetable_categories = ["Basic", "Vocal"]
+        self.unison_voice_count = 4
+        self.visible_modulation_target_names = ["Osc 1 Pos"]
+        self.modulation = {}
+
+    def set_modulation_value(self, target, source, value):
+        if target > 3:
+            raise RuntimeError("Modulation target index out of range")
+        self.modulation[(target, source)] = value
+
+    def get_modulation_value(self, target, source):
+        return self.modulation.get((target, source), 0.0)
+
+    def is_parameter_modulatable(self, parameter):
+        return parameter.name != "Off"
+
+
+class FakeDrift(DevDevice):
+    def __init__(self):
+        DevDevice.__init__(self, "Drift", dev_type=1)
+        self.voice_mode_index, self.voice_mode_list = 0, ["Poly", "Mono", "Stereo", "Unison"]
+        self.mod_matrix_source_1_index, self.mod_matrix_source_1_list = 0, ["Off", "LFO", "Env 2"]
+        self.pitch_bend_range, self.voice_count_index, self.voice_count_list = 5, 1, ["1", "2", "3"]
+
+
+class FakeLooper(DevDevice):
+    def __init__(self):
+        DevDevice.__init__(self, "Looper", dev_type=2)
+        self.overdub_after_record, self.record_length_index, self.record_length_list = False, 0, ["1 Bar", "2 Bars", "4 Bars"]
+        self.loop_length, self.tempo, self.calls = 4.0, 120.0, []
+
+    def record(self):
+        self.calls.append("record")
+
+    def export_to_clip_slot(self, slot):
+        self.calls.append(("export", slot))
+
+
+class DeviceSpecificTests(unittest.TestCase):
+    """Track 'Synth': 0 Simpler (with a sample), 1 Wavetable, 2 Drift, 3 Looper, 4 EQ Eight (no device-specific table)."""
+
+    def setUp(self):
+        self.script = make_script()
+        self.addCleanup(self.script._stop_server)
+        song = make_song()
+        track = DevTrack("Synth")
+        track.clip_slots = [FakeSlot(), FakeSlot()]
+        self.devices = [FakeSimpler(), FakeWavetable(), FakeDrift(), FakeLooper(), DevDevice("EQ Eight")]
+        track.adopt(self.devices)
+        for device in self.devices:
+            device.link_parameters()
+        song.tracks = [track]
+        self.script._song = self.song = song
+        self.simpler, self.wavetable, self.drift, self.looper, self.eq = self.devices
+        live = sys.modules["Live"]
+        for module, cls, enums in (("SimplerDevice", FakeSimpler, {"PlaybackMode": FakeEnum(classic=0, one_shot=1, slicing=2), "SlicingPlaybackMode": FakeEnum(mono=0, poly=1, thru=2)}),
+                                   ("WavetableDevice", FakeWavetable, {"EffectMode": FakeEnum(none=0, frequency_modulation=1), "FilterRouting": FakeEnum(serial=0, parallel=1, split=2),
+                                                                        "UnisonMode": FakeEnum(none=0, classic=1, slow_shimmer=2), "VoiceCount": FakeEnum(two=0, three=1, four=2, five=3),
+                                                                        "Voicing": FakeEnum(mono=0, poly=1), "ModulationSource": FakeEnum(amp_envelope=0, envelope_2=1, lfo_1=3)}),
+                                   ("DriftDevice", FakeDrift, {}), ("LooperDevice", FakeLooper, {})):
+            setattr(live, module, types.SimpleNamespace(**dict({module: cls}, **enums)))
+            self.addCleanup(lambda m=module: delattr(live, m))
+        self.sample_module = live.Sample
+        live.Sample = types.SimpleNamespace(Sample=FakeSample, SlicingStyle=self.sample_module.SlicingStyle, SlicingBeatDivision=self.sample_module.SlicingBeatDivision,
+                                            TransientLoopMode=self.sample_module.TransientLoopMode)
+        self.addCleanup(setattr, live, "Sample", self.sample_module)
+        live.Clip.WarpMode = live.Clip.WarpMode
+
+    def run_command(self, name, params):
+        return self.script._process_command({"type": name, "params": params})
+
+    def ok(self, command_name, /, **params):
+        response = self.run_command(command_name, params)
+        self.assertEqual(response["status"], "success", response)
+        return response["result"]
+
+    def code(self, command_name, /, **params):
+        response = self.run_command(command_name, params)
+        self.assertEqual(response["status"], "error", response)
+        return response["code"]
+
+    # ---- properties built from the registry
+    def test_a_simpler_exposes_its_own_properties_with_enums_by_name(self):
+        got = self.ok("get_properties", address="tracks/0/devices/0", names=["playback_mode", "slicing_playback_mode", "retrigger", "voices", "pitch_bend_range", "name"])["properties"]
+        self.assertEqual(got, {"playback_mode": "classic", "slicing_playback_mode": "poly", "retrigger": False, "voices": 6, "pitch_bend_range": 5, "name": "Simpler"})
+        self.ok("set_properties", address="tracks/0/devices/0", properties={"playback_mode": "slicing", "retrigger": True, "voices": 12})
+        self.assertEqual((self.simpler.playback_mode, self.simpler.retrigger, self.simpler.voices), (2, True, 12))
+        self.assertEqual(self.code("set_properties", address="tracks/0/devices/0", properties={"playback_mode": "loud"}), "INVALID_ARGUMENT")
+        self.assertEqual(self.code("set_properties", address="tracks/0/devices/0", properties={"voices": 1.5}), "TYPE_ERROR")
+        self.assertEqual(self.code("set_properties", address="tracks/0/devices/0", properties={"multi_sample_mode": True}), "INVALID_ARGUMENT")    # read-only
+
+    def test_index_and_list_pairs_become_one_property_with_labels(self):
+        got = self.ok("get_properties", address="tracks/0/devices/2", names=["voice_mode", "mod_matrix_source_1", "voice_count"])["properties"]
+        self.assertEqual(got, {"voice_mode": "Poly", "mod_matrix_source_1": "Off", "voice_count": "2"})
+        self.ok("set_properties", address="tracks/0/devices/2", properties={"voice_mode": "Unison", "mod_matrix_source_1": 2})
+        self.assertEqual((self.drift.voice_mode_index, self.drift.mod_matrix_source_1_index), (3, 2))
+        response = self.run_command("set_properties", {"address": "tracks/0/devices/2", "properties": {"voice_mode": "Chaos"}})
+        self.assertEqual(response["code"], "INVALID_ARGUMENT")
+        self.assertIn("Poly, Mono, Stereo, Unison", response["message"])
+        self.assertEqual(self.code("set_properties", address="tracks/0/devices/2", properties={"voice_mode": 9}), "OUT_OF_RANGE")
+        self.assertEqual(self.code("set_properties", address="tracks/0/devices/2", properties={"voice_mode": 1.5}), "TYPE_ERROR")
+        self.assertNotIn("voice_mode_index", self.ok("list_properties", address="tracks/0/devices/2")["properties"])
+
+    def test_choice_lists_are_read_on_request_only(self):
+        every = self.ok("get_properties", address="tracks/0/devices/2")["properties"]
+        self.assertIn("voice_mode", every)
+        self.assertNotIn("voice_mode_options", every)
+        self.assertEqual(self.ok("get_properties", address="tracks/0/devices/2", names=["voice_mode_options"])["properties"]["voice_mode_options"], ["Poly", "Mono", "Stereo", "Unison"])
+        listing = self.ok("list_properties", address="tracks/0/devices/2")["properties"]
+        self.assertEqual(listing["voice_mode"]["values"], ["Poly", "Mono", "Stereo", "Unison"])
+        self.assertTrue(listing["voice_mode_options"]["read_on_request"])
+        self.assertFalse(listing["voice_mode_options"]["writable"])
+
+    def test_wavetable_enums_wavetables_and_categories(self):
+        got = self.ok("get_properties", address="tracks/0/devices/1", names=["filter_routing", "unison_mode", "poly_voices", "oscillator_1_wavetable", "oscillator_2_wavetable_category"])["properties"]
+        self.assertEqual(got, {"filter_routing": "parallel", "unison_mode": "slow_shimmer", "poly_voices": "five", "oscillator_1_wavetable": "Vowels", "oscillator_2_wavetable_category": "Vocal"})
+        self.ok("set_properties", address="tracks/0/devices/1", properties={"oscillator_1_wavetable": "Growl", "oscillator_1_wavetable_category": "Vocal", "unison_mode": "classic"})
+        self.assertEqual((self.wavetable.oscillator_1_wavetable_index, self.wavetable.oscillator_1_wavetable_category, self.wavetable.unison_mode), (2, 1, 1))
+        options = self.ok("get_properties", address="tracks/0/devices/1", names=["oscillator_1_wavetable_category_options", "oscillator_2_wavetable_options"])["properties"]
+        self.assertEqual(options, {"oscillator_1_wavetable_category_options": ["Basic", "Vocal"], "oscillator_2_wavetable_options": ["Basic Shapes", "Vowels", "Growl"]})
+
+    def test_a_failed_write_restores_choices_and_enums(self):
+        response = self.run_command("set_properties", {"address": "tracks/0/devices/2", "properties": {"voice_mode": "Mono", "voice_count": "9"}})
+        self.assertEqual(response["status"], "error")
+        self.assertEqual((self.drift.voice_mode_index, self.drift.voice_count_index), (0, 1))
+        self.simpler.voices = 6
+        bad = self.run_command("set_properties", {"address": "tracks/0/devices/0", "properties": {"playback_mode": "one_shot", "retrigger": "yes"}})
+        self.assertEqual(bad["code"], "TYPE_ERROR")
+        self.assertEqual(self.simpler.playback_mode, 0)
+
+    def test_devices_without_a_table_keep_only_the_base_properties(self):
+        got = self.ok("get_properties", address="tracks/0/devices/4")
+        self.assertIn("name", got["properties"])
+        self.assertNotIn("voices", got["properties"])
+        self.assertEqual(self.code("get_properties", address="tracks/0/devices/4", names=["voices"]), "NOT_FOUND")
+
+    def test_the_looper_and_eq_tables(self):
+        self.assertEqual(self.ok("get_properties", address="tracks/0/devices/3", names=["record_length", "overdub_after_record", "loop_length"])["properties"],
+                         {"record_length": "1 Bar", "overdub_after_record": False, "loop_length": 4.0})
+        self.ok("set_properties", address="tracks/0/devices/3", properties={"record_length": "4 Bars", "overdub_after_record": True})
+        self.assertEqual((self.looper.record_length_index, self.looper.overdub_after_record), (2, True))
+        self.assertEqual(self.code("set_properties", address="tracks/0/devices/3", properties={"loop_length": 8.0}), "INVALID_ARGUMENT")
+
+    # ---- the Simpler's sample
+    def test_the_sample_has_an_address_properties_and_a_reverse_lookup(self):
+        kind, sample, canonical = self.script._resolve("tracks/0/devices/0/sample")
+        self.assertEqual((kind, sample is self.simpler.sample, canonical), ("sample", True, "tracks/0/devices/0/sample"))
+        self.assertEqual(self.script._address_of(sample), "tracks/0/devices/0/sample")
+        got = self.ok("get_properties", address="tracks/0/devices/0/sample", names=["gain", "start_marker", "warping", "slicing_style", "slices", "length"])["properties"]
+        self.assertEqual(got, {"gain": 0.5, "start_marker": 0, "warping": True, "slicing_style": "beat", "slices": [0, 250, 500], "length": 1000})
+        self.ok("set_properties", address="tracks/0/devices/0/sample", properties={"gain": 0.25, "slicing_style": "manual", "start_marker": 100})
+        self.assertEqual((self.simpler.sample.gain, self.simpler.sample.slicing_style, self.simpler.sample.start_marker), (0.25, 3, 100))
+        self.simpler.sample = None
+        self.assertEqual(self.code("get_properties", address="tracks/0/devices/0/sample"), "NOT_FOUND")
+        self.assertEqual(self.code("get_properties", address="tracks/0/devices/1/sample"), "NOT_FOUND")
+
+    # ---- get_device
+    def test_get_device_lists_what_a_device_offers(self):
+        info = self.ok("get_device", address="tracks/0/devices/0")
+        self.assertEqual(info["specific"]["class"], "SimplerDevice")
+        self.assertIn("playback_mode", info["specific"]["properties"])
+        self.assertEqual(sorted(info["specific"]["methods"]), ["crop", "guess_playback_length", "replace_sample", "reverse", "warp_as", "warp_double", "warp_half"])
+        self.assertEqual(info["specific"]["methods"]["warp_as"]["args"], [{"name": "beat_time", "type": "number"}])
+        self.assertEqual(info["sample"]["address"], "tracks/0/devices/0/sample")
+        self.assertIn("insert_slice", info["sample"]["methods"])
+        self.assertIn("voice_mode_options", self.ok("get_device", address="tracks/0/devices/2")["specific"]["options"])
+        plain = self.ok("get_device", address="tracks/0/devices/4")
+        self.assertNotIn("specific", plain)
+        self.assertNotIn("sample", plain)
+
+    # ---- call
+    def call(self, address, method, **args):
+        return self.run_command("device_action", {"action": "call", "address": address, "method": method, "args": args})
+
+    def test_call_runs_whitelisted_methods_with_typed_arguments(self):
+        self.assertEqual(self.call("tracks/0/devices/0", "crop")["status"], "success")
+        self.assertEqual(self.call("tracks/0/devices/0", "warp_as", beat_time=4)["status"], "success")
+        self.assertEqual(self.simpler.calls, ["crop", ("warp_as", 4.0)])
+        out = self.call("tracks/0/devices/0/sample", "move_slice", old_time=250, new_time=300)
+        self.assertEqual(out["result"]["result"], 300)
+        self.assertEqual(self.simpler.sample.calls, [("move_slice", 250, 300)])
+        self.call("tracks/0/devices/3", "record")
+        self.assertEqual(self.looper.calls, ["record"])
+
+    def test_call_converts_addresses_and_enum_names(self):
+        self.assertEqual(self.call("tracks/0/devices/3", "export_to_clip_slot", slot="tracks/0/slots/1")["status"], "success")
+        self.assertIs(self.looper.calls[-1][1], self.song.tracks[0].clip_slots[1])
+        self.assertEqual(self.call("tracks/0/devices/3", "export_to_clip_slot", slot="tracks/0")["code"], "TYPE_ERROR")
+        self.assertEqual(self.call("tracks/0/devices/1", "set_modulation_value", target_index=1, source="lfo_1", value=0.5)["status"], "success")
+        self.assertEqual(self.wavetable.modulation, {(1, 3): 0.5})
+        self.assertEqual(self.call("tracks/0/devices/1", "get_modulation_value", target_index=1, source="lfo_1")["result"]["result"], 0.5)
+        self.assertEqual(self.call("tracks/0/devices/1", "is_parameter_modulatable", parameter="tracks/0/devices/1/parameters/1")["result"]["result"], True)
+        self.assertEqual(self.call("tracks/0/devices/1", "set_modulation_value", target_index=1, source="sun", value=1)["code"], "INVALID_ARGUMENT")
+        response = self.call("tracks/0/devices/1", "set_modulation_value", target_index=9, source="lfo_1", value=1)
+        self.assertEqual((response["code"], "out of range" in response["message"]), ("LIVE_ERROR", True))
+
+    def test_call_validates_the_method_and_its_arguments(self):
+        good = os.path.abspath(__file__)
+        cases = [("tracks/0/devices/0", "explode", {}, "NOT_FOUND"), ("tracks/0/devices/0", "warp_as", {}, "INVALID_ARGUMENT"),
+                 ("tracks/0/devices/0", "warp_as", {"beat_time": "four"}, "TYPE_ERROR"), ("tracks/0/devices/0", "warp_as", {"beat_time": 4, "extra": 1}, "INVALID_ARGUMENT"),
+                 ("tracks/0/devices/0", "replace_sample", {"path": "relative.wav"}, "INVALID_ARGUMENT"), ("tracks/0/devices/0", "replace_sample", {"path": "/no/file.wav"}, "NOT_FOUND"),
+                 ("tracks/0/devices/0/sample", "insert_slice", {"time": 1.5}, "TYPE_ERROR"), ("tracks/0/devices/4", "crop", {}, "NOT_FOUND"),
+                 ("tracks/0/devices/1", "set_modulation_value", {"target_index": 1, "source": "lfo_1"}, "INVALID_ARGUMENT")]
+        for address, method, args, code in cases:
+            self.assertEqual(self.call(address, method, **args)["code"], code, (method, args))
+        self.assertEqual(self.simpler.calls, [])
+        self.assertEqual(self.call("tracks/0/devices/0", "replace_sample", path=good)["status"], "success")
+        listing = self.call("tracks/0/devices/0", "explode")
+        self.assertIn("It offers: crop, guess_playback_length", listing["message"])
+        self.assertIn("no device-specific methods", self.call("tracks/0/devices/4", "crop")["message"])
+        self.assertEqual(self.run_command("device_action", {"action": "call", "address": "tracks/0/devices/0"})["code"], "INVALID_ARGUMENT")
+        self.assertEqual(self.run_command("device_action", {"action": "call", "address": "tracks/0", "method": "crop"})["code"], "INVALID_ARGUMENT")
+        self.assertEqual(self.run_command("device_action", {"action": "call", "address": "tracks/0/devices/0", "method": "crop", "args": [1]})["code"], "TYPE_ERROR")
+
+    def test_calls_and_property_writes_are_one_undo_step_each(self):
+        self.song.undo_log.clear()
+        self.call("tracks/0/devices/0", "crop")
+        self.ok("set_properties", address="tracks/0/devices/0", properties={"retrigger": True})
+        self.assertEqual(self.song.undo_log, ["begin", "end", "begin", "end"])
 
 
 # ---------------------------------------------------------------- arrangement and recording

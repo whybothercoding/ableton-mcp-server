@@ -8,6 +8,7 @@ themselves, and reads every value back. It is a curated table now; a generated r
 import Live
 
 from . import api_registry
+from . import device_specific
 from .helpers import _is_number
 from .registry import BridgeError, command
 
@@ -325,6 +326,7 @@ PROPERTY_SPECS = {
     "lane": {
         "name": _spec("str"),
     },
+    "sample": {},          # a Simpler's sample: its properties come from the Sample class (device_specific)
     "cue": {
         "name": _spec("str"),
         "time": _spec("float", RO, doc="Position in beats; create a cue point with `create` at a time"),
@@ -402,7 +404,13 @@ def _coerce(name, spec, value):
     return value
 
 
-def _kind_specs(kind):
+def _kind_specs(kind, obj=None):
+    """The property table of a kind; a device (or a Simpler's sample) also has the properties of its own class."""
+    if kind == "device" and obj is not None:
+        extras = device_specific.specs_for_device(obj)
+        return dict(PROPERTY_SPECS["device"], **extras) if extras else PROPERTY_SPECS["device"]
+    if kind == "sample":
+        return device_specific.specs_for_sample()
     return PROPERTY_SPECS[kind]
 
 
@@ -426,7 +434,7 @@ class PropertiesMixin(object):
 
     def _get_properties(self, address, names=None):
         kind, obj, canonical = self._resolve(address)
-        specs = _kind_specs(kind)
+        specs = _kind_specs(kind, obj)
         if names is not None:
             if not isinstance(names, list) or not all(isinstance(n, str) for n in names):
                 raise BridgeError("names must be a list of property names", "INVALID_ARGUMENT")
@@ -434,7 +442,7 @@ class PropertiesMixin(object):
             if unknown:
                 raise BridgeError("Unknown {0} properties: {1}. Valid: {2}".format(kind, unknown, sorted(specs)), "NOT_FOUND")
         values, unavailable = {}, {}
-        for name in (names if names is not None else sorted(specs)):
+        for name in (names if names is not None else sorted(n for n in specs if not specs[n].get("on_request"))):
             try:
                 values[name] = self._value(obj, name, specs[name])
             except Exception as e:
@@ -451,7 +459,7 @@ class PropertiesMixin(object):
         self._guard(obj, expect, canonical)
         if not isinstance(values, dict) or not values:
             raise BridgeError("properties must be a non-empty object of name: value", "INVALID_ARGUMENT")
-        specs = _kind_specs(kind)
+        specs = _kind_specs(kind, obj)
         pending = {}
         for name, value in values.items():
             if name not in specs:
@@ -489,7 +497,7 @@ class PropertiesMixin(object):
             if not progressed:
                 for name in reversed(done):
                     try:
-                        write(name, self._writable_value(specs[name], before[name]))
+                        write(name, self._writable_value(specs[name], before[name], obj))
                     except Exception:
                         pass
                 raise errors[sorted(pending)[0]]
@@ -498,8 +506,10 @@ class PropertiesMixin(object):
             applied[name] = {"from": before[name], "to": self._value(obj, name, specs[name])}
         return {"address": canonical, "kind": kind, "applied": applied}
 
-    def _writable_value(self, spec, value):
-        """Turn a value read back for the caller (enum name, object address) into what the setter takes."""
+    def _writable_value(self, spec, value, obj=None):
+        """Turn a value read back for the caller (enum name, object address, device label) into what the setter takes."""
+        if spec["type"] == "choice" and isinstance(value, str):
+            return spec["coerce"](obj, value)
         if spec["type"] == "enum" and isinstance(value, str):
             return _enum_names(spec["enum"])[value]
         if spec["type"] == "ref" and isinstance(value, str):
@@ -507,20 +517,33 @@ class PropertiesMixin(object):
         return value
 
     def _list_properties(self, address=None, kind=None):
+        obj = None
         if address is not None:
-            kind = self._resolve(address)[0]
+            kind, obj, _canonical = self._resolve(address)
         if kind not in PROPERTY_SPECS:
             raise BridgeError("kind must be one of: {0}".format(", ".join(sorted(PROPERTY_SPECS))), "INVALID_ARGUMENT")
+        table = _kind_specs(kind, obj)
         listing = {}
-        for name, spec in sorted(PROPERTY_SPECS[kind].items()):
+        for name, spec in sorted(table.items()):
             entry = {"type": spec["type"], "writable": spec["rw"]}
             if spec["enum"]:
                 entry["values"] = sorted(_enum_names(spec["enum"]), key=_enum_names(spec["enum"]).get)
+            if spec.get("options") and obj is not None:
+                try:
+                    entry["values"] = list(spec["options"](obj))
+                except Exception:
+                    pass
             for key in ("doc", "min", "max", "ref"):
                 if spec[key] not in (None, ""):
                     entry["refers_to" if key == "ref" else key] = spec[key]
+            if spec.get("on_request"):
+                entry["read_on_request"] = True
             listing[name] = entry
         result = {"kind": kind, "properties": listing}
+        if obj is not None and kind in ("device", "sample"):
+            methods = device_specific.methods_for(kind, obj)
+            if methods:
+                result["methods"] = methods
         # What Live exposes that this tool does not (yet): visible gaps instead of hidden ones
         known = api_registry.class_properties(api_registry.KIND_CLASSES[kind])
         result["not_exposed"] = dict((name, {"type": info["get"], "writable": info["set"] is not None})

@@ -1450,6 +1450,104 @@ try {
     await failsCode(() => call('record', { action: 'overdub' }), 'INVALID_ARGUMENT');
   });
 
+  console.log('\nDevice-specific: Simpler and its sample, Wavetable, Drift, Looper');
+  const synthTrack = await makeScratchTrack();
+  const st = `tracks/${synthTrack}`;
+  await check('a Simpler takes a sample and exposes its properties (enums by name), its sample, and its methods; choices round-trip', async () => {
+    const file = (await call('eval', { code: "[sl.clip.file_path for t in self._song.tracks for sl in getattr(t, 'clip_slots', []) if sl.has_clip and sl.clip.is_audio_clip][:1]" }))[0];
+    const simpler = await call('device_action', { action: 'insert', address: st, name: 'Simpler' });
+    const info = await call('get_device', { address: simpler.address });
+    assert(info.specific.class === 'SimplerDevice' && info.specific.properties.includes('playback_mode') && 'replace_sample' in info.specific.methods, JSON.stringify(info.specific).slice(0, 300));
+    const props = await call('get_properties', { address: simpler.address, names: ['playback_mode', 'slicing_playback_mode', 'retrigger', 'voices'] });
+    assert(['classic', 'one_shot', 'slicing'].includes(props.properties.playback_mode) && typeof props.properties.voices === 'number', JSON.stringify(props.properties));
+    await call('set_properties', { address: simpler.address, properties: { playback_mode: 'one_shot', retrigger: true, voices: 4 } });
+    const set = await call('get_properties', { address: simpler.address, names: ['playback_mode', 'retrigger', 'voices'] });
+    assert(set.properties.playback_mode === 'one_shot' && set.properties.retrigger === true && set.properties.voices === 4, JSON.stringify(set.properties));
+    await failsCode(() => call('set_properties', { address: simpler.address, properties: { playback_mode: 'loud' } }), 'INVALID_ARGUMENT');
+    await failsCode(() => call('get_properties', { address: `${simpler.address}/sample` }), 'NOT_FOUND', 'no sample');
+    if (!file) {
+      console.log('       no audio file to borrow: sample checks skipped');
+      return;
+    }
+    await call('device_action', { action: 'call', address: simpler.address, method: 'replace_sample', args: { path: file } });
+    const sample = await call('get_properties', { address: `${simpler.address}/sample`, names: ['file_path', 'length', 'sample_rate', 'start_marker', 'end_marker', 'gain', 'warping', 'slicing_style', 'warp_mode'] });
+    assert(sample.properties.file_path === file && sample.properties.length > 0 && sample.properties.sample_rate > 0, JSON.stringify(sample.properties));
+    assert(['transient', 'beat', 'region', 'manual'].includes(sample.properties.slicing_style), 'slicing_style comes as a name');
+    const gain = sample.properties.gain;
+    await call('set_properties', { address: `${simpler.address}/sample`, properties: { gain: gain * 0.5, slicing_style: 'manual' } });
+    const changed = await call('get_properties', { address: `${simpler.address}/sample`, names: ['gain', 'slicing_style', 'slices'] });
+    near(changed.properties.gain, gain * 0.5, 1e-3, 'sample gain'); assert(changed.properties.slicing_style === 'manual', 'slicing style');
+    await call('set_properties', { address: simpler.address, properties: { playback_mode: 'slicing' } });
+    const beforeSlices = (await call('get_properties', { address: `${simpler.address}/sample`, names: ['slices'] })).properties.slices;
+    const inserted = await call('device_action', { action: 'call', address: `${simpler.address}/sample`, method: 'insert_slice', args: { time: Math.floor(sample.properties.length / 3) } });
+    assert(inserted.method === 'insert_slice', JSON.stringify(inserted));
+    const afterSlices = (await call('get_properties', { address: `${simpler.address}/sample`, names: ['slices'] })).properties.slices;
+    assert(afterSlices.length === beforeSlices.length + 1, `a slice point was added: ${JSON.stringify(beforeSlices)} -> ${JSON.stringify(afterSlices)}`);
+    await call('device_action', { action: 'call', address: `${simpler.address}/sample`, method: 'clear_slices' });
+    const guess = await call('device_action', { action: 'call', address: simpler.address, method: 'guess_playback_length' });
+    assert(typeof guess.result === 'number' && guess.result > 0, JSON.stringify(guess));
+    await failsCode(() => call('device_action', { action: 'call', address: simpler.address, method: 'explode' }), 'NOT_FOUND', 'It offers');
+    await failsCode(() => call('device_action', { action: 'call', address: simpler.address, method: 'replace_sample', args: { path: 'relative.wav' } }), 'INVALID_ARGUMENT');
+    await call('device_action', { action: 'call', address: simpler.address, method: 'warp_double' }).catch((err) => assert(err.bridgeCode === 'LIVE_ERROR', `unexpected ${err.bridgeCode}`));
+  });
+  await check('Wavetable: enum properties by name, wavetable choices by label, and the modulation matrix', async () => {
+    const wt = await call('device_action', { action: 'insert', address: `tracks/${await makeScratchTrack()}`, name: 'Wavetable' });
+    const props = await call('get_properties', { address: wt.address, names: ['unison_mode', 'filter_routing', 'poly_voices', 'oscillator_1_wavetable', 'oscillator_1_wavetable_category', 'oscillator_1_effect_mode'] });
+    assert(typeof props.properties.oscillator_1_wavetable === 'string' && typeof props.properties.unison_mode === 'string', JSON.stringify(props.properties));
+    const options = (await call('get_properties', { address: wt.address, names: ['oscillator_1_wavetable_options'] })).properties.oscillator_1_wavetable_options;
+    assert(options.length > 3, `${options.length} wavetables`);
+    const other = options.find((o) => o !== props.properties.oscillator_1_wavetable);
+    await call('set_properties', { address: wt.address, properties: { oscillator_1_wavetable: other, unison_mode: 'classic', filter_routing: 'parallel' } });
+    const after = await call('get_properties', { address: wt.address, names: ['oscillator_1_wavetable', 'unison_mode', 'filter_routing'] });
+    assert(after.properties.oscillator_1_wavetable === other && after.properties.unison_mode === 'classic' && after.properties.filter_routing === 'parallel', JSON.stringify(after.properties));
+    await failsCode(() => call('set_properties', { address: wt.address, properties: { oscillator_1_wavetable: 'No Such Wavetable' } }), 'INVALID_ARGUMENT');
+    const cutoff = (await call('get_device', { address: wt.address })).parameters.find((p) => /filter 1 freq/i.test(p.name) || /freq/i.test(p.name));
+    const modulatable = await call('device_action', { action: 'call', address: wt.address, method: 'is_parameter_modulatable', args: { parameter: cutoff.address } });
+    assert(typeof modulatable.result === 'boolean', JSON.stringify(modulatable));
+    if (modulatable.result) {
+      const target = await call('device_action', { action: 'call', address: wt.address, method: 'add_parameter_to_modulation_matrix', args: { parameter: cutoff.address } });
+      assert(Number.isInteger(target.result), JSON.stringify(target));
+      await call('device_action', { action: 'call', address: wt.address, method: 'set_modulation_value', args: { target_index: target.result, source: 'lfo_1', value: 0.4 } });
+      const value = await call('device_action', { action: 'call', address: wt.address, method: 'get_modulation_value', args: { target_index: target.result, source: 'lfo_1' } });
+      near(value.result, 0.4, 0.02, 'modulation amount');
+      await failsCode(() => call('device_action', { action: 'call', address: wt.address, method: 'set_modulation_value', args: { target_index: target.result, source: 'sun', value: 0.4 } }), 'INVALID_ARGUMENT');
+    }
+  });
+  await check('Drift: index/list pairs are label properties, and a failed multi-write leaves the device as it was', async () => {
+    const drift = await call('device_action', { action: 'insert', address: `tracks/${await makeScratchTrack()}`, name: 'Drift' });
+    const modes = (await call('get_properties', { address: drift.address, names: ['voice_mode_options'] })).properties.voice_mode_options;
+    assert(modes.length >= 2, JSON.stringify(modes));
+    const original = (await call('get_properties', { address: drift.address, names: ['voice_mode', 'pitch_bend_range'] })).properties;
+    const other = modes.find((m) => m !== original.voice_mode);
+    await call('set_properties', { address: drift.address, properties: { voice_mode: other, pitch_bend_range: 7 } });
+    const now = (await call('get_properties', { address: drift.address, names: ['voice_mode', 'pitch_bend_range'] })).properties;
+    assert(now.voice_mode === other && now.pitch_bend_range === 7, JSON.stringify(now));
+    await failsCode(() => call('set_properties', { address: drift.address, properties: { voice_mode: original.voice_mode, pitch_bend_range: 'wide' } }), 'TYPE_ERROR');
+    assert((await call('get_properties', { address: drift.address, names: ['voice_mode'] })).properties.voice_mode === other, 'a rejected write changed a property');
+    const listing = await call('list_properties', { address: drift.address });
+    assert(listing.properties.voice_mode.values.length === modes.length && listing.properties.voice_mode_options.read_on_request === true, JSON.stringify(listing.properties.voice_mode).slice(0, 200));
+    await call('set_properties', { address: drift.address, properties: original });
+  });
+  await check('Looper and Eq Eight: their own properties and the Looper transport methods', async () => {
+    const loopTrack = await call('create', { kind: 'audio_track', name: 'MCP TEST LOOPER' });
+    await trackPtr(loopTrack.address, 'tracks');
+    const looper = await call('device_action', { action: 'insert', address: loopTrack.address, name: 'Looper' });
+    const info = await call('get_device', { address: looper.address });
+    assert(info.specific.class === 'LooperDevice' && 'clear' in info.specific.methods && 'export_to_clip_slot' in info.specific.methods, JSON.stringify(info.specific).slice(0, 300));
+    const props = await call('get_properties', { address: looper.address, names: ['record_length', 'overdub_after_record', 'loop_length', 'tempo'] });
+    assert(typeof props.properties.record_length === 'string' && typeof props.properties.loop_length === 'number', JSON.stringify(props.properties));
+    await call('set_properties', { address: looper.address, properties: { overdub_after_record: !props.properties.overdub_after_record } });
+    await call('set_properties', { address: looper.address, properties: { overdub_after_record: props.properties.overdub_after_record } });
+    await failsCode(() => call('set_properties', { address: looper.address, properties: { loop_length: 8 } }), 'INVALID_ARGUMENT');
+    for (const method of ['stop', 'clear']) assert((await call('device_action', { action: 'call', address: looper.address, method })).method === method, method);
+    const eq = await call('device_action', { action: 'insert', address: loopTrack.address, name: 'EQ Eight' });
+    const eqProps = await call('get_properties', { address: eq.address, names: ['global_mode', 'oversample', 'edit_mode'] });
+    assert(typeof eqProps.properties.oversample === 'boolean', JSON.stringify(eqProps.properties));
+    await call('set_properties', { address: eq.address, properties: { oversample: !eqProps.properties.oversample } });
+    await call('set_properties', { address: eq.address, properties: { oversample: eqProps.properties.oversample } });
+    await failsCode(() => call('device_action', { action: 'call', address: eq.address, method: 'crop' }), 'NOT_FOUND', 'no device-specific methods');
+  });
+
   console.log('\ndraw_automation');
   await check('linear ramp: readback and independent envelope values match', async () => {
     const lo = pA.min + 0.2 * (pA.max - pA.min);

@@ -3,12 +3,18 @@
 /** Classes whose properties the property engine knows about (qualified names as Live.<Module>.<Class>[.<Nested>]). */
 export const INCLUDE_CLASSES = ['Live.Song.Song', 'Live.Track.Track', 'Live.Scene.Scene', 'Live.ClipSlot.ClipSlot', 'Live.Clip.Clip', 'Live.Groove.Groove', 'Live.Clip.MidiNote',
   'Live.Song.CuePoint', 'Live.Application.Application', 'Live.RackDevice.RackDevice', 'Live.Chain.Chain', 'Live.DrumPad.DrumPad',
-  'Live.DeviceParameter.DeviceParameter', 'Live.TakeLane.TakeLane'];
+  'Live.DeviceParameter.DeviceParameter', 'Live.TakeLane.TakeLane', 'Live.Sample.Sample', 'Live.SimplerDevice.SimplerDevice',
+  'Live.WavetableDevice.WavetableDevice', 'Live.DriftDevice.DriftDevice', 'Live.MeldDevice.MeldDevice', 'Live.Eq8Device.Eq8Device', 'Live.LooperDevice.LooperDevice',
+  'Live.HybridReverbDevice.HybridReverbDevice', 'Live.RoarDevice.RoarDevice', 'Live.SpectralResonatorDevice.SpectralResonatorDevice',
+  'Live.ShifterDevice.ShifterDevice', 'Live.DrumCellDevice.DrumCellDevice', 'Live.PluginDevice.PluginDevice'];
 
 /** Enum types referenced by property overlays (an int property has no enum type of its own). */
 export const INCLUDE_ENUMS = [
   'Live.Song.Quantization', 'Live.Song.RecordingQuantization', 'Live.Clip.LaunchMode', 'Live.Clip.ClipLaunchQuantization',
-  'Live.Clip.WarpMode', 'Live.Groove.Base', 'Live.ClipSlot.ClipSlotPlayingState', 'Live.Song.SessionRecordStatus', 'Live.Device.DeviceType', 'Live.MixerDevice.MixerDevice.crossfade_assignments', 'Live.MixerDevice.MixerDevice.panning_modes', 'Live.Track.Track.monitoring_states'
+  'Live.Clip.WarpMode', 'Live.Groove.Base', 'Live.ClipSlot.ClipSlotPlayingState', 'Live.Song.SessionRecordStatus', 'Live.Device.DeviceType', 'Live.MixerDevice.MixerDevice.crossfade_assignments', 'Live.SimplerDevice.PlaybackMode', 'Live.SimplerDevice.SlicingPlaybackMode',
+  'Live.WavetableDevice.EffectMode', 'Live.WavetableDevice.FilterRouting', 'Live.WavetableDevice.ModulationSource', 'Live.WavetableDevice.UnisonMode',
+  'Live.WavetableDevice.VoiceCount', 'Live.WavetableDevice.Voicing', 'Live.Eq8Device.GlobalMode', 'Live.Sample.SlicingStyle',
+  'Live.Sample.SlicingBeatDivision', 'Live.Sample.TransientLoopMode', 'Live.MixerDevice.MixerDevice.panning_modes', 'Live.Track.Track.monitoring_states'
 ];
 
 function sortKeys(value) {

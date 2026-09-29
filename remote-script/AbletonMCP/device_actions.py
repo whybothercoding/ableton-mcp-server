@@ -4,16 +4,17 @@ rack chains, macros, variations, drum pads.
 Parameter values are written with set_properties on a parameter address; this module is for what properties cannot express.
 Live's own error messages come through unchanged (for example "Insert audio effects after instruments").
 """
+from . import device_specific
 from .helpers import _is_number, _safe_attr
 from .registry import BridgeError, command
 
 DEVICE_ACTIONS = ("insert", "delete", "duplicate", "move", "save_ab", "insert_chain", "add_macro", "remove_macro",
                   "randomize_macros", "store_variation", "recall_variation", "delete_variation", "copy_pad", "clear_pad",
-                  "re_enable_automation")
+                  "re_enable_automation", "call")
 
 
 _LABELS = {"track": "a track, return track or the master", "chain": "a rack chain", "device": "a device", "pad": "a drum pad",
-           "parameter": "a device or mixer parameter", "song": "'song'"}
+           "parameter": "a device or mixer parameter", "song": "'song'", "sample": "a Simpler sample"}
 
 
 def _position(params, name="position", default=-1):
@@ -49,6 +50,16 @@ class DeviceActionsMixin(object):
         result = {"address": canonical, "name": device.name, "class_name": device.class_name,
                   "device_type": self._get_device_type(device), "is_active": _safe_attr(device, "is_active"),
                   "parameters": [self._parameter_summary(i, p, canonical) for i, p in enumerate(device.parameters)]}
+        extras = device_specific.specs_for_device(device)
+        if extras:
+            result["specific"] = {"class": device_specific.device_kind_of(device),
+                                  "properties": sorted(n for n in extras if not n.endswith("_options")),
+                                  "options": sorted(n for n in extras if n.endswith("_options")),
+                                  "methods": device_specific.methods_for("device", device)}
+        sample = _safe_attr(device, "sample")
+        if sample is not None:
+            result["sample"] = {"address": canonical + "/sample", "properties": sorted(device_specific.specs_for_sample()),
+                                "methods": device_specific.methods_for("sample", sample)}
         if _safe_attr(device, "can_have_chains", False):
             result["chains"] = [self._chain_summary(c, "{0}/chains/{1}".format(canonical, i)) for i, c in enumerate(device.chains)]
             returns = _safe_attr(device, "return_chains")
@@ -219,6 +230,17 @@ class DeviceActionsMixin(object):
         rack.copy_pad(notes[0], notes[1])
         return {"address": canonical, "from_note": notes[0], "to_note": notes[1],
                 "to": "{0}/drum_pads/{1}".format(canonical, notes[1])}
+
+    def _do_call(self, kind, obj, canonical, params):
+        """Run one of the device-specific methods listed by get_device / list_properties (crop, record, set_modulation_value...)."""
+        self._expect(kind, ("device", "sample"), "call")
+        method = params.get("method")
+        if not isinstance(method, str) or not method:
+            offered = sorted(device_specific.methods_for(kind, obj))
+            raise BridgeError("call needs method: one of {0}".format(offered) if offered else "This object has no device-specific methods to call",
+                              "INVALID_ARGUMENT")
+        result = device_specific.call_method(self, kind, obj, canonical, method, params.get("args"))
+        return {"address": canonical, "method": method, "result": result}
 
     def _do_re_enable_automation(self, kind, obj, canonical, params):
         """Hand a parameter (or, for 'song', every parameter) back to its automation after a manual change overrode it."""
