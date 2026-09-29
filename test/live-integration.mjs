@@ -1677,6 +1677,12 @@ try {
       await call('draw_automation', { track_index: T, clip_index: S, mixer_parameter: 'send:0', points: [{ time: 0, value: 0 }, { time: 4, value: 0.5 }] });
       assert(await hasEnvelope(T, S, `${mixerExpr(T, 'sends')}[0]`), 'no send envelope');
     }
+    // These envelopes must not outlive the check: the clip is launched later, and a playing mixer envelope sweeps the track's volume and pan
+    // and can leave them at the envelope's end values (it once did, and the Set was saved that way).
+    for (const mixerParam of ['volume', 'panning', ...(sends > 0 ? ['sends/0'] : [])]) {
+      await call('clear_automation', { clip: `tracks/${T}/slots/${S}/clip`, parameter: `tracks/${T}/mixer/${mixerParam}` });
+    }
+    assert(!(await hasEnvelope(T, S, mixerExpr(T, 'volume'))) && !(await hasEnvelope(T, S, mixerExpr(T, 'panning'))), 'the mixer envelopes should be gone again');
   });
   await check('non-integer, unsorted and duplicate-time points are handled', async () => {
     const span = pA.max - pA.min;
