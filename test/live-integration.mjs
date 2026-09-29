@@ -422,17 +422,6 @@ try {
       }
       throw new Error(`${JSON.stringify(params)} should have failed`);
     }
-    // toggle_cue twice restores the cue list only while the playhead is still (it toggles at the playhead)
-    if (!(await call('eval', { code: 'self._song.is_playing' }))) {
-      const cues = () => call('eval', { code: 'len(self._song.cue_points)' });
-      const n = await cues();
-      const first = await call('transport', { action: 'toggle_cue' });
-      assert((await cues()) === n + 1 && first.action === 'toggle_cue', 'toggle_cue should add a cue point');
-      await call('transport', { action: 'toggle_cue' });
-      assert((await cues()) === n, 'the second toggle should remove it');
-    } else {
-      console.log('       transport is playing: cue toggle skipped (it acts at the moving playhead)');
-    }
     if (!(await call('eval', { code: 'self._song.can_jump_to_next_cue' }))) {
       try {
         await call('transport', { action: 'next_cue' });
@@ -724,6 +713,7 @@ try {
     assert((await call('clip_action', { address: launchClip, action: 'move_playing_pos', amount: 0.25 })).is_playing === true, 'move_playing_pos');
     await call('launch', { address: lt, action: 'stop', quantized: false });
   });
+  if (!transportWasPlaying) await call('transport', { action: 'stop' });     // launching a scratch clip starts the transport: put it back, so later checks see the state the run began in
   await check('grooves: a clip always has one, addressed as grooves/N; assignment and parameters round-trip and are restored', async () => {
     const pool = await call('eval', { code: 'len(self._song.groove_pool.grooves)' });
     if (pool === 0) {
@@ -869,45 +859,42 @@ try {
 
   console.log('\nCue points, application and read-only state');
   const isPlaying = () => call('eval', { code: 'bool(self._song.is_playing)' });
-  await check('cue points: create at a time, list, rename, jump, delete; the playhead is put back', async () => {
+  await check('cue points: toggle on the insert marker, list, rename, jump, toggle off; create/delete are refused', async () => {
+    await rejectsCode(() => call('create', { kind: 'cue_point', time: 1 }), 'UNAVAILABLE');
+    const before = (await call('describe_set')).cue_points;
     if (await isPlaying()) {
-      console.log('       transport is playing: cue point creation needs it stopped, skipped');
+      console.log('       transport is playing: the cue toggle acts at the moving playhead, skipped');
       return;
     }
-    const cuesBefore = (await call('describe_set')).cue_points.length;
+    if (before.length > 0) {
+      // toggling could remove one of the user's own cues (and lose its name), so only read, and jump to the first
+      console.log('       the Set already has cue points: toggle skipped, jump only');
+      const playhead = await call('eval', { code: 'self._song.current_song_time' });
+      await call('launch', { address: before[0].address });
+      assert(Math.abs((await call('eval', { code: 'self._song.current_song_time' })) - before[0].time) < 1e-3, 'launching a cue point should jump the playhead to it');
+      await call('set_properties', { address: 'song', properties: { current_song_time: playhead } });
+      return;
+    }
     const playhead = await call('eval', { code: 'self._song.current_song_time' });
-    const time = 54321;
-    const made = await call('create', { kind: 'cue_point', time, name: 'MCP TEST CUE' });
-    const cuePtr = await call('eval', { code: `self._resolve(${JSON.stringify(made.address)})[1].time` });
+    const cues = () => call('eval', { code: 'len(self._song.cue_points)' });
     cleanupsRegistry.push(async () => {
-      const found = (await call('describe_set')).cue_points.find((c) => c.time === time);
-      if (found) await call('delete', { address: found.address, expect: { name: found.name } });
+      if ((await cues()) === 1) await call('transport', { action: 'toggle_cue' });
       await call('set_properties', { address: 'song', properties: { current_song_time: playhead } });
     });
-    assert(cuePtr === time && made.name === 'MCP TEST CUE' && made.time === time, JSON.stringify(made));
-    near(await call('eval', { code: 'self._song.current_song_time' }), playhead, 1e-6, 'the playhead must be put back after creating');
+    const added = await call('transport', { action: 'toggle_cue' });
+    assert(added.action === 'toggle_cue' && (await cues()) === 1, 'toggle_cue should add exactly one cue point');
     const listed = (await call('describe_set')).cue_points;
-    assert(listed.length === cuesBefore + 1 && listed.some((c) => c.name === 'MCP TEST CUE' && c.time === time), JSON.stringify(listed));
-    await call('set_properties', { address: made.address, properties: { name: 'MCP TEST CUE 2' } });
-    assert((await call('get_properties', { address: made.address })).properties.name === 'MCP TEST CUE 2', 'rename');
-    await call('launch', { address: made.address });
-    assert(Math.abs((await call('eval', { code: 'self._song.current_song_time' })) - time) < 1e-3, 'launching a cue point should jump the playhead to it');
+    assert(listed.length === 1 && listed[0].address === 'cue_points/0', JSON.stringify(listed));
+    await call('set_properties', { address: 'cue_points/0', properties: { name: 'MCP TEST CUE' } });
+    assert((await call('get_properties', { address: 'cue_points/0' })).properties.name === 'MCP TEST CUE', 'rename');
+    await rejectsCode(() => call('delete', { address: 'cue_points/0', expect: { name: 'Not This One' } }), 'GUARD_FAILED');
+    await rejectsCode(() => call('delete', { address: 'cue_points/0', expect: { name: 'MCP TEST CUE' } }), 'UNAVAILABLE');
+    assert((await cues()) === 1, 'a refused delete must leave the cue point alone');
+    await call('launch', { address: 'cue_points/0' });
+    assert(Math.abs((await call('eval', { code: 'self._song.current_song_time' })) - listed[0].time) < 1e-3, 'launching a cue point should jump the playhead to it');
+    await call('transport', { action: 'toggle_cue' });      // still on the marker the cue was made at, so this removes it
+    assert((await cues()) === 0, 'the second toggle should remove the cue point');
     await call('set_properties', { address: 'song', properties: { current_song_time: playhead } });
-    await rejectsCode(() => call('create', { kind: 'cue_point', time }), 'INVALID_ARGUMENT');
-    await rejectsCode(() => call('delete', { address: made.address, expect: { name: 'Not This One' } }), 'GUARD_FAILED');
-    const removed = await call('delete', { address: made.address, expect: { name: 'MCP TEST CUE 2' } });
-    assert(removed.cue_points === cuesBefore, JSON.stringify(removed));
-    near(await call('eval', { code: 'self._song.current_song_time' }), playhead, 1e-6, 'the playhead must be put back after deleting');
-    await call('history', { action: 'undo' });
-    assert((await call('describe_set')).cue_points.length === cuesBefore + 1, 'one undo should bring the deleted cue point back');
-    await call('delete', { address: (await call('describe_set')).cue_points.find((c) => c.time === time).address, expect: { name: 'MCP TEST CUE 2' } });
-  });
-  await check('cue point creation refuses a running transport', async () => {
-    if (!(await isPlaying())) {
-      console.log('       transport is stopped: skipped (needs a playing transport)');
-      return;
-    }
-    await rejectsCode(() => call('create', { kind: 'cue_point', time: 54322 }), 'UNAVAILABLE');
   });
   await check('the application reports CPU load, and read-only Song state is readable but not writable', async () => {
     const app = await call('get_properties', { address: 'app' });

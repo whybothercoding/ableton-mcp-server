@@ -2022,6 +2022,7 @@ class CueTests(unittest.TestCase):
         self.addCleanup(self.script._stop_server)
         song = make_song()
         song.is_playing, song.current_song_time, song.can_jump_to_next_cue = False, 6.5, True
+        song.song_length = 64.0
         song.cue_points = [FakeCue("Intro", 0.0), FakeCue("Chorus", 16.0)]
         self.times_seen = []
 
@@ -2053,30 +2054,16 @@ class CueTests(unittest.TestCase):
         self.assertEqual(self.run_command("set_properties", {"address": "cue_points/0", "properties": {"time": 3.0}})["code"], "INVALID_ARGUMENT")
         self.assertEqual(self.run_command("get_properties", {"address": "cue_points/7"})["code"], "OUT_OF_RANGE")
 
-    def test_create_a_cue_point_sets_it_at_a_time_and_puts_the_playhead_back(self):
-        made = self.run_command("create", {"kind": "cue_point", "time": 8, "name": "Verse"})["result"]
-        self.assertEqual((made["address"], made["name"], made["time"], made["kind"]), ("cue_points/1", "Verse", 8.0, "cue_point"))
-        self.assertEqual(self.times_seen, [8.0])
-        self.assertEqual(self.song.current_song_time, 6.5)
-        self.assertEqual([c.name for c in self.song.cue_points], ["Intro", "Verse", "Chorus"])
-
-    def test_create_a_cue_point_refuses_bad_requests_and_leaves_the_playhead_alone(self):
-        for params, code in [({"kind": "cue_point"}, "INVALID_ARGUMENT"), ({"kind": "cue_point", "time": -1}, "INVALID_ARGUMENT"),
-                             ({"kind": "cue_point", "time": "8"}, "INVALID_ARGUMENT"), ({"kind": "cue_point", "time": 16}, "INVALID_ARGUMENT"),
-                             ({"kind": "cue_point", "time": 4, "color": 5}, "INVALID_ARGUMENT")]:
-            self.assertEqual(self.run_command("create", params)["code"], code, params)
-        self.song.is_playing = True
-        self.assertEqual(self.run_command("create", {"kind": "cue_point", "time": 4})["code"], "UNAVAILABLE")
-        self.assertEqual((len(self.song.cue_points), self.song.current_song_time, self.times_seen), (2, 6.5, []))
-
-    def test_delete_a_cue_point_needs_the_guard_and_a_stopped_transport(self):
+    def test_creating_or_deleting_a_cue_point_is_refused_and_touches_nothing(self):
+        # Live's set_or_delete_cue acts at the arrangement insert marker (UI state), never at a time we can choose
+        for params in ({"kind": "cue_point", "time": 8}, {"kind": "cue_point"}):
+            got = self.run_command("create", params)
+            self.assertEqual(got["code"], "UNAVAILABLE", params)
+            self.assertIn("insert marker", got["message"])
+        got = self.run_command("delete", {"address": "cue_points/1", "expect": {"name": "Chorus"}})
+        self.assertEqual((got["code"], "insert marker" in got["message"]), ("UNAVAILABLE", True))
         self.assertEqual(self.run_command("delete", {"address": "cue_points/1", "expect": {"name": "Nope"}})["code"], "GUARD_FAILED")
-        out = self.run_command("delete", {"address": "cue_points/1", "expect": {"name": "Chorus"}})["result"]
-        self.assertEqual((out["deleted"], out["cue_points"]), ("cue_points/1", 1))
-        self.assertEqual((self.times_seen, self.song.current_song_time), ([16.0], 6.5))
-        self.song.is_playing = True
-        self.assertEqual(self.run_command("delete", {"address": "cue_points/0", "expect": {"name": "Intro"}})["code"], "UNAVAILABLE")
-        self.assertEqual(len(self.song.cue_points), 1)
+        self.assertEqual(([c.name for c in self.song.cue_points], self.song.current_song_time, self.times_seen), (["Intro", "Chorus"], 6.5, []))
 
     def test_launching_a_cue_point_jumps_and_cannot_be_stopped(self):
         self.assertEqual(self.run_command("launch", {"address": "cue_points/1"})["status"], "success")
@@ -2087,11 +2074,17 @@ class CueTests(unittest.TestCase):
         self.script._song.scenes = [PropScene("S")]
         before = self.run_command("describe_set", {})["result"]
         self.assertEqual([(c["address"], c["name"], c["time"]) for c in before["cue_points"]], [("cue_points/0", "Intro", 0.0), ("cue_points/1", "Chorus", 16.0)])
-        self.run_command("create", {"kind": "cue_point", "time": 4})
+        self.song.set_or_delete_cue()
         after = self.run_command("describe_set", {})["result"]
         self.assertNotEqual(before["fingerprint"], after["fingerprint"])
-        self.run_command("delete", {"address": "cue_points/1", "expect": {"name": ""}})
+        self.song.set_or_delete_cue()
         self.assertEqual(self.run_command("describe_set", {})["result"]["fingerprint"], before["fingerprint"])
+
+    def test_toggle_cue_calls_live_without_moving_the_playhead(self):
+        self.song.can_undo = self.song.can_redo = False
+        got = self.run_command("transport", {"action": "toggle_cue"})
+        self.assertEqual(got["status"], "success")
+        self.assertEqual((self.times_seen, self.song.current_song_time), ([6.5], 6.5))
 
     def test_the_application_is_addressable_and_read_only(self):
         got = self.run_command("get_properties", {"address": "app", "names": ["average_process_usage", "open_dialog_count"]})["result"]

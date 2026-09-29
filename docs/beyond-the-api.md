@@ -18,5 +18,6 @@ go/no-go decision. Re-check after Live updates (`npm run test:drift` shows what 
 | Arrangement tempo / time-signature automation | **NO-GO** | Not in the API. |
 | MPE per-note data | **NO-GO** | `apply_note_modifications` preserves it but it cannot be read or written. |
 | Browser search | **GO, built** | `browse search` over an index the MCP server builds with the chunked `browser_walk`. |
+| Create / delete a cue point at a chosen time | **NO-GO** | `Song.set_or_delete_cue` toggles at the arrangement insert marker, which is UI state: setting `current_song_time` (refused beyond the song length, and ignored by the toggle while stopped) does not move it, so a cue lands wherever the user last clicked. Reading, renaming and jumping to cue points works; a first attempt to create them by moving the playhead put a stray cue at the wrong place in a real Set. |
 | Groove pool contents | **NO-GO** | Existing grooves can be assigned and edited, but none can be added through the API. |
 | A Max for Live helper device as a second bridge | **Deferred** | Would reach Live Object Model corners the Python API lacks; large, and only worth it for a concrete missing feature. |

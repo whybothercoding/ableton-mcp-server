@@ -329,7 +329,7 @@ PROPERTY_SPECS = {
     "sample": {},          # a Simpler's sample: its properties come from the Sample class (device_specific)
     "cue": {
         "name": _spec("str"),
-        "time": _spec("float", RO, doc="Position in beats; create a cue point with `create` at a time"),
+        "time": _spec("float", RO, doc="Position in beats"),
     },
     "app": {
         "average_process_usage": _spec("float", RO, doc="CPU load, average"),

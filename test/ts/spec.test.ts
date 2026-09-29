@@ -169,7 +169,7 @@ test('tools folded into the verb tools are no longer advertised', () => {
     'bulk_set_device_parameters', 'bulk_edit_clips', 'load_browser_item', 'get_browser_tree', 'get_browser_items', 'get_audio_clip_path', 'get_track_detail'];
   const names = new Set(TOOLS.map((t) => t.name));
   for (const name of retired) assert.ok(!names.has(name), `${name} should be retired`);
-  assert.deepEqual(TOOL_SPEC_BY_NAME.create.inputSchema.properties.kind.enum, ['audio_track', 'midi_track', 'return_track', 'scene', 'midi_clip', 'audio_clip', 'arrangement_midi_clip', 'arrangement_audio_clip', 'take_lane', 'cue_point']);
+  assert.deepEqual(TOOL_SPEC_BY_NAME.create.inputSchema.properties.kind.enum, ['audio_track', 'midi_track', 'return_track', 'scene', 'midi_clip', 'audio_clip', 'arrangement_midi_clip', 'arrangement_audio_clip', 'take_lane']);
 });
 
 test('device tools: schemas and risk annotations', () => {

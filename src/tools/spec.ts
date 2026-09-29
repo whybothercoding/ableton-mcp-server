@@ -119,7 +119,7 @@ export const TOOL_SPECS: ToolSpec[] = [
     name: 'transport',
     description:
       "Transport and playhead actions: play, continue, stop, stop_all_clips, tap_tempo, jump_by (needs `amount`: beats, negative jumps back), " +
-      "next_cue / prev_cue (jump to a cue point), toggle_cue (add or remove a cue point at the playhead), capture_midi (keep recently played MIDI) and " +
+      "next_cue / prev_cue (jump to a cue point), toggle_cue (add or remove a cue point at the playhead while playing, or at the arrangement insert marker while stopped, which only the user controls), capture_midi (keep recently played MIDI) and " +
       "capture_and_insert_scene. Returns the resulting transport state. To change tempo or loop settings use set_properties on 'song'. " +
       "For undo/redo use the history tool.",
     inputSchema: {
@@ -157,19 +157,19 @@ export const TOOL_SPECS: ToolSpec[] = [
   {
     name: 'create',
     description:
-      "Create a track, return track, scene, MIDI clip, audio clip or cue point and get back its address. kind: audio_track, midi_track, return_track (always appended), scene, audio_clip (`address` of an EMPTY slot on an audio track and `path`: an absolute path to an audio file; it is auto-warped by Live's settings and the result reports its length), " +
+      "Create a track, return track, scene, MIDI clip, audio clip, arrangement clip or take lane and get back its address. kind: audio_track, midi_track, return_track (always appended), scene, audio_clip (`address` of an EMPTY slot on an audio track and `path`: an absolute path to an audio file; it is auto-warped by Live's settings and the result reports its length), " +
       "arrangement_midi_clip (`address` of a track or take lane, `time` in beats on the timeline, `length` default 4) and arrangement_audio_clip (`address`, `time`, `path`), take_lane (`address` of a track), midi_clip " +
-      "(`address` of an EMPTY clip slot like 'tracks/2/slots/0', `length` in beats, default 4) or cue_point (`time` in beats; the transport must be stopped: Live sets cue points at the playhead, which is put back afterwards). For tracks and scenes `index` is the insertion position (0-based; omit or -1 to append; existing objects shift, so re-read addresses afterwards). " +
+      "(`address` of an EMPTY clip slot like 'tracks/2/slots/0', `length` in beats, default 4). Cue points cannot be created (Live only toggles them at the arrangement insert marker, which is UI state). For tracks and scenes `index` is the insertion position (0-based; omit or -1 to append; existing objects shift, so re-read addresses afterwards). " +
       "Optional `name` and `color` (RGB integer; Live snaps it to the nearest palette colour and the result reports the colour it applied) are applied immediately. One undo step.",
     inputSchema: {
       type: 'object',
       properties: {
-        kind: { type: 'string', enum: ['audio_track', 'midi_track', 'return_track', 'scene', 'midi_clip', 'audio_clip', 'arrangement_midi_clip', 'arrangement_audio_clip', 'take_lane', 'cue_point'], description: 'What to create' },
+        kind: { type: 'string', enum: ['audio_track', 'midi_track', 'return_track', 'scene', 'midi_clip', 'audio_clip', 'arrangement_midi_clip', 'arrangement_audio_clip', 'take_lane'], description: 'What to create' },
         index: { type: 'number', description: 'Insertion position, -1 (default) appends' },
         address: { type: 'string', description: "midi_clip, audio_clip: the empty clip slot to fill, e.g. 'tracks/2/slots/0'" },
         path: { type: 'string', description: 'audio_clip: absolute path of the audio file' },
         length: { type: 'number', description: 'midi_clip: length in beats (default 4)' },
-        time: { type: 'number', description: 'cue_point and arrangement clips: position in beats' },
+        time: { type: 'number', description: 'arrangement clips: position in beats' },
         name: { type: 'string', description: 'Name to give it' },
         color: { type: 'number', description: 'RGB color integer' }
       },
@@ -194,7 +194,7 @@ export const TOOL_SPECS: ToolSpec[] = [
   {
     name: 'delete',
     description:
-      "Delete a track ('tracks/N'), return track ('returns/N'), scene ('scenes/N'), clip ('tracks/N/slots/M/clip' or an arrangement clip 'tracks/N/arrangement/M') or cue point ('cue_points/N'; transport must be stopped). DESTRUCTIVE (one undo step brings it back). " +
+      "Delete a track ('tracks/N'), return track ('returns/N'), scene ('scenes/N'), clip ('tracks/N/slots/M/clip' or an arrangement clip 'tracks/N/arrangement/M'); cue points cannot be deleted (Live only toggles them at the arrangement insert marker). DESTRUCTIVE (one undo step brings it back). " +
       "`expect` is mandatory: {\"name\": <the object's current name>}. Indices shift after every create/delete, so read the object first; if its name no longer matches, " +
       "nothing is deleted (GUARD_FAILED). The master track cannot be deleted, and a Set always keeps at least one scene.",
     inputSchema: {
