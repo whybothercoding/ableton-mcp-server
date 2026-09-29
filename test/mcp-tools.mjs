@@ -282,6 +282,24 @@ try {
     await ok('edit_notes', { address: clipAddress, action: 'remove', ids: written.ids });
     assert((await ok('get_notes', { address: clipAddress })).count === before, 'the scratch note should be gone');
   });
+  await check('composition tools are listed with their catalogues and destructive annotations', async () => {
+    for (const name of ['transform_notes', 'generate_notes']) {
+      assert(byName[name].annotations.destructiveHint === true && byName[name].annotations.readOnlyHint === false, `${name} annotations`);
+      assert(byName[name].description.length > 1500, `${name} should list its transforms/generators`);
+    }
+    assert(byName.transform_notes.inputSchema.properties.transform.enum.includes('arpeggiate'), 'transform enum');
+    assert(byName.generate_notes.inputSchema.properties.generator.enum.includes('chord_progression'), 'generator enum');
+  });
+  await check('composition tools preview on the scratch clip, refuse bad calls readably, and write nothing on a dry run', async () => {
+    const before = (await ok('get_notes', { address: clipAddress })).count;
+    const dry = await ok('generate_notes', { address: clipAddress, generator: 'euclidean', params: { pulses: 5, steps: 16 }, dry_run: true });
+    assert(dry.dry_run === true && dry.notes === 5, JSON.stringify(dry).slice(0, 160));
+    assert((await ok('get_notes', { address: clipAddress })).count === before, 'a dry run wrote notes');
+    await fails('generate_notes', { address: clipAddress, generator: 'jazz' }, 'generator must be one of: euclidean');
+    await fails('generate_notes', { address: clipAddress, generator: 'euclidean', params: {} }, 'pulses must be given');
+    await fails('transform_notes', { address: clipAddress, transform: 'transpose', params: { semitones: 2 } }, 'no notes in that selection');
+    await fails('transform_notes', { address: `tracks/${T}`, transform: 'transpose', params: { semitones: 2 } }, 'address must be a clip');
+  });
   await check('argument problems are caught in TypeScript with a readable message', async () => {
     await fails('get_properties', {}, "missing required argument 'address'");
     await fails('get_properties', { address: 5 }, 'address must be a string');

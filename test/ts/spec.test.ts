@@ -26,7 +26,9 @@ test('tool names are unique', () => {
 test('every declarative spec maps to a command the Remote Script registers', () => {
   const commands = pythonCommands();
   assert.ok(commands.size > 40);
-  for (const spec of TOOL_SPECS) assert.ok(commands.has(spec.bridge.command), `${spec.name} -> ${spec.bridge.command} is not registered`);
+  for (const spec of TOOL_SPECS) {
+    for (const command of [spec.bridge.command, ...(spec.requires ?? [])]) assert.ok(commands.has(command), `${spec.name} -> ${command} is not registered`);
+  }
 });
 
 test('every legacy tool that names a required capability names a registered command', () => {

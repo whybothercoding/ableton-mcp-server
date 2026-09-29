@@ -1,3 +1,5 @@
+import { COMPOSITION_SPECS } from './composition.js';
+
 /**
  * Declarative tool specs: a tool's schema, MCP annotations and bridge mapping live in one place.
  * Legacy tools are still handled by the switch in handlers.ts and migrate here as their replacements land.
@@ -8,6 +10,11 @@ export interface ToolAnnotations {
   destructiveHint?: boolean;
   idempotentHint?: boolean;
   openWorldHint?: boolean;
+}
+
+/** What a composed tool needs from the bridge: send one command, get its result (AbletonClient satisfies this). */
+export interface BridgeClient {
+  sendCommand<T = any>(type: string, params?: Record<string, any>): Promise<T>;
 }
 
 export interface ToolSpec {
@@ -21,6 +28,10 @@ export interface ToolSpec {
     /** Maps tool arguments to bridge params. Defaults to passing the arguments through unchanged. */
     params?: (args: Record<string, any>) => Record<string, any>;
   };
+  /** More commands a composed tool uses (checked like bridge.command). */
+  requires?: string[];
+  /** Tools that combine several bridge calls (or run code of their own) provide this instead of a single pass-through call. */
+  run?: (args: Record<string, any>, client: BridgeClient) => Promise<unknown>;
 }
 
 const isPlainObject = (v: unknown): v is Record<string, unknown> => typeof v === 'object' && v !== null && !Array.isArray(v);
@@ -382,7 +393,8 @@ export const TOOL_SPECS: ToolSpec[] = [
     },
     annotations: { readOnlyHint: true, destructiveHint: false, idempotentHint: true },
     bridge: { command: 'list_properties' }
-  }
+  },
+  ...COMPOSITION_SPECS
 ];
 
 export const TOOL_SPEC_BY_NAME: Record<string, ToolSpec> = Object.fromEntries(TOOL_SPECS.map((s) => [s.name, s]));

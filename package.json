@@ -19,7 +19,8 @@
     "test:ts": "node --import tsx --test test/ts/*.test.ts",
     "dump-api": "node scripts/dump-api.mjs",
     "build-registry": "node scripts/build-registry.mjs",
-    "test:drift": "node scripts/dump-api.mjs --check"
+    "test:drift": "node scripts/dump-api.mjs --check",
+    "test:scenarios": "node test/scenarios/composition.mjs"
   },
   "keywords": [
     "mcp",

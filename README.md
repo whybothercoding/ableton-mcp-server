@@ -128,6 +128,7 @@ Most tools take an **address** (`song`, `tracks/N`, `tracks/N/slots/M/clip`, `gr
 | Structure | `create`, `duplicate`, `delete` (needs `expect`) |
 | Play | `transport`, `launch`, `history` (undo/redo) |
 | Clips and notes | `clip_action`, `get_notes`, `write_notes`, `edit_notes`, `bulk_edit_clips` |
+| Compose | `generate_notes`, `transform_notes` |
 | Devices and sound | `set_device_parameter`, `bulk_set_device_parameters`, `load_browser_item`, `draw_automation`, `clear_automation`, `ramp_parameter`, `cancel_ramps` |
 | Development | `eval_python` (gated) |
 
@@ -176,6 +177,13 @@ Targets are `device_index` (or `device_path`) + `parameter_index`, or `mixer_par
 - `get_notes`: every field Live stores for each note (`id`, `pitch`, `start_time`, `duration` in beats, `velocity` 1-127, `mute`, `probability` 0-1, `velocity_deviation` -127..127, `release_velocity` 0-127), sorted by time then pitch. Filter by range (`from_time`/`time_span`/`from_pitch`/`pitch_span`), `ids` or `selected`; `limit` (default 2000) caps the answer and `truncated` says if more exist. MIDI clips only.
 - `write_notes`: additive. Every note is validated before anything is written, so one bad note rejects the whole call (max 5000 notes). Returns the new ids and the clip's real `note_count`: Live never lets notes of one pitch overlap, so a new note shortens an earlier note that runs into it and one at exactly the same start time replaces it.
 - `edit_notes` (destructive, one undo step): `modify` (`changes: [{id, ...fields}]` or `ids` + `set`; goes through Live's `apply_note_modifications`, which keeps note ids and per-note events), `remove` (exactly one of `ids`, a range, `all: true`), `replace` (swap the notes in a range, or all, for `notes` in one step; if Live refuses the new notes the old ones are put back), `duplicate` (`ids`, `destination_time`, `transposition`), `duplicate_region`, `select` (`ids`, `all`, `none`). Ids that are not in the clip are refused (`NOT_FOUND`) with nothing changed.
+
+#### Composition: generate_notes and transform_notes
+The music logic is pure TypeScript in `src/music` (no Live needed to test it); the two tools read notes, run it, and write the result back in **one undo step**. Times are beats (quarter notes); rates are numbers or strings like `1/16`, `1/8t` (triplet), `1/4d` (dotted); keys are text like `C minor`, `F# dorian`, `Bb major pentatonic`; pitches are numbers or Ableton note names (**C3 = 60**); `seed` makes random choices repeatable. Every call accepts `dry_run` (preview only) and `expect` (clip name guard), and unknown parameters are refused.
+
+- `generate_notes` (`address` of a MIDI clip, `generator`, `params`, `start_time`, `mode`): **euclidean** (evenly spread hits, with layers for several drums), **drum_pattern** (step strings per drum: `x` hit, `X` accent, `o` ghost, `.` rest), **chord_progression** (roman numerals in a key, or chord symbols like `Am7`; voice leading, voicings, block/strum/arp/pulse/offbeat styles, optional bass), **bassline** (follows the chords: root, root+fifth, octaves, walking), **melody** (seeded random walk inside a scale with contour, rests and a tonic resolution), **scale_run**, **random_notes**. `mode` is `add` (default), `replace_span` or `replace_all`. If the music runs past the clip's loop end the result carries a `warning`.
+- `transform_notes` (`address`, `transform`, `params`, optional selection by range `from_time`/`time_span`/`from_pitch`/`pitch_span` or by `ids`): **in-place** transforms keep note ids and per-note settings (transpose by semitones or scale degrees, fit_to_scale, invert, reverse, stretch, shift, humanize, swing, quantize, legato, gate, velocity_shape, strum, recombine); **rebuilds** replace the selected range in one atomic step (arpeggiate, chop, trill); **additions** keep the notes and add more (stack, grace_notes, repeat). A transform that would push notes outside 0-127 or before beat 0 refuses and changes nothing.
+- The full parameter list of every generator and transform is in the tool descriptions. `npm run test:scenarios` composes, transforms, undoes and cleans up on a scratch track through MCP only.
 
 #### Set structure, capabilities, transport and history
 - `describe_set`: a compact map of the whole Set (song settings, every track/return/master with address, kind, mixer state, devices and clips, every scene). Each track has a `hash`, and the Set a `fingerprint`, that change only when the Set really changes (playhead, play state and meters are ignored), so a client can detect edits by comparing fingerprints and see which track changed by comparing hashes. `include_clips: false` gives a lighter summary. The live test suite uses the fingerprint as an invariant: it must be identical before and after a run.
@@ -242,6 +250,7 @@ Not covered: device properties Live keeps outside `parameters` (Wavetable's osci
 npm test            # offline: Remote Script logic against a mocked Live API (no Live needed)
 npm run test:live   # integration: a running Live with AbletonMCP enabled
 npm run test:mcp    # MCP layer: tool schemas, handlers and errors over stdio (needs Live)
+npm run test:scenarios  # end-to-end composition scenario through MCP tools only (needs Live)
 ```
 
 ### Live API reference and drift

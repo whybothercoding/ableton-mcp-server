@@ -2,6 +2,7 @@ import { CallToolResult } from '@modelcontextprotocol/sdk/types.js';
 import { AbletonClient, AbletonClientError } from '../client/AbletonClient.js';
 import { analyzeAudioFile } from '../audio/analyzer.js';
 import { GATED_TOOLS, isToolEnabled } from './definitions.js';
+import { CompositionError } from './composition.js';
 import { TOOL_SPEC_BY_NAME, validateArgs } from './spec.js';
 
 /** Copies only the fields the caller supplied, so absent optionals stay absent (Number(undefined) would send NaN). */
@@ -47,7 +48,10 @@ export class ToolHandler {
           return { content: [{ type: 'text', text: `Invalid arguments for '${toolName}': ${problem}` }], isError: true };
         }
         this.client.ensureCapability(spec.bridge.command);
-        resultData = await this.client.sendCommand(spec.bridge.command, spec.bridge.params ? spec.bridge.params(args) : args);
+        for (const required of spec.requires ?? []) this.client.ensureCapability(required);
+        resultData = spec.run
+          ? await spec.run(args, this.client)
+          : await this.client.sendCommand(spec.bridge.command, spec.bridge.params ? spec.bridge.params(args) : args);
         return { content: [{ type: 'text', text: JSON.stringify(resultData, null, 2) }] };
       }
 
@@ -245,7 +249,7 @@ export class ToolHandler {
       };
     } catch (err: any) {
       const errorMessage =
-        err instanceof AbletonClientError
+        err instanceof AbletonClientError || err instanceof CompositionError
           ? err.message
           : `Unexpected error executing tool '${toolName}': ${err.message}`;
 
