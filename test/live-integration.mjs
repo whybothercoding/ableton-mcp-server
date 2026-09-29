@@ -99,6 +99,13 @@ const snapshots = [pA, pB].map((p) => ({ ...p }));
 const cleanupsRegistry = []; // undo actions registered by tests that change the set, run in reverse in the finally block
 const setBefore = await call('describe_set');
 console.log(`Set fingerprint before the run: ${setBefore.fingerprint}`);
+// What is playing is not part of the fingerprint, so it gets its own before/after comparison (the run must leave the user's playback alone)
+const playbackNow = () => call('eval', {
+  code: "{'playing': bool(self._song.is_playing), 'tempo': self._song.tempo, 'time': None if self._song.is_playing else round(self._song.current_song_time, 3), " +
+        "'clips': [[i, j] for i, t in enumerate(self._song.tracks) for j, s in enumerate(t.clip_slots) if s.has_clip and s.clip.is_playing]}"
+});
+const playbackBefore = await playbackNow();
+console.log(`Transport ${playbackBefore.playing ? 'playing' : 'stopped'} at ${playbackBefore.tempo} BPM, ${playbackBefore.clips.length} clips playing`);
 await call('create_clip', { track_index: T, clip_index: S, length: 4, name: 'MCP TEST' });
 const CLIP_BEATS = 4;
 const sendA = { track_index: T, device_index: D, parameter_index: pA.index };
@@ -1795,20 +1802,28 @@ try {
     assert(cancelled.cancelled === 1 && cancelled.active_ramps === 0, JSON.stringify(cancelled));
     await call('set_device_parameter', { ...sendA, value: pA.value });
   });
-  await check('re_enable_automation hands an overridden parameter back to its clip automation (only when it is overridden)', async () => {
-    const isPlaying = await call('eval', { code: 'bool(self._song.is_playing)' });
+  await check('re_enable_automation hands an overridden parameter back to its clip automation (a write while the clip plays overrides it)', async () => {
+    const stateOf = async () => (await call('get_properties', { address: autoParam, names: ['automation_state'] })).properties.automation_state;
+    const songCanReEnable = async () => (await call('get_properties', { address: 'song', names: ['re_enable_automation_enabled'] })).properties.re_enable_automation_enabled;
     await call('draw_automation', { clip: autoClip, parameter: autoParam, points: [{ time: 0, value: pA.min + 0.3 * spanA }, { time: 4, value: pA.min + 0.6 * spanA }] });
-    const state = (await call('get_properties', { address: autoParam, names: ['automation_state'] })).properties.automation_state;
-    if (state !== 2) {
-      try {
-        await call('device_action', { action: 're_enable_automation', address: autoParam });
-        throw new Error('re_enable_automation should refuse a parameter that is not overridden');
-      } catch (err) {
-        assert(err.bridgeCode === 'UNAVAILABLE', `${err.bridgeCode}: ${err.message}`);
-      }
-    }
-    console.log(`       parameter automation_state ${state} (${isPlaying ? 'playing' : 'stopped'}): the override path needs a manual change during playback`);
+    await rejectsCode(() => call('device_action', { action: 're_enable_automation', address: autoParam }), 'UNAVAILABLE');   // nothing overrides it yet
+    cleanupsRegistry.push(async () => {
+      await call('launch', { address: autoClip, action: 'stop', quantized: false }).catch(() => {});
+      await call('device_action', { action: 're_enable_automation', address: 'song' }).catch(() => {});
+    });
+    await call('launch', { address: autoClip, quantized: false });
+    assert(await waitFor(async () => (await stateOf()) === 1, 8000), 'the clip automation should take the parameter over once the clip plays');
+    assert(!(await songCanReEnable()), 'nothing is overridden yet');
+    await call('set_properties', { address: autoParam, properties: { value: pA.min + 0.9 * spanA } });   // a write while the automation plays is an override
+    assert((await stateOf()) === 2 && (await songCanReEnable()), 'a write during playback should override the clip automation');
+    await call('device_action', { action: 're_enable_automation', address: autoParam });
+    assert((await stateOf()) === 1 && !(await songCanReEnable()), 're_enable_automation on the parameter should hand it back to the clip');
+    await call('ramp_parameter', { parameter: autoParam, from: pA.min + 0.9 * spanA, to: pA.min + 0.95 * spanA, seconds: 0.3 });
+    assert(await waitFor(async () => (await stateOf()) === 2, 2000), 'a ramp should override it too');
+    await sleep(400);
     await call('device_action', { action: 're_enable_automation', address: 'song' });
+    assert((await stateOf()) === 1 && !(await songCanReEnable()), 're_enable_automation on the song should hand back everything');
+    await call('launch', { address: autoClip, action: 'stop', quantized: false });
     await call('clear_automation', { clip: autoClip });
   });
 
@@ -2231,6 +2246,18 @@ try {
     if (JSON.stringify(setBefore.scenes) !== JSON.stringify(setAfter.scenes)) changed.push('scenes');
     if (JSON.stringify(setBefore.song) !== JSON.stringify(setAfter.song)) changed.push('song settings');
     throw new Error(`the run left the Set changed: ${changed.join(', ') || 'unknown difference'}`);
+  });
+  await check('playback is exactly as it was before this run (transport, tempo, playhead when stopped, playing clips)', async () => {
+    let now = await playbackNow();
+    if (!playbackBefore.playing && !now.playing && now.time !== playbackBefore.time) {       // stopping the scratch clips sends a stopped transport back to 0
+      await call('set_properties', { address: 'song', properties: { current_song_time: playbackBefore.time } });
+      for (let i = 0; i < 40; i += 1) {                                                          // a stopped transport applies the new position a moment later
+        now = await playbackNow();
+        if (now.time === playbackBefore.time) break;
+        await sleep(50);
+      }
+    }
+    assert(JSON.stringify(now) === JSON.stringify(playbackBefore), `before ${JSON.stringify(playbackBefore)}, after ${JSON.stringify(now)}`);
   });
 }
 
