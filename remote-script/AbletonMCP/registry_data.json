@@ -1239,6 +1239,15 @@
    "gb_sixteen_triplet": 4,
    "gb_thirtytwo": 5
   },
+  "Live.MixerDevice.MixerDevice.crossfade_assignments": {
+   "A": 0,
+   "B": 2,
+   "NONE": 1
+  },
+  "Live.MixerDevice.MixerDevice.panning_modes": {
+   "stereo": 0,
+   "stereo_split": 1
+  },
   "Live.Song.Quantization": {
    "q_2_bars": 3,
    "q_4_bars": 2,

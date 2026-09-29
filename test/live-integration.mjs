@@ -1169,6 +1169,80 @@ try {
     assert(batched < separate, 'a batch should beat separate round trips');
   });
 
+  console.log('\nRouting and mixer state');
+  const audio = await call('create', { kind: 'audio_track', name: 'MCP TEST ROUTE' });
+  await trackPtr(audio.address, 'tracks');
+  const failsCode = async (fn, code, fragment) => {
+    try {
+      await fn();
+    } catch (err) {
+      assert(err.bridgeCode === code, `expected ${code}, got ${err.bridgeCode} (${err.message})`);
+      if (fragment) assert(err.message.includes(fragment), `expected "${fragment}" in "${err.message}"`);
+      return;
+    }
+    throw new Error(`expected the call to fail with ${code}`);
+  };
+  await check('routing get lists the current routing and every available type and channel, for input and output', async () => {
+    for (const direction of ['input', 'output']) {
+      const got = await call('routing', { address: audio.address, direction });
+      assert(got.type.display_name && got.type.category && got.available_types.length >= 2, `${direction}: ${JSON.stringify(got).slice(0, 200)}`);
+      assert(got.available_types.some((t) => t.display_name === got.type.display_name), `${direction}: the current type is among the available ones`);
+    }
+    const master = await call('routing', { address: 'master', direction: 'output' });
+    assert(master.type.display_name.length > 0, JSON.stringify(master).slice(0, 160));
+    assert((await call('routing', { address: 'master', direction: 'input' })).available_types.length > 0, 'the master has an input routing too');
+    await failsCode(() => call('routing', { address: 'song', direction: 'input' }), 'INVALID_ARGUMENT');
+  });
+  await check('output routing can be changed to another available destination and back', async () => {
+    const got = await call('routing', { address: audio.address, direction: 'output' });
+    const other = got.available_types.find((t) => t.display_name !== got.type.display_name);
+    assert(other, 'a second output destination should exist');
+    const changed = await call('routing', { address: audio.address, direction: 'output', action: 'set', type: other.display_name });
+    assert(changed.type.display_name === other.display_name && changed.from.type === got.type.display_name, JSON.stringify(changed).slice(0, 200));
+    assert((await call('routing', { address: audio.address, direction: 'output' })).type.display_name === other.display_name, 'Live holds the new routing');
+    await call('routing', { address: audio.address, direction: 'output', action: 'set', type: got.type.display_name });
+    assert((await call('routing', { address: audio.address, direction: 'output' })).type.display_name === got.type.display_name, 'restored');
+    await failsCode(() => call('routing', { address: audio.address, direction: 'output', action: 'set', type: 'No Such Destination' }), 'NOT_FOUND', 'Available:');
+  });
+  await check('feedback guard: resampling into a monitoring track needs allow_feedback or monitoring Off', async () => {
+    const inputs = (await call('routing', { address: audio.address, direction: 'input' })).available_types;
+    const resampling = inputs.find((t) => t.category === 'resampling');
+    if (!resampling) {
+      console.log('       no resampling input on this track: skipped');
+      return;
+    }
+    const original = (await call('routing', { address: audio.address, direction: 'input' })).type.display_name;
+    await call('set_properties', { address: audio.address, properties: { current_monitoring_state: 'IN' } });
+    await failsCode(() => call('routing', { address: audio.address, direction: 'input', action: 'set', type: resampling.display_name }), 'GUARD_FAILED', 'allow_feedback');
+    assert((await call('routing', { address: audio.address, direction: 'input' })).type.display_name === original, 'a refused set changed the routing');
+    await call('set_properties', { address: audio.address, properties: { current_monitoring_state: 'OFF' } });
+    const set = await call('routing', { address: audio.address, direction: 'input', action: 'set', type: resampling.display_name });
+    assert(set.type.category === 'resampling', JSON.stringify(set.type));
+    await call('routing', { address: audio.address, direction: 'input', action: 'set', type: original });
+  });
+  await check('a Compressor side-chain is routed through the same tool', async () => {
+    const comp = await call('device_action', { action: 'insert', address: audio.address, name: 'Compressor' });
+    const got = await call('routing', { address: comp.address, direction: 'input' });
+    assert(got.available_types.length >= 2 && got.type.display_name, JSON.stringify(got).slice(0, 200));
+    const same = await call('routing', { address: comp.address, direction: 'input', action: 'set', type: got.type.display_name });
+    assert(same.type.display_name === got.type.display_name, 'setting the current side-chain source is a no-op');
+  });
+  await check('crossfade assign and panning mode are properties of a track', async () => {
+    const before = await call('get_properties', { address: audio.address, names: ['crossfade_assign', 'panning_mode'] });
+    assert(['A', 'NONE', 'B'].includes(before.properties.crossfade_assign) && ['stereo', 'stereo_split'].includes(before.properties.panning_mode), JSON.stringify(before.properties));
+    await call('set_properties', { address: audio.address, properties: { crossfade_assign: 'B', panning_mode: 'stereo_split' } });
+    const after = await call('get_properties', { address: audio.address, names: ['crossfade_assign', 'panning_mode'] });
+    assert(after.properties.crossfade_assign === 'B' && after.properties.panning_mode === 'stereo_split', JSON.stringify(after.properties));
+    const split = await call('get_properties', { address: `${audio.address}/mixer/left_split_stereo`, names: ['name', 'value'] });
+    assert(typeof split.properties.value === 'number', JSON.stringify(split.properties));
+    await call('set_properties', { address: audio.address, properties: before.properties });
+    await failsCode(() => call('set_properties', { address: audio.address, properties: { crossfade_assign: 'C' } }), 'INVALID_ARGUMENT');
+    const master = await call('get_properties', { address: 'master/mixer/crossfader', names: ['name', 'min', 'max'] });
+    assert(master.properties.max > master.properties.min, JSON.stringify(master.properties));
+    assert((await call('get_properties', { address: 'master/mixer/cue_volume', names: ['name'] })).properties.name.length > 0, 'cue volume is a parameter of the master mixer');
+    assert((await call('get_properties', { address: 'master/mixer/song_tempo', names: ['name'] })).properties.name.length > 0, 'the song tempo is a parameter of the master mixer');
+  });
+
   console.log('\ndraw_automation');
   await check('linear ramp: readback and independent envelope values match', async () => {
     const lo = pA.min + 0.2 * (pA.max - pA.min);

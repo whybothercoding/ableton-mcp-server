@@ -22,6 +22,7 @@ from .session import SessionMixin
 from .tracks import TracksMixin
 from .clips import ClipsMixin
 from .devices import DevicesMixin
+from .routing import RoutingMixin
 from .device_actions import DeviceActionsMixin
 from .automation import AutomationMixin
 from .browser import BrowserMixin
@@ -45,7 +46,7 @@ def create_instance(c_instance):
     return AbletonMCP(c_instance)
 
 
-class AbletonMCP(ServerMixin, BatchMixin, AddressingMixin, DeviceAddressingMixin, PropertiesMixin, StructureMixin, LifecycleMixin, ClipActionsMixin, NotesMixin, IntrospectMixin, SessionMixin, TracksMixin, ClipsMixin, DevicesMixin, DeviceActionsMixin, AutomationMixin, BrowserMixin,
+class AbletonMCP(ServerMixin, BatchMixin, AddressingMixin, DeviceAddressingMixin, PropertiesMixin, StructureMixin, LifecycleMixin, ClipActionsMixin, NotesMixin, IntrospectMixin, SessionMixin, TracksMixin, ClipsMixin, DevicesMixin, DeviceActionsMixin, RoutingMixin, AutomationMixin, BrowserMixin,
                  ControlSurface):
     """AbletonMCP Remote Script for Ableton Live"""
 

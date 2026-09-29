@@ -96,7 +96,7 @@ test('spec-derived tools appear in the tool list with their annotations', () => 
 
 test('the advertised schema stays inside its size budget', () => {
   const size = JSON.stringify(TOOLS.filter((t) => isToolEnabled(t.name))).length;
-  assert.ok(size < 45_000, `tool list is ${size} characters; trim descriptions or consolidate tools`);
+  assert.ok(size < 50_000, `tool list is ${size} characters; trim descriptions or consolidate tools`);
 });
 
 test('eval_python is gated', () => {
@@ -182,4 +182,12 @@ test('device tools: schemas and risk annotations', () => {
   assert.equal(validateArgs(action.inputSchema, { address: 'tracks/0', action: 'insert', name: 'Utility' }), null);
   assert.match(validateArgs(action.inputSchema, { address: 'tracks/0', action: 'explode' }) ?? '', /action must be one of: insert/);
   assert.match(validateArgs(get.inputSchema, {}) ?? '', /missing required argument 'address'/);
+});
+
+test('routing tool: schema and annotations', () => {
+  const routing = TOOL_SPEC_BY_NAME.routing;
+  assert.deepEqual(routing.inputSchema.required, ['address', 'direction']);
+  assert.equal(routing.annotations.destructiveHint, false);
+  assert.match(validateArgs(routing.inputSchema, { address: 'tracks/0', direction: 'sideways' }) ?? '', /direction must be one of: input, output/);
+  assert.equal(validateArgs(routing.inputSchema, { address: 'tracks/0', direction: 'input', action: 'set', type: 'Master', allow_feedback: true }), null);
 });

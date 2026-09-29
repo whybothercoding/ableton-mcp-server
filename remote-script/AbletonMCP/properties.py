@@ -34,6 +34,14 @@ def _pan_set(track, value):
     track.mixer_device.panning.value = value
 
 
+def _mixer_get(name):
+    return lambda track: getattr(track.mixer_device, name)
+
+
+def _mixer_set(name):
+    return lambda track, value: setattr(track.mixer_device, name, value)
+
+
 def _device_on_parameter(device):
     parameters = list(device.parameters)
     for parameter in parameters:
@@ -147,6 +155,10 @@ PROPERTY_SPECS = {
         "current_monitoring_state": _spec("enum", enum="Live.Track.Track.monitoring_states", doc="IN / AUTO / OFF"),
         "volume": _spec("float", doc="Mixer volume (device value, 0..1, 0.85 = 0 dB)", lo=0.0, hi=1.0, get=_volume_get, set=_volume_set),
         "panning": _spec("float", doc="Mixer pan, -1..1", lo=-1.0, hi=1.0, get=_pan_get, set=_pan_set),
+        "crossfade_assign": _spec("enum", enum="Live.MixerDevice.MixerDevice.crossfade_assignments", doc="Regular and return tracks: A, NONE or B",
+                                  get=_mixer_get("crossfade_assign"), set=_mixer_set("crossfade_assign")),
+        "panning_mode": _spec("enum", enum="Live.MixerDevice.MixerDevice.panning_modes", doc="stereo or stereo_split (then use the mixer/left_split_stereo and right_split_stereo parameters)",
+                              get=_mixer_get("panning_mode"), set=_mixer_set("panning_mode")),
         "can_be_armed": _spec("bool", RO),
         "can_be_frozen": _spec("bool", RO),
         "is_frozen": _spec("bool", RO),

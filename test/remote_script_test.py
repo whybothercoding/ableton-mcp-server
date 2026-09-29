@@ -288,7 +288,7 @@ class FakePad(object):
 
 
 def make_mixer(sends=True):
-    mixer = types.SimpleNamespace(volume=FakeParam("Volume", 0.85, 0, 1), panning=FakeParam("Pan", 0, -1, 1))
+    mixer = types.SimpleNamespace(volume=FakeParam("Volume", 0.85, 0, 1), panning=FakeParam("Pan", 0, -1, 1), crossfade_assign=1, panning_mode=0)
     mixer.sends = [FakeParam("Send A", 0, 0, 1), FakeParam("Send B", 0, 0, 1)] if sends else []
     return mixer
 
@@ -501,7 +501,11 @@ def load_module():
                                        rec_q_sixtenth=5, rec_q_thirtysecond=8))
     live.Clip.MidiNoteSpecification = FakeMidiNote
     live.Groove = types.SimpleNamespace(Base=FakeEnum(gb_four=0, gb_eight=1, gb_eight_triplet=2, gb_sixteen=3, count=6))
-    live.Track = types.SimpleNamespace(Track=types.SimpleNamespace(monitoring_states=FakeEnum(IN=0, AUTO=1, OFF=2)))
+    live.Track = types.SimpleNamespace(Track=types.SimpleNamespace(monitoring_states=FakeEnum(IN=0, AUTO=1, OFF=2)),
+                                       RoutingTypeCategory=FakeEnum(external=0, rewire=1, resampling=2, master=3, track=4, parent_group_track=5, none=6, invalid=7),
+                                       RoutingChannelLayout=FakeEnum(midi=0, mono=1, stereo=2))
+    live.MixerDevice = types.SimpleNamespace(MixerDevice=types.SimpleNamespace(
+        crossfade_assignments=FakeEnum(A=0, NONE=1, B=2), panning_modes=FakeEnum(stereo=0, stereo_split=1)))
     live.Application = types.SimpleNamespace(UnavailableFeature=FakeEnum(note_velocity_ranges_and_probabilities=0))
     framework = types.ModuleType("_Framework")
     control_surface = types.ModuleType("_Framework.ControlSurface")
@@ -2460,6 +2464,131 @@ class DeviceTests(unittest.TestCase):
         self.ok("get_device", address="tracks/0/devices/0")
         self.ok("set_properties", address="tracks/0/devices/0/parameters/1", properties={"value": 0.25})
         self.assertEqual(self.song.undo_log, ["begin", "end", "begin", "end"])
+
+
+# ---------------------------------------------------------------- routing and mixer state
+
+class FakeRoutingType(object):
+    def __init__(self, display_name, category):
+        self.display_name, self.category = display_name, category
+
+
+class FakeRoutingChannel(object):
+    def __init__(self, display_name, layout=2):
+        self.display_name, self.layout = display_name, layout
+
+
+class RoutingTests(unittest.TestCase):
+    def setUp(self):
+        self.script = make_script()
+        self.addCleanup(self.script._stop_server)
+        song = make_song()
+        self.ext, self.master_out, self.resampling = FakeRoutingType("Ext. In", 0), FakeRoutingType("Master", 3), FakeRoutingType("Resampling", 2)
+        self.track_in = FakeRoutingType("2-Bass", 4)
+        track = song.tracks[0]
+        track.current_monitoring_state = 1
+        track.available_input_routing_types = [self.ext, self.resampling, self.master_out, self.track_in]
+        track.input_routing_type = self.ext
+        track.available_input_routing_channels = [FakeRoutingChannel("1/2"), FakeRoutingChannel("3/4"), FakeRoutingChannel("1", 1)]
+        track.input_routing_channel = track.available_input_routing_channels[0]
+        track.available_output_routing_types = [self.master_out, FakeRoutingType("Sends Only", 6)]
+        track.output_routing_type = self.master_out
+        track.available_output_routing_channels = []
+        track.output_routing_channel = None
+        comp = FakeDevice("Compressor")
+        comp.available_input_routing_types = [FakeRoutingType("No Input", 6), FakeRoutingType("1-A", 4)]
+        comp.input_routing_type = comp.available_input_routing_types[0]
+        comp.available_input_routing_channels = [FakeRoutingChannel("Post FX"), FakeRoutingChannel("Pre FX")]
+        comp.input_routing_channel = comp.available_input_routing_channels[0]
+        track.devices = [comp]
+        self.script._song = self.song = song
+        self.track, self.comp = track, comp
+
+    def run_command(self, params):
+        return self.script._process_command({"type": "routing", "params": params})
+
+    def ok(self, **params):
+        response = self.run_command(params)
+        self.assertEqual(response["status"], "success", response)
+        return response["result"]
+
+    def code(self, **params):
+        response = self.run_command(params)
+        self.assertEqual(response["status"], "error", response)
+        return response["code"]
+
+    def test_get_describes_the_current_routing_and_what_is_available(self):
+        got = self.ok(address="tracks/0", direction="input")
+        self.assertEqual(got["type"], {"display_name": "Ext. In", "category": "external"})
+        self.assertEqual(got["channel"], {"display_name": "1/2", "layout": "stereo"})
+        self.assertEqual([t["display_name"] for t in got["available_types"]], ["Ext. In", "Resampling", "Master", "2-Bass"])
+        self.assertEqual([c["layout"] for c in got["available_channels"]], ["stereo", "stereo", "mono"])
+        out = self.ok(address="tracks/0", direction="output")
+        self.assertEqual((out["type"]["category"], out["channel"], out["available_channels"]), ("master", None, []))
+
+    def test_set_a_type_and_a_channel_by_display_name(self):
+        result = self.ok(address="tracks/0", direction="input", action="set", type="2-Bass", channel="3/4")
+        self.assertIs(self.track.input_routing_type, self.track_in)
+        self.assertEqual(self.track.input_routing_channel.display_name, "3/4")
+        self.assertEqual((result["type"]["display_name"], result["channel"]["display_name"], result["from"]), ("2-Bass", "3/4", {"type": "Ext. In", "channel": "1/2"}))
+        self.ok(address="tracks/0", direction="input", action="set", channel="1")
+        self.assertEqual(self.track.input_routing_channel.display_name, "1")
+
+    def test_unknown_names_list_what_exists_and_change_nothing(self):
+        response = self.run_command({"address": "tracks/0", "direction": "input", "action": "set", "type": "Nowhere"})
+        self.assertEqual(response["code"], "NOT_FOUND")
+        self.assertIn("['Ext. In', 'Resampling', 'Master', '2-Bass']", response["message"])
+        self.assertEqual(self.code(address="tracks/0", direction="input", action="set", channel="9/10"), "NOT_FOUND")
+        self.assertIs(self.track.input_routing_type, self.ext)
+
+    def test_feedback_prone_input_routing_needs_an_explicit_flag_unless_monitoring_is_off(self):
+        for name in ("Resampling", "Master"):
+            response = self.run_command({"address": "tracks/0", "direction": "input", "action": "set", "type": name})
+            self.assertEqual(response["code"], "GUARD_FAILED", name)
+            self.assertIn("allow_feedback", response["message"])
+        self.assertIs(self.track.input_routing_type, self.ext)
+        self.ok(address="tracks/0", direction="input", action="set", type="Resampling", allow_feedback=True)
+        self.assertIs(self.track.input_routing_type, self.resampling)
+        self.track.current_monitoring_state = 2
+        self.ok(address="tracks/0", direction="input", action="set", type="Master")
+        self.assertIs(self.track.input_routing_type, self.master_out)
+        self.assertEqual(self.code(address="tracks/0", direction="input", action="set", type="Ext. In", allow_feedback="yes"), "TYPE_ERROR")
+
+    def test_output_routing_is_never_gated(self):
+        self.ok(address="tracks/0", direction="output", action="set", type="Sends Only")
+        self.assertEqual(self.track.output_routing_type.display_name, "Sends Only")
+
+    def test_a_compressor_side_chain_is_routed_like_a_track(self):
+        got = self.ok(address="tracks/0/devices/0", direction="input")
+        self.assertEqual(got["type"]["display_name"], "No Input")
+        self.ok(address="tracks/0/devices/0", direction="input", action="set", type="1-A", channel="Pre FX")
+        self.assertEqual((self.comp.input_routing_type.display_name, self.comp.input_routing_channel.display_name), ("1-A", "Pre FX"))
+
+    def test_validation(self):
+        for params, code in [({"address": "tracks/0"}, "INVALID_ARGUMENT"), ({"address": "tracks/0", "direction": "sideways"}, "INVALID_ARGUMENT"),
+                             ({"address": "tracks/0", "direction": "input", "action": "toggle"}, "INVALID_ARGUMENT"),
+                             ({"address": "tracks/0", "direction": "input", "action": "set"}, "INVALID_ARGUMENT"),
+                             ({"address": "tracks/0", "direction": "input", "action": "set", "type": 5}, "TYPE_ERROR"),
+                             ({"address": "song", "direction": "input"}, "INVALID_ARGUMENT"), ({"address": "tracks/0/slots/0", "direction": "input"}, "INVALID_ARGUMENT"),
+                             ({"address": "master", "direction": "input"}, "UNAVAILABLE"), ({"direction": "input"}, "INVALID_ARGUMENT")]:
+            self.assertEqual(self.code(**params), code, params)
+
+    def test_routing_writes_are_one_undo_step(self):
+        self.song.undo_log.clear()
+        self.ok(address="tracks/0", direction="output", action="set", type="Sends Only")
+        self.assertEqual(self.song.undo_log, ["begin", "end"])
+
+    def test_crossfade_assign_and_panning_mode_are_enum_properties_of_tracks(self):
+        self.ok_properties("tracks/0", {"crossfade_assign": "B", "panning_mode": "stereo_split"})
+        self.assertEqual((self.track.mixer_device.crossfade_assign, self.track.mixer_device.panning_mode), (2, 1))
+        got = self.script._process_command({"type": "get_properties", "params": {"address": "tracks/0", "names": ["crossfade_assign", "panning_mode"]}})
+        self.assertEqual(got["result"]["properties"], {"crossfade_assign": "B", "panning_mode": "stereo_split"})
+        bad = self.script._process_command({"type": "set_properties", "params": {"address": "tracks/0", "properties": {"crossfade_assign": "C"}}})
+        self.assertEqual(bad["code"], "INVALID_ARGUMENT")
+
+    def ok_properties(self, address, properties):
+        response = self.script._process_command({"type": "set_properties", "params": {"address": address, "properties": properties}})
+        self.assertEqual(response["status"], "success", response)
 
 
 # ---------------------------------------------------------------- generated API registry

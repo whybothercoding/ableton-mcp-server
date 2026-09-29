@@ -390,6 +390,28 @@ export const TOOL_SPECS: ToolSpec[] = [
     bridge: { command: 'device_action' }
   },
   {
+    name: 'routing',
+    description:
+      "Read or change a track's (or a side-chain device's) input or output routing by the display names the mixer shows. `address`: 'tracks/N', 'returns/N', 'master' or a device with a side-chain such as a Compressor ('tracks/2/devices/1', input). " +
+      "`direction`: input or output. `action` get (default) returns the current `type` and `channel` and everything `available_types` / `available_channels` (category: external, resampling, master, track, parent_group_track, none...). " +
+      "set takes `type` and/or `channel` (exact display names; channels depend on the type, so set both in one call); Live only offers valid choices. " +
+      "Feedback guard: routing a track's INPUT from the master or from resampling while its monitoring is not Off can loop the sound back at full level, so it refuses unless `allow_feedback: true` (or monitoring is set to OFF first with set_properties current_monitoring_state). One undo step.",
+    inputSchema: {
+      type: 'object',
+      properties: {
+        address: { type: 'string', description: "A track, return track, 'master', or a device with a side-chain" },
+        direction: { type: 'string', enum: ['input', 'output'], description: 'Which end' },
+        action: { type: 'string', enum: ['get', 'set'], description: 'Default get' },
+        type: { type: 'string', description: "set: routing type display name, e.g. 'Ext. In', 'Master', 'Resampling', a track name" },
+        channel: { type: 'string', description: "set: channel display name, e.g. '1/2'" },
+        allow_feedback: { type: 'boolean', description: 'set: allow input routings that can feed back (default false)' }
+      },
+      required: ['address', 'direction']
+    },
+    annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: true },
+    bridge: { command: 'routing' }
+  },
+  {
     name: 'list_properties',
     description:
       'List the properties get_properties/set_properties know for an object kind: type, whether it is writable, allowed enum values ' +

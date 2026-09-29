@@ -8,7 +8,7 @@ export const INCLUDE_CLASSES = ['Live.Song.Song', 'Live.Track.Track', 'Live.Scen
 /** Enum types referenced by property overlays (an int property has no enum type of its own). */
 export const INCLUDE_ENUMS = [
   'Live.Song.Quantization', 'Live.Song.RecordingQuantization', 'Live.Clip.LaunchMode', 'Live.Clip.ClipLaunchQuantization',
-  'Live.Clip.WarpMode', 'Live.Groove.Base', 'Live.ClipSlot.ClipSlotPlayingState', 'Live.Song.SessionRecordStatus', 'Live.Device.DeviceType', 'Live.Track.Track.monitoring_states'
+  'Live.Clip.WarpMode', 'Live.Groove.Base', 'Live.ClipSlot.ClipSlotPlayingState', 'Live.Song.SessionRecordStatus', 'Live.Device.DeviceType', 'Live.MixerDevice.MixerDevice.crossfade_assignments', 'Live.MixerDevice.MixerDevice.panning_modes', 'Live.Track.Track.monitoring_states'
 ];
 
 function sortKeys(value) {
