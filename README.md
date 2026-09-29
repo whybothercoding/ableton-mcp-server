@@ -109,6 +109,20 @@ With Live running and the script enabled, call the `get_health` tool. It should 
 | `ABLETON_PORT` | `9877` | Port of the Remote Script socket |
 | `FFMPEG_PATH` / `FFPROBE_PATH` | on `PATH` | Binaries used by `analyze_audio_clip` |
 
+### Security
+
+The Remote Script listens on `localhost:9877` and **does not authenticate**: any program running on your computer can send it commands, including ones that change or delete things in the open Set. Web pages cannot reach it (the socket expects one raw JSON document, not HTTP), and nothing outside your computer can.
+
+Two commands are powerful enough to be off by default inside Live itself, whoever is calling: `eval` (runs any Python in Live, used by the developer tools and `eval_python`) and `record` (can record over your timeline and clips). They refuse until you create an empty opt-in file, checked on every call, so no restart is needed:
+
+```bash
+mkdir -p ~/.ableton-mcp-server && touch ~/.ableton-mcp-server/allow_eval      # developers: the live tests and `npm run hotswap` need this
+touch ~/.ableton-mcp-server/allow_record                                # only if you want the record tool
+rm ~/.ableton-mcp-server/allow_eval                                     # switches it off again
+```
+
+The MCP tools `eval_python` and `record` stay hidden unless `ABLETON_MCP_ALLOW_EVAL=1` / `ABLETON_MCP_ALLOW_RECORD=1` is also set in the MCP server's environment, so an assistant only ever sees them when you turned on both. `get_health` shows the state of each gate.
+
 ---
 
 ## Capabilities & Compatibility
@@ -160,7 +174,7 @@ Live's API has no clip follow actions, so `follow_actions` emulates them inside 
 - **Timeline clips** have addresses like Session clips: `tracks/N/arrangement/M` in time order (a take lane's clips are `tracks/N/take_lanes/K/arrangement/M`), so `get_properties`, `set_properties` (`name`, `muted`, `start_time` and `end_time` are readable), `get_notes`/`write_notes`/`edit_notes`, `clip_action` and `delete` (with `expect`) all work on them. `describe_set` lists each track's timeline (`arrangement`: index, name, start, length, kind) and it is part of the fingerprint.
 - `create`: `arrangement_midi_clip` (`address` of a track or take lane, `time` in beats, `length` default 4), `arrangement_audio_clip` (`address`, `time`, `path`), `take_lane` (`address` of a track). `clip_action` `to_arrangement` copies a Session clip onto its track's timeline at `time`. `launch` refuses timeline clips (arrangement playback is `transport`).
 - **Arrangement automation** is written through Session clips: `draw_automation` on a Session clip, then `clip_action` `to_arrangement`. Live turns the envelopes into the track's arrangement automation: they do not stay on the copy (its `has_envelopes` is false), and the result lists the parameters that are now automated (`automation_state` 1). The copy is also a normal arrangement clip, so use an otherwise empty scratch clip if you only want the automation. Not in Live's API: splitting, consolidating, moving or resizing timeline clips, comp editing, and time signature or tempo changes on the timeline.
-- `record` is **gated**: it needs `ABLETON_MCP_ALLOW_RECORD=1` in the MCP server's environment, because recording can overwrite the timeline or clip slots. `status` (default) shows the recording flags and armed tracks; `arrangement_start` / `arrangement_stop`, `session_start` (`record_length`) / `session_stop`, `overdub`, `punch` and `automation` change them. Starting refuses unless a track is armed (arm with `set_properties` `arm`) and when recording is already on. Recording is not undoable step by step and cannot run in a batch; the test suites only ever read `status`.
+- `record` is **gated**: it needs `ABLETON_MCP_ALLOW_RECORD=1` in the MCP server's environment and the opt-in file `~/.ableton-mcp-server/allow_record` (see Security), because recording can overwrite the timeline or clip slots. `status` (default) shows the recording flags and armed tracks; `arrangement_start` / `arrangement_stop`, `session_start` (`record_length`) / `session_stop`, `overdub`, `punch` and `automation` change them. Starting refuses unless a track is armed (arm with `set_properties` `arm`) and when recording is already on. Recording is not undoable step by step and cannot run in a batch. The default test runs only read `status`; `MCP_TEST_RECORD=1 npm run test:live` also records a few beats into a scratch MIDI track and removes it.
 
 #### Audio clips, warp markers and conversions
 - `create` `kind: "audio_clip"`: `address` of an empty slot on an audio track and `path`, an absolute path to an audio file. Live warps it according to its own settings; the result reports `length`, `file_path` and `warping`. Bad or relative paths are refused.
@@ -259,7 +273,7 @@ Not covered: device properties Live keeps outside `parameters` (Wavetable's osci
 
 #### Development
 - `introspect_api` (bridge command, no MCP tool): without `module`, returns the running Live's version and the API module list; with `module`, describes every class in it (properties with getter/setter types, method signatures, listeners, enums). It reads class-level descriptors only, so it cannot change the Set. It feeds `npm run dump-api`.
-- `eval_python`: Evaluate raw Python on the Remote Script instance. Executes arbitrary code inside Live, so the tool is **hidden and refused unless `ABLETON_MCP_ALLOW_EVAL=1`** is set in the MCP server's environment (set it in your MCP config's `env` for development). Failures come back as errors, not success strings.
+- `eval_python`: Evaluate raw Python on the Remote Script instance. Executes arbitrary code inside Live, so the tool is **hidden and refused unless `ABLETON_MCP_ALLOW_EVAL=1`** is set in the MCP server's environment (set it in your MCP config's `env` for development) **and** the opt-in file `~/.ableton-mcp-server/allow_eval` exists (see Security). Failures come back as errors, not success strings.
 
 ---
 

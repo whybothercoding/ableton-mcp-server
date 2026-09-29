@@ -5,7 +5,9 @@
 // It needs a MIDI track with at least one device and an empty clip slot. Everything it touches is
 // restored afterwards: a scratch clip is created and deleted, parameter values are snapshotted and
 // put back, and only envelopes/ramps it created are cleared. Audio may briefly change while it runs.
+import fs from 'node:fs';
 import net from 'node:net';
+import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { AbletonClient } from '../dist/client/AbletonClient.js';
@@ -25,7 +27,8 @@ let passed = 0;
 const failures = [];
 const skips = [];
 // A check that cannot run on this Set or in this transport state throws Skip, so it is counted apart from the passes: 'content' means the Set
-// lacks something the check needs (MCP_TEST_STRICT=1 turns those into failures), 'state' means the transport is in the wrong state for it.
+// lacks something the check needs (MCP_TEST_STRICT=1 turns those into failures), 'state' means the transport (or something the user has
+// armed) is in the wrong state for it, and 'optin' means it does something you have to ask for (MCP_TEST_RECORD=1 records into a scratch track).
 class Skip extends Error {
   constructor(reason, kind) {
     super(reason);
@@ -109,6 +112,11 @@ async function discover() {
 
 const info = await call('get_script_info');
 console.log(`Remote Script ${info.script_version}`);
+if (info.gates && info.gates.eval === false) {
+  console.error('This suite reads Live through the bridge\'s eval command, which is switched off inside Live.\n' +
+    'Opt in once with: mkdir -p ~/.ableton-mcp-server && touch ~/.ableton-mcp-server/allow_eval   (delete the file to switch it off again)');
+  process.exit(2);
+}
 const target = await discover();
 const [pA, pB] = target.params;
 console.log(`Using track ${target.track} / ${target.name} (${pA.name}, ${pB.name}), scratch slot ${target.slot}\n`);
@@ -1449,7 +1457,11 @@ try {
     assert((await call('get_properties', { address: made.address, names: ['warping'] })).properties.warping === true, 'the audio clip is warped');
     await failsCode(() => call('create', { kind: 'arrangement_audio_clip', address: audioTrack.address, time: 0, path: '/no/such.wav' }), 'NOT_FOUND');
   });
-  await check('record status is readable (recording itself is gated and never started by the tests)', async () => {
+  await check('record is switched off inside Live until ~/.ableton-mcp-server/allow_record exists; then its status is readable (this check never records)', async () => {
+    if ((await call('get_script_info')).gates?.record !== true) {
+      for (const action of ['status', 'session_start']) await failsCode(() => call('record', { action }), 'UNAVAILABLE', 'allow_record');
+      return;
+    }
     const status = await call('record', { action: 'status' });
     for (const key of ['record_mode', 'session_record', 'arrangement_overdub', 'punch_in', 'punch_out', 'is_playing']) assert(typeof status[key] === 'boolean', `${key}: ${JSON.stringify(status)}`);
     assert(Array.isArray(status.armed_tracks), 'armed tracks are listed');
@@ -2239,6 +2251,83 @@ try {
     }
     await rejects(call('ramp_parameter', { ...t, device_path: [rackIndex, 9, 0], to: 0.5, seconds: 1 }), 'Chain index out of range');
     assert((await call('cancel_ramps')).active_ramps === 0, 'a failed call left a ramp behind');
+  });
+
+  console.log('\nRecording (opt-in: MCP_TEST_RECORD=1)');
+  await check('record: a scratch MIDI track records two beats into a session slot, the flags round-trip and everything is put back', async () => {
+    if (process.env.MCP_TEST_RECORD !== '1') skip('opt-in: run with MCP_TEST_RECORD=1 (it records two beats into a scratch MIDI track)', 'optin');
+    const armed = await call('eval', { code: '[t.name for t in self._song.tracks if t.can_be_armed and t.arm]' });
+    if (armed.length) skip(`already armed: ${armed.join(', ')}. Arming the scratch track could disarm them, so this check leaves armed tracks alone`, 'state');
+    const state = () => call('eval', {
+      code: "{'record_mode': bool(self._song.record_mode), 'session_record': bool(self._song.session_record), 'overdub': bool(self._song.arrangement_overdub), " +
+            "'punch_in': bool(self._song.punch_in), 'punch_out': bool(self._song.punch_out), 'automation': bool(self._song.session_automation_record), " +
+            "'playing': bool(self._song.is_playing), 'time': round(self._song.current_song_time, 3)}"
+    });
+    const before = await state();
+    assert(!before.record_mode && !before.session_record, 'recording is already on: refusing to start another');
+
+    // The script keeps record switched off unless ~/.ableton-mcp-server/allow_record exists: prove that, then open it for this check only.
+    const marker = path.join(os.homedir(), '.ableton-mcp-server', 'allow_record');
+    const openedByTest = !fs.existsSync(marker);
+    if (openedByTest) {
+      await rejectsCode(() => call('record', { action: 'status' }), 'UNAVAILABLE');
+      fs.mkdirSync(path.dirname(marker), { recursive: true });
+      fs.writeFileSync(marker, '');
+    }
+    const scratch = await makeScratchTrack();                                   // registered for deletion by _live_ptr before anything is asserted
+    const tr = `tracks/${scratch}`;
+    cleanupsRegistry.push(async () => {                                          // runs before the scratch track is deleted
+      await call('record', { action: 'session_stop' }).catch(() => {});
+      await call('record', { action: 'arrangement_stop' }).catch(() => {});
+      await call('set_properties', { address: 'song', properties: { arrangement_overdub: before.overdub, punch_in: before.punch_in, punch_out: before.punch_out, session_automation_record: before.automation } }).catch(() => {});
+      await call('launch', { address: tr, action: 'stop', quantized: false }).catch(() => {});
+      if (!before.playing) await call('transport', { action: 'stop' }).catch(() => {});
+      if (openedByTest) fs.rmSync(marker, { force: true });
+    });
+
+    const status = await call('record', { action: 'status' });
+    assert(JSON.stringify(status.armed_tracks) === '[]' && status.record_mode === false && status.session_record === false, JSON.stringify(status));
+    await rejectsCode(() => call('record', { action: 'session_start' }), 'UNAVAILABLE');        // nothing armed: nothing would be recorded
+    await rejectsCode(() => call('record', { action: 'arrangement_start' }), 'UNAVAILABLE');
+    await rejectsCode(() => call('record', { action: 'rewind' }), 'INVALID_ARGUMENT');
+
+    await call('set_properties', { address: tr, properties: { arm: true } });
+    assert(JSON.stringify((await call('record', { action: 'status' })).armed_tracks) === JSON.stringify([tr]), 'only the scratch track should be armed');
+    await rejectsCode(() => call('record', { action: 'session_start', record_length: -1 }), 'INVALID_ARGUMENT');
+    await rejectsCode(() => call('record', { action: 'overdub' }), 'INVALID_ARGUMENT');
+    await rejectsCode(() => call('record', { action: 'punch' }), 'INVALID_ARGUMENT');
+
+    // session recording: two beats into the scratch track's first slot, then Live stops it by itself
+    const started = await call('record', { action: 'session_start', record_length: 2 });
+    assert(JSON.stringify(started.recording_into) === JSON.stringify([tr]), JSON.stringify(started));
+    assert(await waitFor(async () => (await call('eval', { code: `self._song.tracks[${scratch}].clip_slots[0].has_clip` })) === true, 10000), 'a clip should appear in the scratch track');
+    assert(await waitFor(async () => (await call('eval', { code: 'bool(self._song.session_record)' })) === false, 10000), 'recording two beats should end by itself');
+    const clip = await call('get_properties', { address: `${tr}/slots/0/clip`, names: ['length', 'is_midi_clip'] });
+    near(clip.properties.length, 2, 0.05, 'the recorded clip is two beats long');
+    assert(clip.properties.is_midi_clip === true, 'the recording is a MIDI clip');
+    await call('launch', { address: tr, action: 'stop', quantized: false });
+
+    // the flags: each one changes and reads back, and the record command restores nothing behind our back
+    const overdub = await call('record', { action: 'overdub', enabled: true });
+    assert(overdub.arrangement_overdub === true, JSON.stringify(overdub));
+    const automation = await call('record', { action: 'automation', enabled: !before.automation });
+    assert(automation.session_automation_record === !before.automation, JSON.stringify(automation));
+    const punched = await call('record', { action: 'punch', punch_in: true, punch_out: true });
+    assert(punched.punch_in === true && punched.punch_out === true, JSON.stringify(punched));
+    await call('record', { action: 'overdub', enabled: before.overdub });
+    await call('record', { action: 'automation', enabled: before.automation });
+    await call('record', { action: 'punch', punch_in: before.punch_in, punch_out: before.punch_out });
+
+    // arrangement recording is only switched on and off here, with the transport not running: nothing is written to the timeline
+    const arr = await call('record', { action: 'arrangement_start', play: false });
+    assert(arr.record_mode === true && JSON.stringify(arr.recording_into) === JSON.stringify([tr]), JSON.stringify(arr));
+    await rejectsCode(() => call('record', { action: 'arrangement_start', play: false }), 'UNAVAILABLE');      // already on
+    assert((await call('record', { action: 'arrangement_stop' })).record_mode === false, 'arrangement recording should switch off');
+    await call('set_properties', { address: tr, properties: { arm: false } });
+
+    if (!before.playing) await call('transport', { action: 'stop' });
+    const after = await state();
+    for (const key of ['record_mode', 'session_record', 'overdub', 'punch_in', 'punch_out', 'automation']) assert(after[key] === before[key], `${key}: ${before[key]} -> ${after[key]}`);
   });
 } finally {
   console.log('\nCleanup');

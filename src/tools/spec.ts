@@ -525,7 +525,7 @@ export const TOOL_SPECS: ToolSpec[] = [
   {
     name: 'record',
     description:
-      "GATED (set ABLETON_MCP_ALLOW_RECORD=1 in the MCP server's environment): recording can overwrite what is on the timeline or in clip slots. `action`: status (default; state of recording and armed tracks), " +
+      "GATED (set ABLETON_MCP_ALLOW_RECORD=1 in the MCP server's environment and create ~/.ableton-mcp-server/allow_record): recording can overwrite what is on the timeline or in clip slots. `action`: status (default; state of recording and armed tracks), " +
       "arrangement_start (needs an armed track; optional `from_time` beats, `play` default true), arrangement_stop (`stop_transport` optional), session_start (records into the armed tracks' next free slots; optional `record_length` beats), " +
       "session_stop, overdub (`enabled`), punch (`punch_in`/`punch_out`) and automation (`enabled`: automation recording). Starting refuses when nothing is armed or recording is already on. Arm tracks with set_properties `arm`. " +
       "Recorded clips are ordinary clips afterwards. Not undoable step by step and not batchable.",

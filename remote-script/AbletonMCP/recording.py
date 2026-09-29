@@ -1,7 +1,7 @@
 """Recording: arrangement record, session record, overdub, punch and automation recording.
 
-Recording can overwrite what is already in the Set, so the MCP tool is gated (ABLETON_MCP_ALLOW_RECORD=1) and every start
-needs at least one armed track: Live would otherwise "record" nothing. Nothing here is undoable step by step, which is why
+Recording can overwrite what is already in the Set, so the command is gated twice: the MCP tool needs ABLETON_MCP_ALLOW_RECORD=1
+and the script itself needs the opt-in file ~/.ableton-mcp-server/allow_record. Every start needs at least one armed track: Live would otherwise "record" nothing. Nothing here is undoable step by step, which is why
 it does not run inside a batch.
 """
 from .helpers import _is_number, _safe_attr
@@ -38,7 +38,7 @@ class RecordingMixin(object):
                               "(set_properties arm: true on a track, or create a scratch track for it).".format(action), "UNAVAILABLE")
         return armed
 
-    @command("record")
+    @command("record", gate="record")
     def _cmd_record(self, params):
         action, song = params.get("action", "status"), self._song
         if action not in RECORD_ACTIONS:

@@ -1,18 +1,43 @@
 """Command registry and the error model."""
+import os
+
+from . import config
 
 
 # Command registry: the single source of truth for dispatch, undo behaviour and the capability list.
 _COMMANDS = {}
 
 
-def command(name, writes=False, destructive=False):
+GATE_REASONS = {
+    "eval": "runs any Python code inside Live",
+    "record": "can record over the clips and timeline of your Set",
+}
+
+
+def gate_marker(gate):
+    """The empty file whose existence opens `gate`."""
+    return os.path.join(config.GATE_DIR, "allow_" + gate)
+
+
+def gate_open(gate):
+    return os.path.isfile(gate_marker(gate))
+
+
+def gates_status():
+    """{gate: open?} for every gated command that is registered."""
+    return dict((entry["gate"], gate_open(entry["gate"])) for entry in _COMMANDS.values() if entry.get("gate"))
+
+
+def command(name, writes=False, destructive=False, gate=None):
     """Register a bridge command handler `fn(self, params)`.
 
     writes=True runs the command inside its own undo step. Without explicit steps Live coalesces
     consecutive API edits into one giant step, so a single `undo` could revert unrelated work;
-    empty steps are not recorded, so commands that change nothing cost no undo entry."""
+    empty steps are not recorded, so commands that change nothing cost no undo entry.
+
+    gate="x" makes the command refuse unless the opt-in file `allow_x` exists (see config.GATE_DIR)."""
     def register(fn):
-        _COMMANDS[name] = {"fn": fn, "writes": writes, "destructive": destructive}
+        _COMMANDS[name] = {"fn": fn, "writes": writes, "destructive": destructive, "gate": gate}
         return fn
     return register
 

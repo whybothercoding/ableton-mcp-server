@@ -167,6 +167,10 @@ try {
     const health = await ok('get_health');
     for (const c of ['draw_automation', 'clear_automation', 'ramp_parameter', 'cancel_ramps']) assert(health.capabilities.includes(c), `${c} missing`);
   });
+  await check('get_health reports the opt-in gates of the script (eval and record) as booleans', async () => {
+    const health = await ok('get_health');
+    assert(health.gates && typeof health.gates.eval === 'boolean' && typeof health.gates.record === 'boolean', JSON.stringify(health.gates));
+  });
   await check('an ordinary tool still works after all of that', async () => {
     const info = await ok('get_properties', { address: 'song', names: ['tempo'] });
     assert(typeof info.properties.tempo === 'number', 'no tempo');

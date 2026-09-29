@@ -9,6 +9,7 @@ import json
 import os
 import socket
 import sys
+import tempfile
 import threading
 import time as real_time
 import types
@@ -609,8 +610,14 @@ class FakeClock(object):
         self.now += seconds
 
 
+GATES_OPEN_DIR = tempfile.mkdtemp(prefix="ableton-mcp-gates-open-")          # holds allow_eval and allow_record: the tests use both commands
+for _gate in ("eval", "record"):
+    open(os.path.join(GATES_OPEN_DIR, "allow_" + _gate), "w").close()
+
+
 def make_script(port=None):
     mod.config.DEFAULT_PORT = port or free_port()
+    mod.config.GATE_DIR = GATES_OPEN_DIR
     FakeTimer.instances = []
     c_instance = types.SimpleNamespace(song=make_song(), app=types.SimpleNamespace())
     return mod.AbletonMCP(c_instance)
@@ -4800,6 +4807,62 @@ class NoTimerTests(unittest.TestCase):
             script.disconnect()
         finally:
             sys.modules["Live"].Base.Timer = timer
+
+
+# ---------------------------------------------------------------- opt-in gates inside the script
+
+class GateTests(unittest.TestCase):
+    """eval and record refuse unless an empty allow_<gate> file exists: any program on the computer can reach the socket."""
+
+    def setUp(self):
+        self.script = make_script()
+        self.addCleanup(self.script._stop_server)
+        self.dir = tempfile.mkdtemp(prefix="ableton-mcp-gates-")
+        mod.config.GATE_DIR = self.dir
+        self.addCleanup(setattr, mod.config, "GATE_DIR", GATES_OPEN_DIR)
+
+    def run_command(self, name, params=None):
+        return self.script._process_command({"type": name, "params": params or {}})
+
+    def marker(self, gate):
+        return os.path.join(self.dir, "allow_" + gate)
+
+    def test_only_eval_and_record_are_gated(self):
+        self.assertEqual(sorted(name for name, entry in mod._COMMANDS.items() if entry["gate"]), ["eval", "record"])
+
+    def test_eval_and_record_are_refused_until_their_opt_in_file_exists_and_say_how_to_open_them(self):
+        for name, params, gate in (("eval", {"code": "1 + 1"}, "eval"), ("record", {"action": "status"}, "record")):
+            got = self.run_command(name, params)
+            self.assertEqual((got["status"], got["code"]), ("error", "UNAVAILABLE"), name)
+            self.assertIn(self.marker(gate), got["message"])
+            self.assertIn("switched off", got["message"])
+        open(self.marker("eval"), "w").close()
+        self.assertEqual(self.run_command("eval", {"code": "1 + 1"})["result"], 2)
+        self.assertIn("switched off", self.run_command("record", {"action": "status"})["message"])         # each gate is separate
+        open(self.marker("record"), "w").close()
+        self.assertNotIn("switched off", str(self.run_command("record", {"action": "status"}).get("message", "")))
+
+    def test_a_gate_is_checked_on_every_call_so_it_can_be_switched_off_again(self):
+        open(self.marker("eval"), "w").close()
+        self.assertEqual(self.run_command("eval", {"code": "2 * 3"})["result"], 6)
+        os.remove(self.marker("eval"))
+        self.assertEqual(self.run_command("eval", {"code": "2 * 3"})["code"], "UNAVAILABLE")
+
+    def test_a_directory_named_like_the_file_does_not_open_a_gate(self):
+        os.mkdir(self.marker("eval"))
+        self.assertEqual(self.run_command("eval", {"code": "1"})["code"], "UNAVAILABLE")
+
+    def test_ungated_commands_work_with_the_gates_closed_and_the_handshake_reports_them(self):
+        got = self.run_command("get_script_info")
+        self.assertEqual((got["status"], got["result"]["gates"]), ("success", {"eval": False, "record": False}))
+        open(self.marker("eval"), "w").close()
+        self.assertEqual(self.run_command("get_script_info")["result"]["gates"], {"eval": True, "record": False})
+
+    def test_the_gate_directory_is_the_users_home_config_folder_by_default(self):
+        spec = importlib.util.spec_from_file_location("gate_default_probe", os.path.join(mod.__path__[0], "config.py"))
+        fresh = importlib.util.module_from_spec(spec)                       # a separate copy: the shared config keeps its test settings
+        spec.loader.exec_module(fresh)
+        self.assertEqual(fresh.GATE_DIR, os.path.join(os.path.expanduser("~"), ".ableton-mcp-server"))
 
 
 if __name__ == "__main__":

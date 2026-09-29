@@ -4,6 +4,7 @@ import Live
 from . import config
 from .registry import _COMMANDS
 from .registry import command
+from .registry import gates_status
 
 
 class SessionMixin(object):
@@ -49,7 +50,7 @@ class SessionMixin(object):
     def _cmd_set_scene_tempo(self, params):
         return self._set_scene_tempo(params.get("scene_index", 0), params.get("tempo", 120.0))
 
-    @command("eval", writes=True)
+    @command("eval", writes=True, gate="eval")
     def _cmd_eval(self, params):
         # Errors propagate as real error responses (they used to come back as plain success strings)
         return eval(params.get("code", ""), {"self": self})
@@ -166,7 +167,8 @@ class SessionMixin(object):
         return {
             "script_version": config.SCRIPT_VERSION,
             "build_id": getattr(self, "build_id", None),
-            "capabilities": capabilities
+            "capabilities": capabilities,
+            "gates": gates_status()
         }
 
     def _set_tempo(self, tempo):

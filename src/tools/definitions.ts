@@ -24,7 +24,7 @@ const LEGACY_TOOLS: ToolDefinition[] = [
   },
   {
     name: 'eval_python',
-    description: 'Evaluate raw Python code on the Ableton Remote Script instance (for development and advanced debugging).',
+    description: 'Evaluate raw Python code on the Ableton Remote Script instance (for development and advanced debugging). Needs the opt-in file ~/.ableton-mcp-server/allow_eval as well as ABLETON_MCP_ALLOW_EVAL=1.',
     inputSchema: {
       type: 'object',
       properties: {

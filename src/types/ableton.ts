@@ -5,6 +5,8 @@
 export interface ScriptInfo {
   script_version: string;
   capabilities: string[];
+  /** Opt-in gates inside the Remote Script (eval, record): true when the user has created the allow_<gate> file. */
+  gates?: Record<string, boolean>;
 }
 
 export interface RemoteScriptResponse<T = any> {

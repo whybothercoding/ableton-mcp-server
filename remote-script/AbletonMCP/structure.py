@@ -6,7 +6,7 @@ import Live
 
 from . import config
 from .helpers import _is_number, _safe_attr
-from .registry import _COMMANDS, BridgeError, command
+from .registry import _COMMANDS, BridgeError, command, gates_status
 
 # Song properties that describe the Set itself; playhead, play state and meters are deliberately left out so the
 # fingerprint only changes when the Set really changes.
@@ -139,6 +139,7 @@ class StructureMixin(object):
                 "devices": {"Meld": "Meld" in instruments, "Roar": "Roar" in effects},
             },
             "commands": sorted(_COMMANDS),
+            "gates": gates_status(),
         }
 
     @command("get_capabilities")

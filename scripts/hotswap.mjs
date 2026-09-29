@@ -1,6 +1,7 @@
 #!/usr/bin/env node
 // DEV ONLY: reload the deployed AbletonMCP package inside the running Live without restarting it.
-// Run `npm run deploy` first. Uses the bridge's eval command, so it only works while the script is already loaded.
+// Run `npm run deploy` first. Uses the bridge's eval command, so it only works while the script is already loaded and
+// eval is switched on inside Live (touch ~/.ableton-mcp-server/allow_eval; delete the file to switch it off again).
 // Fresh-start behaviour (imports, Live's package loader) is only proven by an actual restart: do that before releasing.
 import { AbletonClient } from '../dist/client/AbletonClient.js';
 
@@ -17,5 +18,10 @@ const code =
   `'commands': len(__import__('AbletonMCP').registry._COMMANDS)})[-1])` +
   `(__import__('sys'), __import__('importlib'))`;
 const client = new AbletonClient();
-console.log(JSON.stringify(await client.sendCommand('eval', { code })));
+try {
+  console.log(JSON.stringify(await client.sendCommand('eval', { code })));
+} catch (err) {
+  console.error(`hotswap failed: ${err.message}`);
+  process.exit(1);
+}
 process.exit(0);

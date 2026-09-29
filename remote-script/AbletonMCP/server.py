@@ -11,6 +11,9 @@ from .registry import _COMMANDS
 from .registry import command
 from .registry import _error_code
 from .registry import _error_response
+from .registry import GATE_REASONS
+from .registry import gate_marker
+from .registry import gate_open
 
 
 _WOULD_BLOCK = (errno.EAGAIN, errno.EWOULDBLOCK, errno.EINTR)
@@ -189,6 +192,12 @@ class ServerMixin(object):
                 response = _error_response("UNKNOWN_COMMAND", "Unknown command: " + str(command_type))
             elif not isinstance(params, dict):
                 response = _error_response("INVALID_REQUEST", "params must be an object")
+            elif entry.get("gate") and not gate_open(entry["gate"]):
+                response = _error_response(
+                    "UNAVAILABLE",
+                    "'{0}' is switched off inside Live because it {1}, and any program on this computer can reach this socket. "
+                    "To allow it, create the empty file {2} and try again (delete the file to switch it off again).".format(
+                        command_type, GATE_REASONS.get(entry["gate"], "is restricted"), gate_marker(entry["gate"])))
             else:
                 try:
                     response = {"status": "success", "result": self._run_command(entry, params)}

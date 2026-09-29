@@ -48,7 +48,9 @@ export class ToolHandler {
             connected: true,
             script_version: info.script_version,
             capabilities_count: info.capabilities?.length || 0,
-            capabilities: info.capabilities
+            capabilities: info.capabilities,
+            // eval and record also need an opt-in file inside Live's machine (~/.ableton-mcp-server/allow_<gate>), not only the env flags
+            gates: info.gates ?? {}
           };
           break;
         }
