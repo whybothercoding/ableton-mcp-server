@@ -458,7 +458,7 @@ def make_song():
     song = types.SimpleNamespace(tempo=120.0, signature_numerator=4, signature_denominator=4, scenes=[],
                                  tracks=[FakeTrack("A"), FakeTrack("B"), make_rack_track()],
                                  return_tracks=[ret], master_track=master, undo_log=[],
-                                 groove_pool=types.SimpleNamespace(grooves=[]), stops=[])
+                                 groove_pool=types.SimpleNamespace(grooves=[]), stops=[], cue_points=[])
     song.stop_all_clips = lambda quantized=True: song.stops.append(("song", quantized))
     song.begin_undo_step = lambda: song.undo_log.append("begin")
     song.end_undo_step = lambda: song.undo_log.append("end")
@@ -489,7 +489,9 @@ def load_module():
         LaunchMode=FakeEnum(trigger=0, gate=1, toggle=2, repeat=3),
         ClipLaunchQuantization=FakeEnum(q_global=0, q_none=1, q_8_bars=2, q_4_bars=3, q_2_bars=4, q_bar=5, q_half=6),
         WarpMode=FakeEnum(beats=0, tones=1, texture=2, repitch=3, complex=4, rex=5, complex_pro=6, count=7))
+    live.ClipSlot = types.SimpleNamespace(ClipSlotPlayingState=FakeEnum(stopped=0, started=1, recording=2))
     live.Song = types.SimpleNamespace(
+        SessionRecordStatus=FakeEnum(off=0, on=1, transition=2),
         Quantization=FakeEnum(q_no_q=0, q_8_bars=1, q_4_bars=2, q_2_bars=3, q_bar=4, q_half=5),
         RecordingQuantization=FakeEnum(rec_q_no_q=0, rec_q_quarter=1, rec_q_eight=2, rec_q_eight_triplet=3,
                                        rec_q_sixtenth=5, rec_q_thirtysecond=8))
@@ -1808,6 +1810,115 @@ class NotesTests(unittest.TestCase):
         self.assertIsNone(live["note_id"]["set"])
 
 
+# ---------------------------------------------------------------- cue points and the application
+
+class FakeCue(Typed):
+    _types = {"name": str}
+
+    def __init__(self, name, time):
+        self.name, self.time, self.jumped = name, time, 0
+
+    def jump(self):
+        self.jumped += 1
+
+
+class CueTests(unittest.TestCase):
+    def setUp(self):
+        self.script = make_script()
+        self.addCleanup(self.script._stop_server)
+        song = make_song()
+        song.is_playing, song.current_song_time, song.can_jump_to_next_cue = False, 6.5, True
+        song.cue_points = [FakeCue("Intro", 0.0), FakeCue("Chorus", 16.0)]
+        self.times_seen = []
+
+        def toggle():
+            self.times_seen.append(song.current_song_time)
+            here = [c for c in song.cue_points if abs(c.time - song.current_song_time) < 1e-9]
+            if here:
+                song.cue_points.remove(here[0])
+            else:
+                song.cue_points.append(FakeCue("", song.current_song_time))
+                song.cue_points.sort(key=lambda c: c.time)
+        song.set_or_delete_cue = toggle
+        app = self.script._c_instance.app
+        app.average_process_usage, app.peak_process_usage, app.open_dialog_count = 0.12, 0.4, 0
+        app.current_dialog_message, app.current_dialog_button_count, app.number_of_push_apps_running = "", 0, 0
+        self.script._song = self.song = song
+
+    def run_command(self, name, params):
+        return self.script._process_command({"type": name, "params": params})
+
+    def test_cue_points_have_addresses_and_properties(self):
+        self.assertEqual(self.script._resolve("cue_points/1")[2], "cue_points/1")
+        self.assertEqual(self.script._resolve("cue_points/name:Intro")[2], "cue_points/0")
+        self.assertEqual(self.script._address_of(self.song.cue_points[1]), "cue_points/1")
+        got = self.run_command("get_properties", {"address": "cue_points/1"})["result"]["properties"]
+        self.assertEqual(got, {"name": "Chorus", "time": 16.0})
+        self.assertEqual(self.run_command("set_properties", {"address": "cue_points/0", "properties": {"name": "Start"}})["status"], "success")
+        self.assertEqual(self.song.cue_points[0].name, "Start")
+        self.assertEqual(self.run_command("set_properties", {"address": "cue_points/0", "properties": {"time": 3.0}})["code"], "INVALID_ARGUMENT")
+        self.assertEqual(self.run_command("get_properties", {"address": "cue_points/7"})["code"], "OUT_OF_RANGE")
+
+    def test_create_a_cue_point_sets_it_at_a_time_and_puts_the_playhead_back(self):
+        made = self.run_command("create", {"kind": "cue_point", "time": 8, "name": "Verse"})["result"]
+        self.assertEqual((made["address"], made["name"], made["time"], made["kind"]), ("cue_points/1", "Verse", 8.0, "cue_point"))
+        self.assertEqual(self.times_seen, [8.0])
+        self.assertEqual(self.song.current_song_time, 6.5)
+        self.assertEqual([c.name for c in self.song.cue_points], ["Intro", "Verse", "Chorus"])
+
+    def test_create_a_cue_point_refuses_bad_requests_and_leaves_the_playhead_alone(self):
+        for params, code in [({"kind": "cue_point"}, "INVALID_ARGUMENT"), ({"kind": "cue_point", "time": -1}, "INVALID_ARGUMENT"),
+                             ({"kind": "cue_point", "time": "8"}, "INVALID_ARGUMENT"), ({"kind": "cue_point", "time": 16}, "INVALID_ARGUMENT"),
+                             ({"kind": "cue_point", "time": 4, "color": 5}, "INVALID_ARGUMENT")]:
+            self.assertEqual(self.run_command("create", params)["code"], code, params)
+        self.song.is_playing = True
+        self.assertEqual(self.run_command("create", {"kind": "cue_point", "time": 4})["code"], "UNAVAILABLE")
+        self.assertEqual((len(self.song.cue_points), self.song.current_song_time, self.times_seen), (2, 6.5, []))
+
+    def test_delete_a_cue_point_needs_the_guard_and_a_stopped_transport(self):
+        self.assertEqual(self.run_command("delete", {"address": "cue_points/1", "expect": {"name": "Nope"}})["code"], "GUARD_FAILED")
+        out = self.run_command("delete", {"address": "cue_points/1", "expect": {"name": "Chorus"}})["result"]
+        self.assertEqual((out["deleted"], out["cue_points"]), ("cue_points/1", 1))
+        self.assertEqual((self.times_seen, self.song.current_song_time), ([16.0], 6.5))
+        self.song.is_playing = True
+        self.assertEqual(self.run_command("delete", {"address": "cue_points/0", "expect": {"name": "Intro"}})["code"], "UNAVAILABLE")
+        self.assertEqual(len(self.song.cue_points), 1)
+
+    def test_launching_a_cue_point_jumps_and_cannot_be_stopped(self):
+        self.assertEqual(self.run_command("launch", {"address": "cue_points/1"})["status"], "success")
+        self.assertEqual(self.song.cue_points[1].jumped, 1)
+        self.assertEqual(self.run_command("launch", {"address": "cue_points/1", "action": "stop"})["code"], "INVALID_ARGUMENT")
+
+    def test_describe_set_lists_cue_points_and_they_change_the_fingerprint(self):
+        self.script._song.scenes = [PropScene("S")]
+        before = self.run_command("describe_set", {})["result"]
+        self.assertEqual([(c["address"], c["name"], c["time"]) for c in before["cue_points"]], [("cue_points/0", "Intro", 0.0), ("cue_points/1", "Chorus", 16.0)])
+        self.run_command("create", {"kind": "cue_point", "time": 4})
+        after = self.run_command("describe_set", {})["result"]
+        self.assertNotEqual(before["fingerprint"], after["fingerprint"])
+        self.run_command("delete", {"address": "cue_points/1", "expect": {"name": ""}})
+        self.assertEqual(self.run_command("describe_set", {})["result"]["fingerprint"], before["fingerprint"])
+
+    def test_the_application_is_addressable_and_read_only(self):
+        got = self.run_command("get_properties", {"address": "app", "names": ["average_process_usage", "open_dialog_count"]})["result"]
+        self.assertEqual((got["kind"], got["properties"]), ("app", {"average_process_usage": 0.12, "open_dialog_count": 0}))
+        self.assertEqual(self.run_command("set_properties", {"address": "app", "properties": {"average_process_usage": 0.5}})["code"], "INVALID_ARGUMENT")
+        listing = self.run_command("list_properties", {"kind": "app"})["result"]
+        self.assertTrue(all(not p["writable"] for p in listing["properties"].values()))
+        self.assertIn("view", listing["not_exposed"])
+
+    def test_song_and_track_read_only_state_is_readable(self):
+        self.song.session_record_status = 2
+        self.song.is_counting_in, self.song.record_mode = True, False
+        got = self.run_command("get_properties", {"address": "song", "names": ["session_record_status", "is_counting_in", "can_jump_to_next_cue"]})["result"]["properties"]
+        self.assertEqual(got, {"session_record_status": "transition", "is_counting_in": True, "can_jump_to_next_cue": True})
+        self.assertEqual(self.run_command("set_properties", {"address": "song", "properties": {"record_mode": True}})["code"], "INVALID_ARGUMENT")
+        slot = self.song.tracks[0].clip_slots[0]
+        slot.playing_status, slot.color_index = 1, 5
+        self.assertEqual(self.run_command("get_properties", {"address": "tracks/0/slots/0", "names": ["playing_status", "color_index"]})["result"]["properties"],
+                         {"playing_status": "started", "color_index": 5})
+
+
 # ---------------------------------------------------------------- generated API registry
 
 class RegistryTests(unittest.TestCase):
@@ -1871,7 +1982,7 @@ class RegistryTests(unittest.TestCase):
     def test_registry_metadata(self):
         self.assertRegex(self.registry.data()["live_version"], r"^12\.")
         for qualname in self.registry.KIND_CLASSES.values():
-            self.assertGreater(len(self.registry.class_properties(qualname)), 5, qualname)
+            self.assertGreaterEqual(len(self.registry.class_properties(qualname)), 2, qualname)
 
     # ---- sweep: every writable curated property round-trips on fakes generated from the registry
     def make_fake(self, kind, **extra):
@@ -1913,15 +2024,16 @@ class RegistryTests(unittest.TestCase):
         track = self.make_fake("track", clip_slots=[slot], mixer_device=make_mixer())
         master = self.make_fake("track", mixer_device=make_mixer(sends=False))
         groove = self.make_fake("groove")
+        cue = self.make_fake("cue")
         song = self.make_fake("song", tracks=[track], return_tracks=[], scenes=[scene], master_track=master,
-                              groove_pool=types.SimpleNamespace(grooves=[groove]))
+                              groove_pool=types.SimpleNamespace(grooves=[groove]), cue_points=[cue])
         script._song = song
         addresses = {"song": "song", "track": "tracks/0", "scene": "scenes/0", "slot": "tracks/0/slots/0", "clip": "tracks/0/slots/0/clip",
-                     "groove": "grooves/0"}
+                     "groove": "grooves/0", "cue": "cue_points/0", "app": "app"}
         checked = 0
         for kind, specs in self.specs.items():
             for name, spec in sorted(specs.items()):
-                if not spec["rw"] or spec["type"] == "ref":       # references are covered by the groove tests
+                if not spec["rw"] or spec["type"] == "ref":       # references are covered by the groove tests; read-only kinds have nothing to write
                     continue
                 value = self.sample_value(spec)
                 script._set_properties(addresses[kind], {name: value})

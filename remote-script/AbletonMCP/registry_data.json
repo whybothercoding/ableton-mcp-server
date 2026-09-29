@@ -1,5 +1,53 @@
 {
  "classes": {
+  "Live.Application.Application": {
+   "properties": {
+    "average_process_usage": {
+     "get": "float",
+     "set": null
+    },
+    "browser": {
+     "get": "Browser.Browser",
+     "set": null
+    },
+    "canonical_parent": {
+     "get": "Application.Application",
+     "set": null
+    },
+    "control_surfaces": {
+     "get": "Base.ObjectVector",
+     "set": null
+    },
+    "current_dialog_button_count": {
+     "get": "int",
+     "set": null
+    },
+    "current_dialog_message": {
+     "get": "str",
+     "set": null
+    },
+    "number_of_push_apps_running": {
+     "get": "int",
+     "set": null
+    },
+    "open_dialog_count": {
+     "get": "int",
+     "set": null
+    },
+    "peak_process_usage": {
+     "get": "float",
+     "set": null
+    },
+    "unavailable_features": {
+     "get": "Application.UnavailableFeatureVector",
+     "set": null
+    },
+    "view": {
+     "get": "Application.Application.View",
+     "set": null
+    }
+   }
+  },
   "Live.Clip.Clip": {
    "properties": {
     "automation_envelopes": {
@@ -389,6 +437,22 @@
     "time_signature_numerator": {
      "get": "int",
      "set": "int"
+    }
+   }
+  },
+  "Live.Song.CuePoint": {
+   "properties": {
+    "canonical_parent": {
+     "get": "Song.Song",
+     "set": null
+    },
+    "name": {
+     "get": "str",
+     "set": "object"
+    },
+    "time": {
+     "get": "float",
+     "set": null
     }
    }
   },
@@ -895,6 +959,11 @@
    "texture": 2,
    "tones": 1
   },
+  "Live.ClipSlot.ClipSlotPlayingState": {
+   "recording": 2,
+   "started": 1,
+   "stopped": 0
+  },
   "Live.Groove.Base": {
    "count": 6,
    "gb_eight": 1,
@@ -930,6 +999,11 @@
    "rec_q_sixtenth_sixtenth_triplet": 7,
    "rec_q_sixtenth_triplet": 6,
    "rec_q_thirtysecond": 8
+  },
+  "Live.Song.SessionRecordStatus": {
+   "off": 0,
+   "on": 1,
+   "transition": 2
   },
   "Live.Track.Track.monitoring_states": {
    "AUTO": 1,

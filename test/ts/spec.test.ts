@@ -167,5 +167,5 @@ test('tools folded into the verb tools are no longer advertised', () => {
     'delete_clip', 'fire_clip', 'stop_clip', 'fire_scene', 'stop_all_clips', 'start_playback', 'stop_playback'];
   const names = new Set(TOOLS.map((t) => t.name));
   for (const name of retired) assert.ok(!names.has(name), `${name} should be retired`);
-  assert.deepEqual(TOOL_SPEC_BY_NAME.create.inputSchema.properties.kind.enum, ['audio_track', 'midi_track', 'return_track', 'scene', 'midi_clip']);
+  assert.deepEqual(TOOL_SPEC_BY_NAME.create.inputSchema.properties.kind.enum, ['audio_track', 'midi_track', 'return_track', 'scene', 'midi_clip', 'cue_point']);
 });

@@ -12,7 +12,7 @@ _DATA = None
 # property engine kinds -> Live classes
 KIND_CLASSES = {"song": "Live.Song.Song", "track": "Live.Track.Track", "scene": "Live.Scene.Scene",
                 "slot": "Live.ClipSlot.ClipSlot", "clip": "Live.Clip.Clip",
-                "groove": "Live.Groove.Groove"}
+                "groove": "Live.Groove.Groove", "cue": "Live.Song.CuePoint", "app": "Live.Application.Application"}
 
 
 def data():

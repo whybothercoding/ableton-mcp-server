@@ -20,7 +20,7 @@ test('every class and enum the property engine relies on is in the dump and the 
   const registry = JSON.parse(fs.readFileSync(registryFile, 'utf8'));
   for (const name of INCLUDE_CLASSES) {
     assert.ok(findClass(dump, name), `${name} missing from the dump`);
-    assert.ok(Object.keys(registry.classes[name].properties).length > 5, name);
+    assert.ok(Object.keys(registry.classes[name].properties).length >= 2, name);
   }
   for (const name of INCLUDE_ENUMS) {
     assert.ok(findEnum(dump, name), `${name} missing from the dump`);

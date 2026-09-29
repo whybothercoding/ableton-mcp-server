@@ -90,6 +90,10 @@ class ClipActionsMixin(object):
             if record_length is not None or launch_quantization is not None:
                 raise BridgeError("Scenes launch with legato and select only", "INVALID_ARGUMENT")
             obj.fire(bool(legato), select)
+        elif kind == "cue":
+            if action == "stop":
+                raise BridgeError("A cue point cannot be stopped: launching it jumps the playhead there", "INVALID_ARGUMENT")
+            obj.jump()
         elif kind == "track" and canonical.startswith("tracks/"):
             if action == "fire":
                 raise BridgeError("A track cannot be fired: launch a clip slot ('tracks/N/slots/M') or a scene", "INVALID_ARGUMENT")
@@ -101,7 +105,7 @@ class ClipActionsMixin(object):
         else:
             raise BridgeError("Cannot {0} '{1}': launch clip slots, clips and scenes; stop tracks (tracks/N) or the song".format(
                 action, canonical), "INVALID_ARGUMENT")
-        return {"address": canonical, "action": action, "state": self._launch_state(kind, obj) if kind != "song" else {}}
+        return {"address": canonical, "action": action, "state": self._launch_state(kind, obj) if kind not in ("song", "cue") else {}}
 
     # ---- clip_action
 

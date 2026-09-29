@@ -6,7 +6,7 @@ shift after every earlier create/delete and a stale index is exactly how the wro
 from .helpers import _is_number
 from .registry import BridgeError, command
 
-CREATE_KINDS = ("audio_track", "midi_track", "return_track", "scene", "midi_clip")
+CREATE_KINDS = ("audio_track", "midi_track", "return_track", "scene", "midi_clip", "cue_point")
 
 
 class LifecycleMixin(object):
@@ -33,8 +33,12 @@ class LifecycleMixin(object):
         if color is not None and (isinstance(color, bool) or not isinstance(color, int)):
             raise BridgeError("color must be an RGB integer", "TYPE_ERROR")
         song = self._song
+        if kind == "cue_point" and color is not None:
+            raise BridgeError("cue points have no color", "INVALID_ARGUMENT")
         if kind == "midi_clip":
             created, address = self._create_midi_clip(params)
+        elif kind == "cue_point":
+            created, address = self._create_cue_point(params)
         elif kind == "return_track":
             if params.get("index") not in (None, -1):
                 raise BridgeError("return tracks are always appended: leave index out", "INVALID_ARGUMENT")
@@ -56,7 +60,37 @@ class LifecycleMixin(object):
         result = {"address": address, "name": created.name, "kind": kind, "color": getattr(created, "color", None)}
         if kind == "midi_clip":
             result["length"] = created.length
+        if kind == "cue_point":
+            result["time"] = created.time
         return result
+
+    def _at_playhead(self, time, action):
+        """Run `action` with the playhead at `time` (cue points can only be set or removed at the playhead), then put it back."""
+        song = self._song
+        if song.is_playing:
+            raise BridgeError("Stop the transport first: cue points are set and removed at the playhead, which this has to move",
+                              "UNAVAILABLE")
+        original = song.current_song_time
+        try:
+            song.current_song_time = float(time)
+            action()
+        finally:
+            song.current_song_time = original
+
+    def _create_cue_point(self, params):
+        time = params.get("time")
+        if not _is_number(time) or time < 0:
+            raise BridgeError("cue_point needs time: a position in beats from 0", "INVALID_ARGUMENT")
+        song = self._song
+        for cue in song.cue_points:
+            if abs(cue.time - time) < 1e-6:
+                raise BridgeError("There is already a cue point at beat {0:g}: '{1}'".format(time, cue.name), "INVALID_ARGUMENT")
+        self._at_playhead(time, song.set_or_delete_cue)
+        cues = list(song.cue_points)
+        for index, cue in enumerate(cues):
+            if abs(cue.time - time) < 1e-6:
+                return cue, "cue_points/{0}".format(index)
+        raise BridgeError("Live did not create a cue point at beat {0:g}".format(time), "LIVE_ERROR")
 
     def _create_midi_clip(self, params):
         """An empty MIDI clip of `length` beats in the empty clip slot at `address`."""
@@ -114,8 +148,10 @@ class LifecycleMixin(object):
         elif kind == "clip":
             slot = self._resolve(canonical[: -len("/clip")])[1]
             slot.delete_clip()
+        elif kind == "cue":
+            self._at_playhead(obj.time, song.set_or_delete_cue)
         else:
-            raise BridgeError("Only tracks, return tracks, scenes and clips can be deleted (got '{0}')".format(canonical),
+            raise BridgeError("Only tracks, return tracks, scenes, clips and cue points can be deleted (got '{0}')".format(canonical),
                               "INVALID_ARGUMENT")
         return {"deleted": canonical, "name": name, "tracks": len(song.tracks), "returns": len(song.return_tracks),
-                "scenes": len(song.scenes)}
+                "scenes": len(song.scenes), "cue_points": len(song.cue_points)}

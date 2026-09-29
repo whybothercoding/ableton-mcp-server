@@ -79,12 +79,14 @@ class StructureMixin(object):
             scenes.append({"address": "scenes/{0}".format(index), "name": scene.name, "tempo": _safe_attr(scene, "tempo"),
                            "tempo_enabled": _safe_attr(scene, "tempo_enabled", False),
                            "time_signature_enabled": _safe_attr(scene, "time_signature_enabled", False)})
+        cues = [{"address": "cue_points/{0}".format(i), "name": c.name, "time": c.time}
+                for i, c in enumerate(_safe_attr(song, "cue_points", []))]
         stable = dict((name, _safe_attr(song, name)) for name in _STABLE_SONG)
         fingerprint = _digest({"song": stable, "tracks": [t["hash"] for t in summaries["tracks"]],
                                "returns": [t["hash"] for t in summaries["returns"]], "master": summaries["master"]["hash"],
-                               "scenes": scenes})
+                               "scenes": scenes, "cue_points": cues})
         result = {"fingerprint": fingerprint, "song": dict(stable, is_playing=bool(_safe_attr(song, "is_playing", False))),
-                  "scenes": scenes}
+                  "scenes": scenes, "cue_points": cues}
         result.update(summaries)
         return result
 

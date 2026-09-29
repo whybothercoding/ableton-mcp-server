@@ -49,6 +49,16 @@ async function rejects(promise, fragment) {
   throw new Error(`expected an error containing "${fragment}" but the call succeeded`);
 }
 
+async function rejectsCode(fn, code) {
+  try {
+    await fn();
+  } catch (err) {
+    assert(err.bridgeCode === code, `expected ${code}, got ${err.bridgeCode} (${err.message})`);
+    return;
+  }
+  throw new Error(`expected the call to fail with ${code} but it succeeded`);
+}
+
 // ---- helpers that read Live's own state (independent of the tools under test)
 const paramExpr = (t, d, p) => `self._song.tracks[${t}].devices[${d}].parameters[${p}]`;
 const readParam = (t, d, p) => call('eval', { code: `${paramExpr(t, d, p)}.value` });
@@ -855,6 +865,61 @@ try {
       return;
     }
     await rejectsWith('get_notes', { address: audio }, 'INVALID_ARGUMENT');
+  });
+
+  console.log('\nCue points, application and read-only state');
+  const isPlaying = () => call('eval', { code: 'bool(self._song.is_playing)' });
+  await check('cue points: create at a time, list, rename, jump, delete; the playhead is put back', async () => {
+    if (await isPlaying()) {
+      console.log('       transport is playing: cue point creation needs it stopped, skipped');
+      return;
+    }
+    const cuesBefore = (await call('describe_set')).cue_points.length;
+    const playhead = await call('eval', { code: 'self._song.current_song_time' });
+    const time = 54321;
+    const made = await call('create', { kind: 'cue_point', time, name: 'MCP TEST CUE' });
+    const cuePtr = await call('eval', { code: `self._resolve(${JSON.stringify(made.address)})[1].time` });
+    cleanupsRegistry.push(async () => {
+      const found = (await call('describe_set')).cue_points.find((c) => c.time === time);
+      if (found) await call('delete', { address: found.address, expect: { name: found.name } });
+      await call('set_properties', { address: 'song', properties: { current_song_time: playhead } });
+    });
+    assert(cuePtr === time && made.name === 'MCP TEST CUE' && made.time === time, JSON.stringify(made));
+    near(await call('eval', { code: 'self._song.current_song_time' }), playhead, 1e-6, 'the playhead must be put back after creating');
+    const listed = (await call('describe_set')).cue_points;
+    assert(listed.length === cuesBefore + 1 && listed.some((c) => c.name === 'MCP TEST CUE' && c.time === time), JSON.stringify(listed));
+    await call('set_properties', { address: made.address, properties: { name: 'MCP TEST CUE 2' } });
+    assert((await call('get_properties', { address: made.address })).properties.name === 'MCP TEST CUE 2', 'rename');
+    await call('launch', { address: made.address });
+    assert(Math.abs((await call('eval', { code: 'self._song.current_song_time' })) - time) < 1e-3, 'launching a cue point should jump the playhead to it');
+    await call('set_properties', { address: 'song', properties: { current_song_time: playhead } });
+    await rejectsCode(() => call('create', { kind: 'cue_point', time }), 'INVALID_ARGUMENT');
+    await rejectsCode(() => call('delete', { address: made.address, expect: { name: 'Not This One' } }), 'GUARD_FAILED');
+    const removed = await call('delete', { address: made.address, expect: { name: 'MCP TEST CUE 2' } });
+    assert(removed.cue_points === cuesBefore, JSON.stringify(removed));
+    near(await call('eval', { code: 'self._song.current_song_time' }), playhead, 1e-6, 'the playhead must be put back after deleting');
+    await call('history', { action: 'undo' });
+    assert((await call('describe_set')).cue_points.length === cuesBefore + 1, 'one undo should bring the deleted cue point back');
+    await call('delete', { address: (await call('describe_set')).cue_points.find((c) => c.time === time).address, expect: { name: 'MCP TEST CUE 2' } });
+  });
+  await check('cue point creation refuses a running transport', async () => {
+    if (!(await isPlaying())) {
+      console.log('       transport is stopped: skipped (needs a playing transport)');
+      return;
+    }
+    await rejectsCode(() => call('create', { kind: 'cue_point', time: 54322 }), 'UNAVAILABLE');
+  });
+  await check('the application reports CPU load, and read-only Song state is readable but not writable', async () => {
+    const app = await call('get_properties', { address: 'app' });
+    assert(app.kind === 'app' && typeof app.properties.average_process_usage === 'number' && app.properties.open_dialog_count === 0, JSON.stringify(app).slice(0, 200));
+    await rejectsCode(() => call('set_properties', { address: 'app', properties: { average_process_usage: 0 } }), 'INVALID_ARGUMENT');
+    const song = await call('get_properties', { address: 'song', names: ['session_record_status', 'is_counting_in', 'record_mode', 'is_ableton_link_enabled', 'can_jump_to_next_cue'] });
+    assert(['off', 'on', 'transition'].includes(song.properties.session_record_status) && typeof song.properties.record_mode === 'boolean', JSON.stringify(song.properties));
+    await rejectsCode(() => call('set_properties', { address: 'song', properties: { record_mode: true } }), 'INVALID_ARGUMENT');
+    const track = await call('get_properties', { address: `tracks/${T}`, names: ['output_meter_right', 'is_part_of_selection', 'back_to_arranger'] });
+    assert(typeof track.properties.output_meter_right === 'number' && typeof track.properties.back_to_arranger === 'boolean', JSON.stringify(track.properties));
+    const slot = await call('get_properties', { address: `tracks/${T}/slots/${S}`, names: ['playing_status', 'has_clip'] });
+    assert(['stopped', 'started', 'recording'].includes(slot.properties.playing_status), JSON.stringify(slot.properties));
   });
 
   console.log('\ndraw_automation');

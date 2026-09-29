@@ -75,14 +75,14 @@ export function validateArgs(schema: ToolSpec['inputSchema'], args: Record<strin
 
 const ADDRESS_HELP =
   "Addresses: 'song', 'master', 'tracks/N', 'returns/N', 'scenes/N', 'tracks/N/slots/M' (clip slot) and " +
-  "'tracks/N/slots/M/clip' and 'grooves/N' (groove pool). Indices are 0-based. A name selector works anywhere a number does, e.g. 'tracks/name:Drift' " +
+  "'tracks/N/slots/M/clip', 'grooves/N' (groove pool), 'cue_points/N' and 'app' (the Live application). Indices are 0-based. A name selector works anywhere a number does, e.g. 'tracks/name:Drift' " +
   '(exact match; several matches is an error that lists their indices).';
 
 export const TOOL_SPECS: ToolSpec[] = [
   {
     name: 'get_properties',
     description:
-      'Read properties of a Song, Track, Scene, ClipSlot, Clip or Groove. ' + ADDRESS_HELP +
+      'Read properties of the Song, a Track, Scene, ClipSlot, Clip, Groove, cue point or the app. ' + ADDRESS_HELP +
       ' Give `names` for specific properties, or omit it to read every readable property (properties that do not apply to the ' +
       'object, e.g. audio-only ones on a MIDI clip, are listed under `unavailable`). Enum values come back as names. ' +
       'Use list_properties to see what exists.',
@@ -100,7 +100,7 @@ export const TOOL_SPECS: ToolSpec[] = [
   {
     name: 'set_properties',
     description:
-      'Set properties on a Song, Track, Scene, ClipSlot, Clip or Groove. A clip\'s `groove` is set to a groove address (grooves/N). ' + ADDRESS_HELP +
+      'Set properties on the Song, a Track, Scene, ClipSlot, Clip, Groove or cue point (its name). A clip\'s `groove` is set to a groove address (grooves/N). ' + ADDRESS_HELP +
       ' Values are checked strictly (booleans must be true/false, integers whole numbers, enums given by name; see list_properties). ' +
       'Interdependent properties (e.g. loop_start/loop_end) can be set together in any order, and the call is all-or-nothing: if one ' +
       'write fails, the others are restored. Returns each property\'s previous and new value. Each call is one undo step in Live. ' +
@@ -191,16 +191,17 @@ export const TOOL_SPECS: ToolSpec[] = [
   {
     name: 'create',
     description:
-      "Create a track, return track, scene or MIDI clip and get back its address. kind: audio_track, midi_track, return_track (always appended), scene, or midi_clip " +
-      "(`address` of an EMPTY clip slot like 'tracks/2/slots/0', `length` in beats, default 4). For tracks and scenes `index` is the insertion position (0-based; omit or -1 to append; existing objects shift, so re-read addresses afterwards). " +
+      "Create a track, return track, scene, MIDI clip or cue point and get back its address. kind: audio_track, midi_track, return_track (always appended), scene, midi_clip " +
+      "(`address` of an EMPTY clip slot like 'tracks/2/slots/0', `length` in beats, default 4) or cue_point (`time` in beats; the transport must be stopped: Live sets cue points at the playhead, which is put back afterwards). For tracks and scenes `index` is the insertion position (0-based; omit or -1 to append; existing objects shift, so re-read addresses afterwards). " +
       "Optional `name` and `color` (RGB integer; Live snaps it to the nearest palette colour and the result reports the colour it applied) are applied immediately. One undo step.",
     inputSchema: {
       type: 'object',
       properties: {
-        kind: { type: 'string', enum: ['audio_track', 'midi_track', 'return_track', 'scene', 'midi_clip'], description: 'What to create' },
+        kind: { type: 'string', enum: ['audio_track', 'midi_track', 'return_track', 'scene', 'midi_clip', 'cue_point'], description: 'What to create' },
         index: { type: 'number', description: 'Insertion position, -1 (default) appends' },
         address: { type: 'string', description: "midi_clip: the empty clip slot to fill, e.g. 'tracks/2/slots/0'" },
         length: { type: 'number', description: 'midi_clip: length in beats (default 4)' },
+        time: { type: 'number', description: 'cue_point: position in beats' },
         name: { type: 'string', description: 'Name to give it' },
         color: { type: 'number', description: 'RGB color integer' }
       },
@@ -225,7 +226,7 @@ export const TOOL_SPECS: ToolSpec[] = [
   {
     name: 'delete',
     description:
-      "Delete a track ('tracks/N'), return track ('returns/N'), scene ('scenes/N') or clip ('tracks/N/slots/M/clip'). DESTRUCTIVE (one undo step brings it back). " +
+      "Delete a track ('tracks/N'), return track ('returns/N'), scene ('scenes/N'), clip ('tracks/N/slots/M/clip') or cue point ('cue_points/N'; transport must be stopped). DESTRUCTIVE (one undo step brings it back). " +
       "`expect` is mandatory: {\"name\": <the object's current name>}. Indices shift after every create/delete, so read the object first; if its name no longer matches, " +
       "nothing is deleted (GUARD_FAILED). The master track cannot be deleted, and a Set always keeps at least one scene.",
     inputSchema: {
@@ -248,7 +249,7 @@ export const TOOL_SPECS: ToolSpec[] = [
     name: 'launch',
     description:
       "Fire or stop things in the Session view. `address` is a clip slot or clip ('tracks/N/slots/M[/clip]': fire starts the clip, or the slot's stop button when empty; " +
-      "stop stops it), a scene ('scenes/N': fire only) , a track ('tracks/N': stop all its clips) or 'song' (stop all clips, transport keeps running). " +
+      "stop stops it), a scene ('scenes/N': fire only) , a track ('tracks/N': stop all its clips), a cue point ('cue_points/N': jump there) or 'song' (stop all clips, transport keeps running). " +
       "Options for a slot: `quantization` overrides the launch quantization for this launch (q_no_q, q_bar, q_half...), `legato` starts the clip in sync with the one playing, " +
       "`record_length` (beats, empty slot only) starts a recording that ends by itself. Scenes take `legato` and `select` (false keeps the selection where it is). " +
       "Stops take `quantized` (default true; false stops immediately). Launching does not change the Set's content.",
@@ -383,12 +384,12 @@ export const TOOL_SPECS: ToolSpec[] = [
     name: 'list_properties',
     description:
       'List the properties get_properties/set_properties know for an object kind: type, whether it is writable, allowed enum values ' +
-      'and ranges. Give an `address` (its kind is used) or a `kind`: song, track, scene, slot, clip or groove.',
+      'and ranges. Give an `address` (its kind is used) or a `kind`: song, track, scene, slot, clip, groove, cue or app.',
     inputSchema: {
       type: 'object',
       properties: {
         address: { type: 'string', description: 'Object address; its kind is listed' },
-        kind: { type: 'string', enum: ['song', 'track', 'scene', 'slot', 'clip', 'groove'], description: 'Object kind (when no address is given)' }
+        kind: { type: 'string', enum: ['song', 'track', 'scene', 'slot', 'clip', 'groove', 'cue', 'app'], description: 'Object kind (when no address is given)' }
       }
     },
     annotations: { readOnlyHint: true, destructiveHint: false, idempotentHint: true },
