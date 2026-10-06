@@ -107,6 +107,8 @@ export const TOOL_SPECS: ToolSpec[] = [
       "A compact map of the whole Set: song settings, every track (regular, return, master) with its address, kind, mixer state, devices and " +
       "clips, and every scene. Each track has a `hash` and the Set has a `fingerprint` that only change when the Set really changes " +
       "(playhead, play state and meters are ignored): compare fingerprints to detect edits, or hashes to see which track changed. " +
+      "The hashes cover note edits (each MIDI clip lists a `notes_hash`), clip launch/loop/warp/gain/pitch/groove settings, sends, routing, " +
+      "crossfader, stop buttons and the launch quantization, but not device parameter values. " +
       "Set include_clips=false for a lighter summary (clip counts and hashes stay).",
     inputSchema: {
       type: 'object',

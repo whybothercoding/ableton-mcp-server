@@ -1236,6 +1236,114 @@ class StructureTests(unittest.TestCase):
         self.assertNotEqual(before["tracks"][1]["hash"], after["tracks"][1]["hash"])
         self.assertEqual(before["master"]["hash"], after["master"]["hash"])
 
+    # ---- describe_set: hand edits the hashes must see
+    def _put_note_clip(self, track, slot, *pitches):
+        clip = NoteClip("notes", 4.0)
+        clip.add_new_notes([FakeMidiNote(p, float(i), 0.5) for i, p in enumerate(pitches)])
+        self.song.tracks[track].clip_slots[slot].clip = clip
+        self.song.tracks[track].clip_slots[slot].has_clip = True
+        return clip
+
+    def _notes_hash(self, track=0, slot=1):
+        return self.script._describe_set()["tracks"][track]["clips"][slot]["notes_hash"]
+
+    def test_midi_clips_list_a_notes_hash_next_to_the_note_count(self):
+        self._put_note_clip(0, 1, 60, 64, 67)
+        clips = self.script._describe_set()["tracks"][0]["clips"]
+        self.assertEqual(clips[1]["note_count"], 3)
+        self.assertEqual(len(clips[1]["notes_hash"]), 12)
+        self.assertIsNone(clips[0]["note_count"])                   # the plain "riff" clip has no note API ...
+        self.assertNotIn("notes_hash", clips[0])                    # ... so there is nothing to hash
+
+    def test_transposing_notes_moves_the_hashes_although_the_note_count_stays_the_same(self):
+        clip = self._put_note_clip(0, 1, 60, 64, 67)
+        before = self.script._describe_set()
+        notes = clip.get_all_notes_extended()
+        for note in notes:
+            note.pitch += 5
+        clip.apply_note_modifications(notes)
+        after = self.script._describe_set()
+        old, new = before["tracks"][0], after["tracks"][0]
+        self.assertEqual(old["clips"][1]["note_count"], new["clips"][1]["note_count"])
+        self.assertNotEqual(old["clips"][1]["notes_hash"], new["clips"][1]["notes_hash"])
+        self.assertNotEqual(old["clips_hash"], new["clips_hash"])
+        self.assertNotEqual(old["hash"], new["hash"])
+        self.assertNotEqual(before["fingerprint"], after["fingerprint"])
+        self.assertEqual(before["tracks"][1]["hash"], after["tracks"][1]["hash"])      # other tracks do not move
+
+    def test_every_note_field_counts_not_only_the_pitch(self):
+        clip = self._put_note_clip(0, 1, 60)
+        seen = {self._notes_hash()}
+        for field, value in (("start_time", 0.25), ("duration", 1.0), ("velocity", 64.0), ("mute", True), ("probability", 0.5),
+                             ("velocity_deviation", 10.0), ("release_velocity", 20.0)):
+            notes = clip.get_all_notes_extended()
+            setattr(notes[0], field, value)
+            clip.apply_note_modifications(notes)
+            digest = self._notes_hash()
+            self.assertNotIn(digest, seen, field)
+            seen.add(digest)
+
+    def test_notes_hash_does_not_depend_on_the_order_notes_were_written_in(self):
+        self._put_note_clip(0, 1, 60, 64)
+        first = self._notes_hash()
+        reordered = NoteClip("notes", 4.0)
+        reordered.add_new_notes([FakeMidiNote(64, 1.0, 0.5), FakeMidiNote(60, 0.0, 0.5)])
+        self.song.tracks[0].clip_slots[1].clip = reordered
+        self.assertEqual(self._notes_hash(), first)
+
+    def test_timeline_midi_clips_carry_a_notes_hash_too(self):
+        clip = self._put_note_clip(0, 1, 60, 64)
+        clip.start_time = 8.0
+        self.song.tracks[0].arrangement_clips = [clip]
+        before = self.script._describe_set()["tracks"][0]
+        self.assertEqual(len(before["arrangement"][0]["notes_hash"]), 12)
+        notes = clip.get_all_notes_extended()
+        notes[0].pitch += 1
+        clip.apply_note_modifications(notes)
+        after = self.script._describe_set()["tracks"][0]
+        self.assertNotEqual(before["arrangement_hash"], after["arrangement_hash"])
+
+    def test_fingerprint_sees_settings_that_describe_set_does_not_list(self):
+        clip = self.song.tracks[0].clip_slots[0].clip
+        mixer = self.song.tracks[1].mixer_device
+        base = self.script._describe_set()["fingerprint"]
+        mutations = [
+            lambda: setattr(clip, "launch_mode", 2),
+            lambda: setattr(clip, "launch_quantization", 3),
+            lambda: setattr(clip, "looping", False),
+            lambda: setattr(clip, "loop_end", 2.0),
+            lambda: setattr(clip, "groove", FakeGroove("Swing")),
+            lambda: setattr(mixer.sends[0], "value", 0.5),
+            lambda: setattr(mixer, "crossfade_assign", 0),
+            lambda: setattr(self.song.tracks[1].devices[0], "is_active", False),
+            lambda: setattr(self.song.tracks[1].clip_slots[0], "has_stop_button", False),
+            lambda: setattr(self.song.tracks[1], "output_routing_type", types.SimpleNamespace(display_name="Ext. Out")),
+            lambda: setattr(self.song, "clip_trigger_quantization", "q_bar"),
+        ]
+        seen = {base}
+        for index, mutate in enumerate(mutations):
+            mutate()
+            fingerprint = self.script._describe_set()["fingerprint"]
+            self.assertNotIn(fingerprint, seen, "mutation {0} did not move the fingerprint".format(index))
+            seen.add(fingerprint)
+
+    def test_fingerprint_still_ignores_playback_state_with_the_new_fields(self):
+        base = self.script._describe_set()["fingerprint"]
+        clip = self.song.tracks[0].clip_slots[0].clip
+        clip.playing_position, clip.is_triggered = 1.5, True
+        self.song.tracks[0].output_meter_left = 0.7
+        self.song.is_playing = True
+        self.assertEqual(self.script._describe_set()["fingerprint"], base)
+
+    def test_enum_song_settings_come_out_as_names(self):
+        class Quantization(object):
+            def __str__(self):
+                return "q_bar"
+        self.song.clip_trigger_quantization = Quantization()
+        out = self.script._describe_set()
+        self.assertEqual(out["song"]["clip_trigger_quantization"], "q_bar")
+        json.dumps(out)                                                      # the whole result stays serialisable
+
     # ---- get_capabilities
     def test_capabilities_probe_features_instead_of_trusting_the_variant(self):
         conversions = sys.modules["Live"].Conversions
