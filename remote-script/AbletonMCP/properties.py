@@ -117,10 +117,11 @@ def _display_number(text):
     """(number, unit) of a value as Live displays it, in base units: '1.50 kHz' is (1500.0, 'hz'), '129 ms' is (0.129, 's'),
     '-26.1 dB' is (-26.1, 'db'), '3.99 : 1' is (3.99, ''), '-inf dB' is (-inf, 'db'). None when it has no leading number."""
     text = str(text).strip()
-    lowered = text.lower().replace("- inf", "-inf")
-    if lowered.startswith("-inf"):
-        unit = lowered[4:].strip()
-        return float("-inf"), _UNIT_SCALE.get(unit, (unit, 1.0))[0]
+    lowered = text.lower().replace("- inf", "-inf").replace("+inf", "inf")
+    for prefix, infinity in (("-inf", float("-inf")), ("inf", float("inf"))):        # a Compressor ratio ends at 'inf : 1', a fader at '-inf dB'
+        if lowered.startswith(prefix):
+            unit = re.match(r"[a-z%]*", lowered[len(prefix):].strip()).group(0)
+            return infinity, _UNIT_SCALE.get(unit, (unit, 1.0))[0]
     match = _DISPLAY_NUMBER.match(text)
     if match is None:
         return None
@@ -172,7 +173,8 @@ def _parameter_display(parameter, text):
         raise BridgeError("'{0}' has no numeric display ('{1}' to '{2}'): set its value instead".format(parameter.name, shown_low, shown_high), "INVALID_ARGUMENT")
     range_unit = number_high[1] or number_low[1]
     if unit and range_unit and unit != range_unit:
-        raise BridgeError("'{0}' shows {1} ('{2}' to '{3}'): '{4}' is in another unit".format(parameter.name, range_unit, shown_low, shown_high, text), "INVALID_ARGUMENT")
+        raise BridgeError("'{0}' shows {1} ('{2}' to '{3}'): '{4}' is in another unit".format(
+            parameter.name, {"hz": "Hz", "s": "time", "db": "dB"}.get(range_unit, range_unit), shown_low, shown_high, text), "INVALID_ARGUMENT")
     ends = (number_low[0], number_high[0])
     if ends[0] == ends[1]:
         raise BridgeError("'{0}' shows the same value ('{1}') at both ends of its range".format(parameter.name, shown_low), "INVALID_ARGUMENT")

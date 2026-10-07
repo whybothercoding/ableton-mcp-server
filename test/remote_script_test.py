@@ -99,7 +99,7 @@ class ScaledParam(FakeParam):
         if self.kind == "db":
             return "-inf dB" if value <= 0.0 else "{0:.2f} dB".format(-70.0 + 76.0 * value)
         if self.kind == "ratio":
-            return "{0:.2f} : 1".format(1.0 + 19.0 * value)
+            return "inf : 1" if value >= 1.0 else "{0:.2f} : 1".format(1.0 + 19.0 * value)           # like a Compressor's ratio at its maximum
         raise AssertionError(self.kind)
 
 
