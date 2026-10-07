@@ -41,7 +41,7 @@ export { validateArgs, BATCH_REFERENCE } from './schema.js';
 
 const ADDRESS_HELP =
   "Addresses: 'song', 'master', 'tracks/N', 'returns/N', 'scenes/N', 'tracks/N/slots/M' (clip slot) and " +
-  "'tracks/N/slots/M/clip', 'tracks/N/arrangement/M' (arrangement clips in time order), 'tracks/N/take_lanes/K', 'tracks/N/devices/M' (also returns/N and master; then '/parameters/P', '/sample' for a Simpler, '/chains/C/devices/...', '/drum_pads/NOTE', '/mixer/volume'), 'grooves/N' (groove pool), 'cue_points/N' and 'app' (the Live application). Indices are 0-based. A name selector works anywhere a number does, e.g. 'tracks/name:Drift' " +
+  "'tracks/N/slots/M/clip', 'tracks/N/arrangement/M' (arrangement clips in time order), 'tracks/N/take_lanes/K', 'tracks/N/devices/M' (also returns/N and master; then '/parameters/P', '/sample' for a Simpler, '/chains/C/devices/...', '/drum_pads/NOTE', '/mixer/volume', 'master/mixer/crossfader'), 'grooves/N' (groove pool), 'cue_points/N' and 'app' (the Live application). Indices are 0-based. A name selector works anywhere a number does, e.g. 'tracks/name:Drift' " +
   '(exact match; several matches is an error that lists their indices).';
 
 export const TOOL_SPECS: ToolSpec[] = [
@@ -66,7 +66,7 @@ export const TOOL_SPECS: ToolSpec[] = [
   {
     name: 'set_properties',
     description:
-      'Set properties on the Song, a Track, Scene, ClipSlot, Clip, Groove, cue point, device, rack chain, drum pad or device PARAMETER (property `value`, checked against the parameter\'s own range). A clip\'s `groove` is set to a groove address (grooves/N). ' + ADDRESS_HELP +
+      'Set properties on the Song, a Track, Scene, ClipSlot, Clip, Groove, cue point, device, rack chain, drum pad or device PARAMETER (`value`, or `display` as Live shows it, e.g. "35 Hz"). A clip\'s `groove` is set to a groove address (grooves/N). ' + ADDRESS_HELP +
       ' Values are checked strictly (booleans must be true/false, integers whole numbers, enums given by name; see list_properties). ' +
       'Interdependent properties (e.g. loop_start/loop_end) can be set together in any order, and the call is all-or-nothing: if one ' +
       'write fails, the others are restored. Returns each property\'s previous and new value. Each call is one undo step in Live. ' +
@@ -109,10 +109,13 @@ export const TOOL_SPECS: ToolSpec[] = [
       "(playhead, play state and meters are ignored): compare fingerprints to detect edits, or hashes to see which track changed. " +
       "The hashes cover note edits (each MIDI clip lists a `notes_hash`), clip launch/loop/warp/gain/pitch/groove settings, sends, routing, " +
       "crossfader, stop buttons and the launch quantization, but not device parameter values. " +
-      "Set include_clips=false for a lighter summary (clip counts and hashes stay).",
+      "include_clips=false drops the clip lists (counts and hashes stay); include_scenes=false gives `scene_count` and `scenes_with_settings` instead. The master reports its `crossfader`.",
     inputSchema: {
       type: 'object',
-      properties: { include_clips: { type: 'boolean', description: 'List each track\'s clips (default true)' } }
+      properties: {
+        include_clips: { type: 'boolean', description: 'List each track\'s clips (default true)' },
+        include_scenes: { type: 'boolean' }
+      }
     },
     annotations: { readOnlyHint: true, destructiveHint: false, idempotentHint: true },
     bridge: { command: 'describe_set' }
@@ -361,12 +364,17 @@ export const TOOL_SPECS: ToolSpec[] = [
     description:
       "Read a device with all its parameters (`index`, `address`, `value`, `min`, `max`, `display` as Live shows it, `default`, `value_items` labels for quantized ones, `is_enabled`) and, for racks, its chains, return chains, occupied drum pads " +
       "(each with the addresses of the devices it holds) and macro state. `address`: 'tracks/2/devices/0', 'returns/0/devices/1', 'master/devices/0' or nested 'tracks/2/devices/0/chains/1/devices/2' (a name selector works too: 'tracks/2/devices/name:EQ Eight'). " +
-      "Device names per track are in describe_set. Change a parameter with set_properties on its address ('.../parameters/5' or '.../parameters/name:Frequency', field `value`; a quantized parameter also takes its label such as 'Low-pass'); " +
+      "Device names per track are in describe_set. " +
+      "Change a parameter with set_properties on its address ('.../parameters/5' or '.../parameters/name:Frequency', field `value` or `display` such as '35 Hz'; a quantized parameter also takes its label such as 'Low-pass'); " +
       "many at once with `items`. Devices also have properties (name, `on`, `collapsed`) and racks chains, pads and mixers have theirs: see list_properties. " +
       "Simpler, Wavetable, Drift, Meld, Eq Eight, Looper, Hybrid Reverb, Roar, Spectral Resonator, Shifter, Drum Cell and plug-ins also have their own properties and methods: the result's `specific` block lists them (choices such as a wavetable or voice mode are properties that take the label the device shows; `..._options` lists the labels), and a Simpler's sample is at '<device>/sample'.",
     inputSchema: {
       type: 'object',
-      properties: { address: { type: 'string', description: "A device, e.g. 'tracks/2/devices/0'" } },
+      properties: {
+        address: { type: 'string', description: "A device, e.g. 'tracks/2/devices/0'" },
+        changed_only: { type: 'boolean' },
+        names: { type: 'array', items: { type: 'string' } }
+      },
       required: ['address']
     },
     annotations: { readOnlyHint: true, destructiveHint: false, idempotentHint: true },
@@ -420,7 +428,9 @@ export const TOOL_SPECS: ToolSpec[] = [
         action: { type: 'string', enum: ['get', 'set'], description: 'Default get' },
         type: { type: 'string', description: "set: routing type display name, e.g. 'Ext. In', 'Master', 'Resampling', a track name" },
         channel: { type: 'string', description: "set: channel display name, e.g. '1/2'" },
-        allow_feedback: { type: 'boolean', description: 'set: allow input routings that can feed back (default false)' }
+        allow_feedback: { type: 'boolean', description: 'set: allow input routings that can feed back (default false)' },
+        include_available: { type: 'boolean' },
+        filter: { type: 'string' }
       },
       required: ['address', 'direction']
     },

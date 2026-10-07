@@ -130,6 +130,15 @@ class StructureMixin(object):
         hashed_info = dict((k, v) for k, v in info.items() if k not in ("clips", "arrangement"))
         hashed_info["extras"] = _track_extras(track, slots)
         info["hash"] = _digest(hashed_info)
+        if kind == "master":
+            # Performance state like the tempo: shown, but not hashed, so moving the crossfader is not a Set edit.
+            crossfader = _safe_attr(_safe_attr(track, "mixer_device"), "crossfader")
+            if crossfader is not None:
+                info["crossfader"] = round(crossfader.value, 4)
+                try:
+                    info["crossfader_display"] = crossfader.str_for_value(crossfader.value)
+                except Exception:
+                    pass
         return info
 
     def _track_kind(self, track):
@@ -139,7 +148,7 @@ class StructureMixin(object):
             return "midi"
         return "audio"
 
-    def _describe_set(self, include_clips=True):
+    def _describe_set(self, include_clips=True, include_scenes=True):
         song = self._song
         summaries = {
             "tracks": [self._track_summary(t, "tracks/{0}".format(i), self._track_kind(t), include_clips) for i, t in enumerate(song.tracks)],
@@ -157,14 +166,23 @@ class StructureMixin(object):
         fingerprint = _digest({"song": stable, "tracks": [t["hash"] for t in summaries["tracks"]],
                                "returns": [t["hash"] for t in summaries["returns"]], "master": summaries["master"]["hash"],
                                "scenes": scenes, "cue_points": cues})
-        result = {"fingerprint": fingerprint, "song": dict(stable, is_playing=bool(_safe_attr(song, "is_playing", False))),
-                  "scenes": scenes, "cue_points": cues}
+        result = {"fingerprint": fingerprint, "song": dict(stable, is_playing=bool(_safe_attr(song, "is_playing", False)))}
+        if include_scenes:
+            result["scenes"] = scenes
+        else:
+            # The fingerprint above already saw every scene; the lean form lists only scenes that carry a name, a tempo or a time signature.
+            result["scene_count"] = len(scenes)
+            result["scenes_with_settings"] = [s for s in scenes if s["name"] or s["tempo_enabled"] or s["time_signature_enabled"]]
+        result["cue_points"] = cues
         result.update(summaries)
         return result
 
     @command("describe_set")
     def _cmd_describe_set(self, params):
-        return self._describe_set(params.get("include_clips", True))
+        for name in ("include_clips", "include_scenes"):
+            if not isinstance(params.get(name, True), bool):
+                raise BridgeError("{0} must be true or false".format(name), "TYPE_ERROR")
+        return self._describe_set(params.get("include_clips", True), params.get("include_scenes", True))
 
     # ---- get_capabilities
 

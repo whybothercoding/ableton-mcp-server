@@ -40,7 +40,7 @@ class RoutingMixin(object):
         value = _safe_attr(owner, "{0}_routing_{1}".format(direction, what))
         return value
 
-    def _describe_routing(self, owner, canonical, direction):
+    def _describe_routing(self, owner, canonical, direction, include_available=True, name_filter=None):
         categories, layouts = _category_names(), _layout_names()
         current_type = self._routing_attr(owner, direction, "type")
         current_channel = self._routing_attr(owner, direction, "channel")
@@ -48,14 +48,23 @@ class RoutingMixin(object):
             raise BridgeError("'{0}' has no {1} routing".format(canonical, direction), "UNAVAILABLE")
         types = list(_safe_attr(owner, "available_{0}_routing_types".format(direction), []))
         channels = list(_safe_attr(owner, "available_{0}_routing_channels".format(direction), []))
-        return {
+        result = {
             "address": canonical, "direction": direction,
             "type": {"display_name": current_type.display_name, "category": categories.get(int(current_type.category), int(current_type.category))},
             "channel": None if current_channel is None else {"display_name": current_channel.display_name,
                                                               "layout": layouts.get(int(current_channel.layout), int(current_channel.layout))},
-            "available_types": [{"display_name": t.display_name, "category": categories.get(int(t.category), int(t.category))} for t in types],
-            "available_channels": [{"display_name": c.display_name, "layout": layouts.get(int(c.layout), int(c.layout))} for c in channels],
         }
+        if not include_available:
+            result["available_types_count"], result["available_channels_count"] = len(types), len(channels)
+            return result
+        if name_filter:
+            needle = name_filter.lower()
+            types = [t for t in types if needle in t.display_name.lower()]
+            channels = [c for c in channels if needle in c.display_name.lower()]
+            result["filter"] = name_filter
+        result["available_types"] = [{"display_name": t.display_name, "category": categories.get(int(t.category), int(t.category))} for t in types]
+        result["available_channels"] = [{"display_name": c.display_name, "layout": layouts.get(int(c.layout), int(c.layout))} for c in channels]
+        return result
 
     @staticmethod
     def _pick(items, wanted, label):
@@ -86,8 +95,16 @@ class RoutingMixin(object):
         if direction not in DIRECTIONS:
             raise BridgeError("direction must be 'input' or 'output'", "INVALID_ARGUMENT")
         kind, owner, canonical = self._routing_owner(params.get("address"))
+        # A track's channel list can hold hundreds of entries (every pad of a Drum Rack, every device): get lists them unless told
+        # not to, set answers briefly unless asked; `filter` keeps only the display names that contain a text.
+        include_available = params.get("include_available", action == "get")
+        name_filter = params.get("filter")
+        if not isinstance(include_available, bool):
+            raise BridgeError("include_available must be true or false", "TYPE_ERROR")
+        if name_filter is not None and not isinstance(name_filter, str):
+            raise BridgeError("filter must be a text", "TYPE_ERROR")
         if action == "get":
-            return self._describe_routing(owner, canonical, direction)
+            return self._describe_routing(owner, canonical, direction, include_available, name_filter)
         wanted_type, wanted_channel = params.get("type"), params.get("channel")
         if wanted_type is None and wanted_channel is None:
             raise BridgeError("set needs type and/or channel (display names as returned by get)", "INVALID_ARGUMENT")
@@ -97,7 +114,7 @@ class RoutingMixin(object):
         allow = params.get("allow_feedback", False)
         if not isinstance(allow, bool):
             raise BridgeError("allow_feedback must be true or false", "TYPE_ERROR")
-        before = self._describe_routing(owner, canonical, direction)
+        before = self._describe_routing(owner, canonical, direction, False)
         if wanted_type is not None:
             chosen = self._pick(list(getattr(owner, "available_{0}_routing_types".format(direction))), wanted_type, "Routing type")
             warning = self._feedback_risk(kind, owner, direction, chosen)
@@ -107,6 +124,6 @@ class RoutingMixin(object):
         if wanted_channel is not None:
             channel = self._pick(list(getattr(owner, "available_{0}_routing_channels".format(direction))), wanted_channel, "Routing channel")
             setattr(owner, "{0}_routing_channel".format(direction), channel)
-        after = self._describe_routing(owner, canonical, direction)
+        after = self._describe_routing(owner, canonical, direction, include_available, name_filter)
         after["from"] = {"type": before["type"]["display_name"], "channel": (before["channel"] or {}).get("display_name")}
         return after

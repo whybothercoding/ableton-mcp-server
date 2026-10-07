@@ -5,6 +5,8 @@ properties (loop end before loop start...). This layer validates and coerces fir
 by name, never raw ints from the caller), applies writes in as many passes as needed so dependent properties order
 themselves, and reads every value back. It is a curated table now; a generated registry replaces it later.
 """
+import re
+
 import Live
 
 from . import api_registry
@@ -45,6 +47,15 @@ def _mixer_get(name):
 
 def _mixer_set(name):
     return lambda track, value: setattr(track.mixer_device, name, value)
+
+
+def _mixer_value_get(name):
+    """Value of a mixer parameter (the master's crossfader and cue volume); other tracks have none, so reading raises."""
+    return lambda track: getattr(track.mixer_device, name).value
+
+
+def _mixer_value_set(name):
+    return lambda track, value: setattr(getattr(track.mixer_device, name), "value", value)
 
 
 def _device_on_parameter(device):
@@ -96,6 +107,105 @@ def _parameter_value(parameter, value):
     if value < parameter.min or value > parameter.max:
         raise BridgeError("value {0:g} is outside this parameter's range {1:g} to {2:g}".format(value, parameter.min, parameter.max), "OUT_OF_RANGE")
     return value
+
+
+_DISPLAY_NUMBER = re.compile(r"^\s*([-+]?(?:\d+\.?\d*|\.\d+))\s*([A-Za-z%°µ]*)")
+_UNIT_SCALE = {"khz": ("hz", 1000.0), "hz": ("hz", 1.0), "ms": ("s", 0.001), "s": ("s", 1.0)}
+
+
+def _display_number(text):
+    """(number, unit) of a value as Live displays it, in base units: '1.50 kHz' is (1500.0, 'hz'), '129 ms' is (0.129, 's'),
+    '-26.1 dB' is (-26.1, 'db'), '3.99 : 1' is (3.99, ''), '-inf dB' is (-inf, 'db'). None when it has no leading number."""
+    text = str(text).strip()
+    lowered = text.lower().replace("- inf", "-inf")
+    if lowered.startswith("-inf"):
+        unit = lowered[4:].strip()
+        return float("-inf"), _UNIT_SCALE.get(unit, (unit, 1.0))[0]
+    match = _DISPLAY_NUMBER.match(text)
+    if match is None:
+        return None
+    unit, scale = _UNIT_SCALE.get(match.group(2).lower(), (match.group(2).lower(), 1.0))
+    return float(match.group(1)) * scale, unit
+
+
+def _display_precision(text):
+    """Half a display step of the leading number of `text`, in base units: the precision the caller asked for
+    ('35 Hz' is 0.5, '-26.1 dB' is 0.05, '129 ms' is 0.0005 s)."""
+    match = _DISPLAY_NUMBER.match(str(text))
+    if match is None:
+        return 0.0
+    decimals = len(match.group(1).split(".")[1]) if "." in match.group(1) else 0
+    return 0.5 * (10.0 ** -decimals) * _UNIT_SCALE.get(match.group(2).lower(), (None, 1.0))[1]
+
+
+def _display_of(parameter, raw):
+    try:
+        return parameter.str_for_value(raw)
+    except Exception:
+        return None
+
+
+def _parameter_display(parameter, text):
+    """Turn a displayed value ('35 Hz', '-26 dB', '129 ms', 'Low pass') into the raw value that makes Live show it.
+
+    A quantized parameter takes its label. For the others the display is searched by bisection (Live gives no inverse of
+    str_for_value). The nearest displayable value wins; a value the display cannot reach, or a text in another unit, is
+    refused with what the parameter does show, never silently rounded to something else."""
+    if not parameter.is_enabled:
+        raise BridgeError("Parameter '{0}' is not enabled (macro-mapped or switched off by another parameter)".format(parameter.name), "UNAVAILABLE")
+    if not isinstance(text, str) or not text.strip():
+        raise BridgeError("display must be the value as Live shows it, for example '35 Hz'", "TYPE_ERROR")
+    if parameter.is_quantized:
+        items = list(parameter.value_items)
+        for index, item in enumerate(items):
+            if item.strip().lower() == text.strip().lower():
+                return float(parameter.min + index)
+        raise BridgeError("display must be one of: {0}".format(", ".join(items)), "INVALID_ARGUMENT")
+    wanted = _display_number(text)
+    if wanted is None:
+        raise BridgeError("display '{0}' has no number: write it the way Live shows it, for example '35 Hz'".format(text), "INVALID_ARGUMENT")
+    target, unit = wanted
+    low, high = float(parameter.min), float(parameter.max)
+    shown_low, shown_high = _display_of(parameter, low), _display_of(parameter, high)
+    number_low, number_high = _display_number(shown_low or ""), _display_number(shown_high or "")
+    if number_low is None or number_high is None:
+        raise BridgeError("'{0}' has no numeric display ('{1}' to '{2}'): set its value instead".format(parameter.name, shown_low, shown_high), "INVALID_ARGUMENT")
+    range_unit = number_high[1] or number_low[1]
+    if unit and range_unit and unit != range_unit:
+        raise BridgeError("'{0}' shows {1} ('{2}' to '{3}'): '{4}' is in another unit".format(parameter.name, range_unit, shown_low, shown_high, text), "INVALID_ARGUMENT")
+    ends = (number_low[0], number_high[0])
+    if ends[0] == ends[1]:
+        raise BridgeError("'{0}' shows the same value ('{1}') at both ends of its range".format(parameter.name, shown_low), "INVALID_ARGUMENT")
+    rising = ends[1] > ends[0]
+    if not min(ends) <= target <= max(ends):
+        raise BridgeError("{0} is outside what '{1}' can show: '{2}' to '{3}'".format(text, parameter.name, shown_low, shown_high), "OUT_OF_RANGE")
+
+    def shown(raw):
+        parsed = _display_number(_display_of(parameter, raw) or "")
+        return None if parsed is None else parsed[0]
+
+    for _ in range(64):
+        middle = (low + high) / 2.0
+        current = shown(middle)
+        if current is None:
+            break
+        if (current < target) == rising:
+            low = middle
+        else:
+            high = middle
+    scored = [(abs(shown(raw) - target), raw) for raw in (low, (low + high) / 2.0, high) if shown(raw) is not None]
+    if not scored:
+        raise BridgeError("could not read the display of '{0}'".format(parameter.name), "LIVE_ERROR")
+    distance, raw = min(scored)
+    # The precision the caller wrote decides what counts as a match: '35 Hz' accepts 34.6, '3.99' needs two decimals right.
+    if target != float("-inf") and distance > _display_precision(text) + 1e-9:
+        raise BridgeError("'{0}' cannot show {1}: the nearest it shows is '{2}'".format(parameter.name, text, _display_of(parameter, raw)), "OUT_OF_RANGE",
+                          {"nearest": _display_of(parameter, raw), "value": raw})
+    return raw
+
+
+def _display_set(parameter, raw):
+    parameter.value = raw
 
 
 RO = False
@@ -318,7 +428,9 @@ PROPERTY_SPECS = {
         "default_value": _spec("float", RO, doc="Not available for quantized parameters"),
         "is_quantized": _spec("bool", RO),
         "is_enabled": _spec("bool", RO, doc="False when macro-mapped or disabled by another parameter"),
-        "display": _spec("str", RO, doc="The value as Live shows it ('14.2 kHz')", get=_display_get),
+        "display": _spec("str", doc="The value as Live shows it ('14.2 kHz'). Writable: give the display you want ('35 Hz', '-26 dB', '129 ms', or a label for a quantized parameter) "
+                                    "instead of a raw value; the nearest displayable value is found, and one Live cannot show is refused with the nearest option",
+                         get=_display_get, set=_display_set, coerce=_parameter_display),
         "value_items": _spec("list", RO, doc="Labels of a quantized parameter", get=_value_items_get),
         "automation_state": _spec("int", RO, doc="0 none, 1 automation playing, 2 overridden"),
         "state": _spec("int", RO),
@@ -404,8 +516,24 @@ def _coerce(name, spec, value):
     return value
 
 
+MASTER_SPECS = {
+    "crossfader": _spec("float", doc="Crossfader position, -1 (A) to 1 (B)", lo=-1.0, hi=1.0, get=_mixer_value_get("crossfader"), set=_mixer_value_set("crossfader")),
+    "cue_volume": _spec("float", doc="Cue (headphone) volume, device value 0..1", lo=0.0, hi=1.0, get=_mixer_value_get("cue_volume"), set=_mixer_value_set("cue_volume")),
+}
+
+
+def _is_master(track):
+    """Only the master's mixer has a crossfader and a cue volume."""
+    try:
+        return track.mixer_device.crossfader is not None
+    except Exception:
+        return False
+
+
 def _kind_specs(kind, obj=None):
-    """The property table of a kind; a device (or a Simpler's sample) also has the properties of its own class."""
+    """The property table of a kind; a device (or a Simpler's sample) also has the properties of its own class, the master its crossfader."""
+    if kind == "track" and obj is not None and _is_master(obj):
+        return dict(PROPERTY_SPECS["track"], **MASTER_SPECS)
     if kind == "device" and obj is not None:
         extras = device_specific.specs_for_device(obj)
         return dict(PROPERTY_SPECS["device"], **extras) if extras else PROPERTY_SPECS["device"]
@@ -460,6 +588,9 @@ class PropertiesMixin(object):
         if not isinstance(values, dict) or not values:
             raise BridgeError("properties must be a non-empty object of name: value", "INVALID_ARGUMENT")
         specs = _kind_specs(kind, obj)
+        if kind == "parameter" and "value" in values and "display" in values:
+            raise BridgeError("give either value or display, not both", "INVALID_ARGUMENT")
+        raw_before = obj.value if kind == "parameter" and "display" in values else None
         pending = {}
         for name, value in values.items():
             if name not in specs:
@@ -497,7 +628,10 @@ class PropertiesMixin(object):
             if not progressed:
                 for name in reversed(done):
                     try:
-                        write(name, self._writable_value(specs[name], before[name], obj))
+                        if name == "display" and raw_before is not None:
+                            obj.value = raw_before          # exact: the displayed text only approximates the old value
+                        else:
+                            write(name, self._writable_value(specs[name], before[name], obj))
                     except Exception:
                         pass
                 raise errors[sorted(pending)[0]]

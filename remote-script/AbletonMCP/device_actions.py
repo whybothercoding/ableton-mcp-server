@@ -41,15 +41,38 @@ class DeviceActionsMixin(object):
                 "devices": [{"address": "{0}/devices/{1}".format(base, i), "name": d.name, "class_name": d.class_name}
                             for i, d in enumerate(chain.devices)]}
 
+    @staticmethod
+    def _differs_from_default(parameter):
+        """True when a parameter is not at its default. A quantized parameter has no readable default, so it always counts."""
+        try:
+            return abs(parameter.value - parameter.default_value) > 1e-6
+        except Exception:
+            return True
+
     @command("get_device")
     def _cmd_get_device(self, params):
         kind, device, canonical = self._resolve(params.get("address"))
         if kind != "device":
             raise BridgeError("get_device needs the address of a device (tracks/N/devices/M...), got '{0}' which is a {1}".format(canonical, kind),
                               "INVALID_ARGUMENT")
+        changed_only, wanted = params.get("changed_only", False), params.get("names")
+        if not isinstance(changed_only, bool):
+            raise BridgeError("changed_only must be true or false", "TYPE_ERROR")
+        if wanted is not None and (not isinstance(wanted, list) or not all(isinstance(n, str) for n in wanted)):
+            raise BridgeError("names must be a list of parameter names", "TYPE_ERROR")
+        listed = list(enumerate(device.parameters))
+        if wanted is not None:
+            lowered = [n.lower() for n in wanted]
+            unknown = [n for n in wanted if n.lower() not in [p.name.lower() for _i, p in listed]]
+            if unknown:
+                raise BridgeError("'{0}' has no parameter named {1}".format(device.name, unknown), "NOT_FOUND")
+            listed = [(i, p) for i, p in listed if p.name.lower() in lowered]
+        if changed_only:
+            listed = [(i, p) for i, p in listed if self._differs_from_default(p)]
         result = {"address": canonical, "name": device.name, "class_name": device.class_name,
                   "device_type": self._get_device_type(device), "is_active": _safe_attr(device, "is_active"),
-                  "parameters": [self._parameter_summary(i, p, canonical) for i, p in enumerate(device.parameters)]}
+                  "parameter_count": len(device.parameters),
+                  "parameters": [self._parameter_summary(i, p, canonical) for i, p in listed]}
         extras = device_specific.specs_for_device(device)
         if extras:
             result["specific"] = {"class": device_specific.device_kind_of(device),

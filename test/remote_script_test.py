@@ -82,6 +82,27 @@ class FakeParam(object):
         object.__setattr__(self, key, val)
 
 
+class ScaledParam(FakeParam):
+    """A parameter whose display is a function of the raw value, like Live's frequency, time, level and ratio knobs."""
+
+    def __init__(self, name, kind, value=0.0, enabled=True):
+        FakeParam.__init__(self, name, value, 0.0, 1.0, enabled)
+        self.kind = kind
+
+    def str_for_value(self, value):
+        if self.kind == "hz":
+            hz = 10.0 * 2200.0 ** value
+            return "{0:.1f} Hz".format(hz) if hz < 1000 else "{0:.2f} kHz".format(hz / 1000.0)
+        if self.kind == "ms":
+            ms = 1.0 + 1999.0 * value
+            return "{0:.0f} ms".format(ms) if ms < 1000 else "{0:.2f} s".format(ms / 1000.0)
+        if self.kind == "db":
+            return "-inf dB" if value <= 0.0 else "{0:.2f} dB".format(-70.0 + 76.0 * value)
+        if self.kind == "ratio":
+            return "{0:.2f} : 1".format(1.0 + 19.0 * value)
+        raise AssertionError(self.kind)
+
+
 class FakeEnvelopeEvent(object):
     def __init__(self, time, value, control_coefficients=None):
         self.time, self.value, self.control_coefficients = time, value, control_coefficients
@@ -1200,6 +1221,25 @@ class StructureTests(unittest.TestCase):
         self.assertNotIn("clips", summary["tracks"][0])
         self.assertEqual(summary["tracks"][0]["clip_count"], 1)
         self.assertEqual(summary["fingerprint"], self.script._describe_set()["fingerprint"])
+
+    def test_include_scenes_false_keeps_the_fingerprint_and_lists_only_scenes_with_settings(self):
+        self.song.scenes[0].name, self.song.scenes[1].name = "", "Drop"
+        full = self.script._describe_set()
+        lean = self.script._describe_set(include_scenes=False)
+        self.assertNotIn("scenes", lean)
+        self.assertEqual((lean["scene_count"], [s["address"] for s in lean["scenes_with_settings"]]), (len(full["scenes"]), ["scenes/1"]))
+        self.assertEqual(lean["fingerprint"], full["fingerprint"])
+        self.assertEqual(self.run_command("describe_set", {"include_scenes": "no"})["code"], "TYPE_ERROR")
+        self.assertEqual(self.run_command("describe_set", {"include_scenes": False, "include_clips": False})["status"], "success")
+
+    def test_the_master_reports_its_crossfader_without_hashing_it(self):
+        self.song.master_track.mixer_device.crossfader = FakeParam("Crossfader", 0.0, -1.0, 1.0)
+        base = self.script._describe_set()
+        self.assertEqual((base["master"]["crossfader"], base["tracks"][0].get("crossfader")), (0.0, None))
+        self.song.master_track.mixer_device.crossfader.value = 0.75
+        moved = self.script._describe_set()
+        self.assertEqual(moved["master"]["crossfader"], 0.75)
+        self.assertEqual((moved["fingerprint"], moved["master"]["hash"]), (base["fingerprint"], base["master"]["hash"]))
 
     def test_fingerprint_is_stable_and_ignores_volatile_state(self):
         base = self.script._describe_set()["fingerprint"]
@@ -2517,6 +2557,43 @@ class DeviceTests(unittest.TestCase):
         got = self.ok("get_properties", address="tracks/0/devices/0/parameters/1", names=["name", "value", "min", "max", "display", "default_value"])["properties"]
         self.assertEqual(got, {"name": "Freq", "value": 0.5, "min": 0.0, "max": 1.0, "display": "0.5 units", "default_value": 0.0})
 
+    def scaled(self):
+        """EQ Eight gets four parameters with realistic displays: 1 Hz, 2 ms, 3 dB, 4 ratio; 5 is disabled."""
+        device = self.synth.devices[3]
+        device.parameters = [ScaledParam("Freq", "hz", 0.3), ScaledParam("Time", "ms", 0.1), ScaledParam("Level", "db", 0.9), ScaledParam("Ratio", "ratio", 0.1),
+                             ScaledParam("Locked", "hz", 0.3, enabled=False)]
+        return device, "tracks/0/devices/3/parameters/{0}"
+
+    def test_a_parameter_can_be_set_by_the_value_it_displays(self):
+        device, address = self.scaled()
+        applied = self.ok("set_properties", address=address.format(0), properties={"display": "35 Hz"})["applied"]["display"]
+        self.assertEqual(applied["to"], "35.0 Hz")
+        self.assertEqual(self.ok("set_properties", address=address.format(0), properties={"display": "1.5 kHz"})["applied"]["display"]["to"], "1.50 kHz")
+        self.assertEqual(self.ok("set_properties", address=address.format(1), properties={"display": "129 ms"})["applied"]["display"]["to"], "129 ms")
+        self.assertEqual(self.ok("set_properties", address=address.format(1), properties={"display": "1.2 s"})["applied"]["display"]["to"], "1.20 s")
+        self.assertEqual(self.ok("set_properties", address=address.format(2), properties={"display": "-26.1 dB"})["applied"]["display"]["to"], "-26.10 dB")
+        self.assertEqual(self.ok("set_properties", address=address.format(3), properties={"display": "4.00 : 1"})["applied"]["display"]["to"], "4.00 : 1")
+        self.assertEqual(self.ok("set_properties", address=address.format(2), properties={"display": "-inf dB"})["applied"]["display"]["to"], "-inf dB")
+        self.assertEqual(device.parameters[2].value, 0.0)
+
+    def test_a_display_that_cannot_be_shown_is_refused_with_the_nearest_option(self):
+        device, address = self.scaled()
+        before = [p.value for p in device.parameters]
+        self.assertEqual(self.code("set_properties", address=address.format(3), properties={"display": "4.001 : 1"}), "OUT_OF_RANGE")   # more precision than the display has
+        self.assertEqual(self.code("set_properties", address=address.format(0), properties={"display": "50 kHz"}), "OUT_OF_RANGE")
+        self.assertEqual(self.code("set_properties", address=address.format(0), properties={"display": "35 dB"}), "INVALID_ARGUMENT")      # another unit
+        self.assertEqual(self.code("set_properties", address=address.format(0), properties={"display": "loud"}), "INVALID_ARGUMENT")
+        self.assertEqual(self.code("set_properties", address=address.format(0), properties={"display": ""}), "TYPE_ERROR")
+        self.assertEqual(self.code("set_properties", address=address.format(0), properties={"display": 35}), "TYPE_ERROR")
+        self.assertEqual(self.code("set_properties", address=address.format(4), properties={"display": "35 Hz"}), "UNAVAILABLE")
+        self.assertEqual(self.code("set_properties", address=address.format(0), properties={"display": "35 Hz", "value": 0.2}), "INVALID_ARGUMENT")
+        self.assertEqual([p.value for p in device.parameters], before, "a refused write must change nothing")
+
+    def test_a_quantized_parameter_takes_its_label_as_display(self):
+        self.ok("set_properties", address="tracks/0/devices/0/parameters/4", properties={"display": "c"})
+        self.assertEqual(self.synth.devices[0].parameters[4].value, 2.0)
+        self.assertEqual(self.code("set_properties", address="tracks/0/devices/0/parameters/4", properties={"display": "D"}), "INVALID_ARGUMENT")
+
     def test_mixer_parameters_are_parameters_too(self):
         self.ok("set_properties", address="tracks/0/mixer/volume", properties={"value": 0.5})
         self.assertEqual(self.synth.mixer_device.volume.value, 0.5)
@@ -2544,6 +2621,19 @@ class DeviceTests(unittest.TestCase):
         self.assertEqual(plain["parameters"][1]["address"], "tracks/0/devices/0/parameters/1")
         self.assertEqual(plain["parameters"][4]["value_items"], ["A", "B", "C"])
         self.assertNotIn("chains", plain)
+
+    def test_get_device_can_list_only_changed_or_named_parameters(self):
+        everything = self.ok("get_device", address="tracks/0/devices/0")
+        self.assertEqual((everything["parameter_count"], len(everything["parameters"])), (5, 5))
+        changed = self.ok("get_device", address="tracks/0/devices/0", changed_only=True)["parameters"]
+        self.assertEqual([p["name"] for p in changed], ["Device On", "Freq", "Drive", "Mode"])      # 'Off' sits at its default; a quantized parameter has none to compare
+        named = self.ok("get_device", address="tracks/0/devices/0", names=["freq", "DRIVE"])
+        self.assertEqual(([p["name"] for p in named["parameters"]], named["parameter_count"]), (["Freq", "Drive"], 5))
+        self.assertEqual([p["name"] for p in self.ok("get_device", address="tracks/0/devices/0", names=["Off", "Freq"], changed_only=True)["parameters"]], ["Freq"])
+        self.assertEqual(changed[1]["address"], "tracks/0/devices/0/parameters/1")
+        self.assertEqual(self.code("get_device", address="tracks/0/devices/0", names=["Nope"]), "NOT_FOUND")
+        self.assertEqual(self.code("get_device", address="tracks/0/devices/0", names="Freq"), "TYPE_ERROR")
+        self.assertEqual(self.code("get_device", address="tracks/0/devices/0", changed_only="yes"), "TYPE_ERROR")
 
     def test_get_device_lists_only_occupied_drum_pads(self):
         info = self.ok("get_device", address="tracks/0/devices/2")
@@ -4088,6 +4178,20 @@ class RoutingTests(unittest.TestCase):
         self.ok(address="tracks/0", direction="input", action="set", channel="1")
         self.assertEqual(self.track.input_routing_channel.display_name, "1")
 
+    def test_set_answers_briefly_and_get_can_filter_or_skip_the_lists(self):
+        brief = self.ok(address="tracks/0", direction="input", action="set", type="2-Bass", channel="3/4")
+        self.assertNotIn("available_types", brief)
+        self.assertEqual((brief["available_types_count"], brief["available_channels_count"]), (4, 3))
+        full = self.ok(address="tracks/0", direction="input", action="set", channel="1/2", include_available=True)
+        self.assertEqual(len(full["available_types"]), 4)
+        filtered = self.ok(address="tracks/0", direction="input", filter="BASS")
+        self.assertEqual(([t["display_name"] for t in filtered["available_types"]], filtered["available_channels"], filtered["filter"]), (["2-Bass"], [], "BASS"))
+        self.assertEqual([c["display_name"] for c in self.ok(address="tracks/0", direction="input", filter="3")["available_channels"]], ["3/4"])
+        counts = self.ok(address="tracks/0", direction="input", include_available=False)
+        self.assertEqual((counts.get("available_types"), counts["available_types_count"]), (None, 4))
+        self.assertEqual(self.code(address="tracks/0", direction="input", include_available="yes"), "TYPE_ERROR")
+        self.assertEqual(self.code(address="tracks/0", direction="input", filter=3), "TYPE_ERROR")
+
     def test_unknown_names_list_what_exists_and_change_nothing(self):
         response = self.run_command({"address": "tracks/0", "direction": "input", "action": "set", "type": "Nowhere"})
         self.assertEqual(response["code"], "NOT_FOUND")
@@ -4139,6 +4243,17 @@ class RoutingTests(unittest.TestCase):
         self.assertEqual(got["result"]["properties"], {"crossfade_assign": "B", "panning_mode": "stereo_split"})
         bad = self.script._process_command({"type": "set_properties", "params": {"address": "tracks/0", "properties": {"crossfade_assign": "C"}}})
         self.assertEqual(bad["code"], "INVALID_ARGUMENT")
+
+    def test_the_master_has_a_crossfader_and_a_cue_volume_property(self):
+        mixer = self.song.master_track.mixer_device
+        mixer.crossfader, mixer.cue_volume = FakeParam("Crossfader", -1.0, -1.0, 1.0), FakeParam("Cue Volume", 0.85, 0.0, 1.0)
+        self.ok_properties("master", {"crossfader": 0.5, "cue_volume": 0.4})
+        got = self.script._process_command({"type": "get_properties", "params": {"address": "master", "names": ["crossfader", "cue_volume"]}})
+        self.assertEqual(got["result"]["properties"], {"crossfader": 0.5, "cue_volume": 0.4})
+        bad = self.script._process_command({"type": "set_properties", "params": {"address": "master", "properties": {"crossfader": 2}}})
+        self.assertEqual(bad["code"], "OUT_OF_RANGE")
+        other = self.script._process_command({"type": "get_properties", "params": {"address": "tracks/0", "names": ["crossfader"]}})
+        self.assertEqual(other["code"], "NOT_FOUND")                                         # only the master has one
 
     def ok_properties(self, address, properties):
         response = self.script._process_command({"type": "set_properties", "params": {"address": address, "properties": properties}})
@@ -4270,6 +4385,8 @@ class RegistryTests(unittest.TestCase):
         for kind, specs in self.specs.items():
             for name, spec in sorted(specs.items()):
                 if not spec["rw"] or spec["type"] == "ref":       # references are covered by the groove tests; read-only kinds have nothing to write
+                    continue
+                if (kind, name) == ("parameter", "display"):      # takes the text Live shows ('35 Hz'), not a sample string: see DeviceTests
                     continue
                 value = self.sample_value(spec)
                 script._set_properties(addresses[kind], {name: value})
