@@ -31,6 +31,8 @@ def _meter_level(obj):
 class MeasureMixin(object):
     """measure."""
 
+    _measure = None          # the current or last run; a class default, because a hot-swap reloads the code without running __init__ again
+
     # ---- validation
 
     def _measure_targets(self, wanted):
