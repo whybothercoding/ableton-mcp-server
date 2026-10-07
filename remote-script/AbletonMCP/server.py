@@ -31,9 +31,10 @@ class ServerMixin(object):
         self.log_message("AbletonMCP disconnected")
 
     def _stop_server(self):
-        """Stop the pump timer, ramps, follow actions, open clients and the listening socket."""
+        """Stop the pump timer, ramps, follow actions, a running measurement (restoring what it changed), open clients and the listening socket."""
         self.running = False
         self._follow = {}
+        self._measure_cleanup()
         if self._pump_timer is not None:
             try:
                 self._pump_timer.stop()
@@ -91,6 +92,11 @@ class ServerMixin(object):
             self._tick_follow_actions()
         except Exception as e:
             self.log_message("Follow action error: " + str(e))
+            self.log_message(traceback.format_exc())
+        try:
+            self._tick_measure()
+        except Exception as e:
+            self.log_message("Measure error: " + str(e))
             self.log_message(traceback.format_exc())
 
     def _pump_accept(self):

@@ -2132,7 +2132,7 @@ class BatchTests(unittest.TestCase):
                  ({"ops": [self.op("create", kind="scene"), {"command": "get_properties", "params": []}]}, "INVALID_ARGUMENT"),
                  ({"ops": [self.op("create", kind="scene")], "on_error": "explode"}, "INVALID_ARGUMENT"),
                  ({"ops": [self.op("create", kind="scene")] * 101}, "INVALID_ARGUMENT")]
-        for command in ("batch", "history", "eval", "transport", "launch", "ramp_parameter", "cancel_ramps"):
+        for command in ("batch", "history", "eval", "transport", "launch", "ramp_parameter", "cancel_ramps", "measure"):
             cases.append(({"ops": [self.op("create", kind="scene"), self.op(command)]}, "INVALID_ARGUMENT"))
         for params, code in cases:
             response = self.run_command("batch", params)
@@ -3976,6 +3976,225 @@ class ArrangementTests(unittest.TestCase):
         self.song.undo_log.clear()
         self.ok("create", kind="arrangement_midi_clip", address="tracks/0", time=0, length=4)
         self.assertEqual(self.song.undo_log, ["begin", "end"])
+
+
+class MeterTrack(FakeTrack):
+    """A track with output meters and a playing slot, driven by MeasureWorld."""
+
+    def __init__(self, name, slots=3):
+        FakeTrack.__init__(self, name, with_clips=False)
+        self.clip_slots = [FakeSlot(FakeClip("{0}{1}".format(name, i), 4.0)) for i in range(slots)] + [FakeSlot()]
+        self.output_meter_left = self.output_meter_right = 0.0
+        self.playing_slot_index = -1
+
+
+class MeasureScene(object):
+    def __init__(self, world, index):
+        self.world, self.index, self.name, self.tempo, self.tempo_enabled, self.time_signature_enabled = world, index, "", -1.0, False, False
+
+    def fire(self):
+        self.world.pending.append(("scene", self.index))
+
+
+class MeasureWorld(object):
+    """A tiny transport for the measure engine: launches start on the next advance, meters follow the playing slots, and the
+    fake clock moves with the song so timeouts work."""
+
+    def __init__(self, test, slots=3):
+        self.test, self.script = test, test.script
+        song = make_song()
+        self.tracks = [MeterTrack("Kit", slots), MeterTrack("Bass", slots)]
+        self.master = song.master_track
+        self.master.output_meter_left = self.master.output_meter_right = 0.0
+        self.master.mixer_device.crossfader = FakeParam("Crossfader", 1.0, -1.0, 1.0)
+        song.tracks, song.return_tracks = self.tracks, []
+        song.scenes = [MeasureScene(self, i) for i in range(slots)]
+        song.is_playing, song.current_song_time = False, 0.0
+        song.stop_playing = lambda: (self.calls.append("stop"), setattr(song, "is_playing", False))
+        song.stop_all_clips = lambda quantized=True: self.silence()
+        self.pending, self.calls, self.launch_delay = [], [], 0.0
+        self.levels = {}                                          # (track name, slot) -> meter value while that slot plays
+        for track in self.tracks:
+            for index, slot in enumerate(track.clip_slots):
+                slot.fire = (lambda *a, t=track, i=index: self.pending.append(("slot", t.name, i)))
+        self.song = song
+        test.script._song = song
+        self.clock = FakeClock()
+        original = mod.clock.now
+        mod.clock.now = self.clock.time
+        test.addCleanup(setattr, mod.clock, "now", original)
+
+    def silence(self):
+        for track in self.tracks:
+            track.playing_slot_index = -1
+            track.output_meter_left = track.output_meter_right = 0.0
+        self.master.output_meter_left = self.master.output_meter_right = 0.0
+
+    def start(self, track, slot):
+        track.playing_slot_index = slot
+        level = self.levels.get((track.name, slot), 0.5)
+        track.output_meter_left, track.output_meter_right = level, level * 0.9
+        self.master.output_meter_left = self.master.output_meter_right = max(t.output_meter_left for t in self.tracks) * 0.8
+
+    def advance(self, beats, step=0.05):
+        moved = 0.0
+        while moved < beats - 1e-9:
+            moved += step
+            self.clock.now += step * 60.0 / self.song.tempo
+            for what in list(self.pending):
+                self.pending.remove(what)
+                self.song.is_playing = True
+                if what[0] == "scene":
+                    for track in self.tracks:
+                        if track.clip_slots[what[1]].has_clip:
+                            self.start(track, what[1])
+                else:
+                    self.start(next(t for t in self.tracks if t.name == what[1]), what[2])
+            if self.song.is_playing:
+                self.song.current_song_time += step
+            self.script._tick_measure()
+
+    def run_to_end(self, limit_beats=400):
+        spent = 0.0
+        while self.script._measure["state"] == "running" and spent < limit_beats:
+            self.advance(0.5)
+            spent += 0.5
+
+
+class MeasureTests(unittest.TestCase):
+    def setUp(self):
+        self.script = make_script()
+        self.addCleanup(self.script._stop_server)
+        self.world = MeasureWorld(self)
+        self.master_fader = self.world.master.mixer_device.volume
+
+    def call(self, **params):
+        return self.script._process_command({"type": "measure", "params": params})
+
+    def ok(self, **params):
+        response = self.call(**params)
+        self.assertEqual(response["status"], "success", response)
+        return response["result"]
+
+    def code(self, **params):
+        response = self.call(**params)
+        self.assertEqual(response["status"], "error", response)
+        return response["code"]
+
+    def start(self, **params):
+        params.setdefault("confirm_playback", True)
+        params.setdefault("settle_beats", 1)
+        params.setdefault("measure_beats", 2)
+        return self.ok(**params)
+
+    def test_it_plays_each_scene_and_reports_peak_and_mean_per_track_then_puts_everything_back(self):
+        self.world.levels = {("Kit", 1): 0.6, ("Bass", 1): 0.4, ("Kit", 2): 0.8}
+        self.master_fader.value = 0.85
+        started = self.start(steps=[{"scene": 1, "label": "mid"}, {"scene": 2}], targets=["tracks/0", "tracks/1", "master"], master_volume=0.55)
+        self.assertEqual((started["state"], started["of"]), ("running", 2))
+        self.assertEqual(self.master_fader.value, 0.55, "the main fader is lowered for the run")
+        self.world.run_to_end()
+        status = self.ok(action="status")
+        self.assertEqual(status["state"], "done")
+        first, second = status["results"]
+        self.assertEqual((first["label"], first["scene"]), ("mid", 1))
+        self.assertEqual((first["targets"]["tracks/0"]["peak"], first["targets"]["tracks/1"]["peak"]), (0.6, 0.4))
+        self.assertEqual(second["targets"]["tracks/0"]["mean"], 0.8)
+        self.assertGreater(first["samples"], 10)
+        self.assertEqual(self.master_fader.value, 0.85, "and put back")
+        self.assertIn("master fader", status["restored"])
+        self.assertFalse(self.world.song.is_playing)
+        self.assertEqual([t.playing_slot_index for t in self.world.tracks], [-1, -1])
+
+    def test_a_single_clip_step_waits_for_that_clip(self):
+        self.world.levels = {("Bass", 1): 0.33}
+        self.start(steps=[{"clip": "tracks/1/slots/1"}], targets=["tracks/1"])
+        self.world.run_to_end()
+        result = self.ok(action="status")["results"][0]
+        self.assertEqual((result["clips"], result["targets"]["tracks/1"]["peak"]), (["tracks/1/slots/1"], 0.33))
+
+    def test_it_bypasses_devices_and_sets_the_crossfader_for_the_run_and_restores_both(self):
+        device = self.world.tracks[0].devices[0]
+        self.world.master.devices = [FakeDevice("Limiter")]
+        limiter = self.world.master.devices[0]
+        self.start(steps=[{"scene": 0}], bypass=["master/devices/0"], crossfader=-1.0)
+        self.assertEqual((limiter.parameters[0].value, self.world.master.mixer_device.crossfader.value), (0.0, -1.0))
+        self.world.run_to_end()
+        self.assertEqual((limiter.parameters[0].value, self.world.master.mixer_device.crossfader.value), (1, 1.0))
+        self.assertEqual(device.parameters[0].value, 1)
+
+    def test_per_step_parameters_are_set_before_the_launch_and_restored_at_the_end(self):
+        freq = self.world.tracks[1].devices[0].parameters[1]                    # Freq 0.5
+        steps = [{"scene": 0, "set": [{"address": "tracks/1/devices/0/parameters/1", "value": 0.1}]},
+                 {"scene": 1, "set": [{"address": "tracks/1/devices/0/parameters/1", "display": "0.9 units"}]}]
+        seen = []
+        self.start(steps=steps)
+        original = self.script._measure_record
+        self.script._measure_record = lambda *a, **k: (seen.append(freq.value), original(*a, **k))[1]
+        self.world.run_to_end()
+        self.assertEqual(seen[0], 0.1)
+        self.assertEqual(self.ok(action="status")["results"][0]["set"][0]["to"], 0.1)
+        self.assertEqual(freq.value, 0.5, "restored to what it was before the first step")
+
+    def test_abort_stops_playback_and_restores(self):
+        self.start(steps=[{"scene": 0}, {"scene": 1}], measure_beats=64)
+        self.world.advance(4)
+        self.assertEqual(self.master_fader.value, 0.55)
+        aborted = self.ok(action="abort")
+        self.assertEqual(aborted["state"], "aborted")
+        self.assertEqual(self.master_fader.value, 0.85)
+        self.assertEqual(self.code(action="abort"), "UNAVAILABLE")
+
+    def test_it_aborts_when_every_meter_reads_zero(self):
+        self.world.levels = {("Kit", 0): 0.0, ("Bass", 0): 0.0}
+        self.start(steps=[{"scene": 0}], measure_beats=64)
+        self.world.run_to_end()
+        status = self.ok(action="status")
+        self.assertEqual((status["state"], status["message"]), ("aborted", "all meters read 0"))
+        self.assertEqual(self.master_fader.value, 0.85)
+
+    def test_a_launch_that_never_starts_is_reported_and_the_next_step_still_runs(self):
+        original = self.world.start
+        self.world.start = lambda track, slot: None if slot == 0 else original(track, slot)
+        self.start(steps=[{"scene": 0}, {"scene": 1}])
+        self.world.run_to_end(limit_beats=600)
+        results = self.ok(action="status")["results"]
+        self.assertEqual(results[0]["error"], "did not start")
+        self.assertIn("targets", results[1])
+
+    def test_it_refuses_unconfirmed_playing_and_bad_steps_without_touching_anything(self):
+        self.assertEqual(self.code(steps=[{"scene": 0}]), "GUARD_FAILED")                     # no confirm_playback
+        self.world.song.is_playing = True
+        self.assertEqual(self.code(steps=[{"scene": 0}], confirm_playback=True), "GUARD_FAILED")
+        self.world.song.is_playing = False
+        for steps, code in [([], "INVALID_ARGUMENT"), ([{"scene": 9}], "OUT_OF_RANGE"), ([{"scene": 0, "clip": "tracks/0/slots/0"}], "INVALID_ARGUMENT"),
+                            ([{"clip": "tracks/0/slots/3"}], "NOT_FOUND"), ([{"clip": "scenes/0"}], "INVALID_ARGUMENT"),
+                            ([{"scene": 0, "set": [{"address": "tracks/0"}]}], "INVALID_ARGUMENT"),
+                            ([{"scene": 0, "set": [{"address": "tracks/0/devices/0/parameters/1", "value": 1, "display": "1"}]}], "INVALID_ARGUMENT"),
+                            ([{"scene": 0}] * 65, "OUT_OF_RANGE"), ("scene 0", "INVALID_ARGUMENT")]:
+            self.assertEqual(self.code(steps=steps, confirm_playback=True), code, steps)
+        self.assertEqual(self.code(steps=[{"scene": 0}], confirm_playback=True, measure_beats=0), "OUT_OF_RANGE")
+        self.assertEqual(self.code(steps=[{"scene": 0}], confirm_playback=True, master_volume=2), "OUT_OF_RANGE")
+        self.assertEqual(self.code(steps=[{"scene": 0}], confirm_playback=True, targets=["scenes/0"]), "INVALID_ARGUMENT")
+        self.assertEqual(self.code(steps=[{"scene": 0}], confirm_playback=True, bypass=["tracks/0"]), "INVALID_ARGUMENT")
+        self.assertEqual(self.code(action="launch"), "INVALID_ARGUMENT")
+        self.assertEqual(self.master_fader.value, 0.85)
+        self.assertEqual(self.ok(action="status")["state"], "idle")
+
+    def test_a_second_start_is_refused_while_one_is_running(self):
+        self.start(steps=[{"scene": 0}], measure_beats=64)
+        self.assertEqual(self.code(steps=[{"scene": 1}], confirm_playback=True, allow_while_playing=True), "GUARD_FAILED")
+
+    def test_stopping_the_script_mid_run_restores_the_main_fader(self):
+        self.start(steps=[{"scene": 0}], measure_beats=64)
+        self.script._stop_server()
+        self.assertEqual(self.master_fader.value, 0.85)
+
+    def test_a_failure_while_applying_the_options_restores_what_was_already_changed(self):
+        self.world.master.mixer_device.crossfader = None                       # crossfader writes will fail
+        response = self.call(steps=[{"scene": 0}], confirm_playback=True, crossfader=0.0)
+        self.assertEqual(response["status"], "error")
+        self.assertEqual(self.master_fader.value, 0.85)
 
 
 class RecordingTests(unittest.TestCase):

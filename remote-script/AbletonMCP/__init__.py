@@ -30,6 +30,7 @@ from .device_actions import DeviceActionsMixin
 from .automation import AutomationMixin
 from .browser import BrowserMixin
 from .browse import BrowseMixin
+from .measure import MeasureMixin
 
 
 def _compute_build_id():
@@ -50,7 +51,7 @@ def create_instance(c_instance):
     return AbletonMCP(c_instance)
 
 
-class AbletonMCP(ServerMixin, BatchMixin, AddressingMixin, DeviceAddressingMixin, PropertiesMixin, StructureMixin, LifecycleMixin, ClipActionsMixin, NotesMixin, IntrospectMixin, SessionMixin, TracksMixin, ClipsMixin, DevicesMixin, DeviceActionsMixin, RoutingMixin, ConversionsMixin, RecordingMixin, FollowActionsMixin, AutomationMixin, BrowserMixin, BrowseMixin,
+class AbletonMCP(ServerMixin, BatchMixin, AddressingMixin, DeviceAddressingMixin, PropertiesMixin, StructureMixin, LifecycleMixin, ClipActionsMixin, NotesMixin, IntrospectMixin, SessionMixin, TracksMixin, ClipsMixin, DevicesMixin, DeviceActionsMixin, RoutingMixin, ConversionsMixin, RecordingMixin, FollowActionsMixin, AutomationMixin, BrowserMixin, BrowseMixin, MeasureMixin,
                  ControlSurface):
     """AbletonMCP Remote Script for Ableton Live"""
 
@@ -67,7 +68,8 @@ class AbletonMCP(ServerMixin, BatchMixin, AddressingMixin, DeviceAddressingMixin
         self._clients = {}
         self._pump_timer = None
         self._ramps = {}
-        
+        self._measure = None
+
         # Cache the song reference for easier access
         self._song = self.song()
         

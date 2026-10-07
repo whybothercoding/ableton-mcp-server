@@ -2,6 +2,7 @@ import { AUDIO_SPECS } from './audio.js';
 import { BATCH_SPECS } from './batch.js';
 import { BROWSE_SPECS } from './browse.js';
 import { COMPOSITION_SPECS } from './composition.js';
+import { MEASURE_SPECS } from './measure.js';
 
 /**
  * Declarative tool specs: a tool's schema, MCP annotations and bridge mapping live in one place.
@@ -599,6 +600,6 @@ export const TOOL_SPECS: ToolSpec[] = [
   ...COMPOSITION_SPECS
 ];
 
-TOOL_SPECS.push(...BATCH_SPECS, ...BROWSE_SPECS, ...AUDIO_SPECS);
+TOOL_SPECS.push(...BATCH_SPECS, ...BROWSE_SPECS, ...AUDIO_SPECS, ...MEASURE_SPECS);
 
 export const TOOL_SPEC_BY_NAME: Record<string, ToolSpec> = Object.fromEntries(TOOL_SPECS.map((s) => [s.name, s]));

@@ -15,7 +15,7 @@ from .registry import _COMMANDS, BridgeError, _error_code, command
 
 MAX_OPS = 100
 NOT_BATCHABLE = ("batch", "history", "eval", "transport", "launch", "ramp_parameter", "cancel_ramps", "get_script_info",
-                 "get_health", "introspect_api")
+                 "get_health", "introspect_api", "measure")
 _REFERENCE = re.compile(r"\$(\d+)((?:\.[A-Za-z_]\w*|\[\d+\])*)")
 _STEP = re.compile(r"\.([A-Za-z_]\w*)|\[(\d+)\]")
 
