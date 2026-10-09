@@ -1,6 +1,6 @@
 // Live integration tests: run against a real Ableton Live with the AbletonMCP control surface enabled.
 //
-//   npm run build && node test/live-integration.mjs
+//   npm run build && node test/live-integration.mjs        (MCP_TEST_ONLY='a|b' runs only the checks whose name contains a or b)
 //
 // It needs a MIDI track with at least one device and an empty clip slot. Everything it touches is
 // restored afterwards: a scratch clip is created and deleted, parameter values are snapshotted and
@@ -43,6 +43,7 @@ const recordSkip = (name, reason, kind = 'content') => {
   console.log(`  skip ${name}\n       ${reason}`);
 };
 async function check(name, fn) {
+  if (process.env.MCP_TEST_ONLY && !process.env.MCP_TEST_ONLY.split('|').some((part) => name.includes(part))) return;      // MCP_TEST_ONLY=<text>[|<text>]: run only the checks whose name contains one of them (debugging)
   try {
     await fn();
     passed += 1;
@@ -132,6 +133,11 @@ const playbackNow = () => call('eval', {
   code: "{'playing': bool(self._song.is_playing), 'tempo': self._song.tempo, 'time': None if self._song.is_playing else round(self._song.current_song_time, 3), " +
         "'clips': [[i, j] for i, t in enumerate(self._song.tracks) for j, s in enumerate(t.clip_slots) if s.has_clip and s.clip.is_playing]}"
 });
+// Selection is not part of the fingerprint either, and creating or inserting things moves it: restore it and check it (view address)
+const SELECTION = ['selected_track', 'selected_scene', 'highlighted_clip_slot'];
+const selectionBefore = (await call('get_properties', { address: 'view', names: SELECTION })).properties;
+// Arming is not in the selection either, and Live's exclusive arm disarms the user's armed track the moment the suite creates a scratch instrument track
+const armedBefore = await call('eval', { code: '[i for i, t in enumerate(self._song.tracks) if t.can_be_armed and t.arm]' });
 const playbackBefore = await playbackNow();
 console.log(`Transport ${playbackBefore.playing ? 'playing' : 'stopped'} at ${playbackBefore.tempo} BPM, ${playbackBefore.clips.length} clips playing`);
 await call('create_clip', { track_index: T, clip_index: S, length: 4, name: 'MCP TEST' });
@@ -401,6 +407,52 @@ try {
     assert(!list.properties.warp_mode.values.includes('count'), 'the count sentinel must be hidden');
   });
 
+  console.log('\nViews');
+  await check('views: selection and window state read as addresses, write back, restore, and stay out of the fingerprint', async () => {
+    const fingerprint = (await call('describe_set', { include_clips: false })).fingerprint;
+    const saved = (await call('get_properties', { address: 'view' })).properties;
+    const savedApp = (await call('get_properties', { address: 'app/view' })).properties;
+    const trackView = `tracks/${T}/view`;
+    const clipView = `${clipAddr}/view`;
+    const savedTrackView = (await call('get_properties', { address: trackView })).properties;
+    const savedClipView = (await call('get_properties', { address: clipView })).properties;
+    assert(/^(tracks\/\d+|returns\/\d+|master)$/.test(saved.selected_track) && /^scenes\/\d+$/.test(saved.selected_scene), JSON.stringify(saved));
+    assert(['Session', 'Arranger'].includes(savedApp.focused_document_view) && savedApp.available_views.includes('Detail'), JSON.stringify(savedApp));
+    try {
+      const moved = await call('set_properties', { address: 'view', properties: { selected_track: `tracks/${T}`, selected_scene: 'scenes/0' } });
+      assert(moved.applied.selected_track.to === `tracks/${T}` && moved.applied.selected_scene.to === 'scenes/0', JSON.stringify(moved));
+      assert((await call('get_properties', { address: 'view', names: ['highlighted_clip_slot'] })).properties.highlighted_clip_slot === `tracks/${T}/slots/0`, 'the highlighted slot follows the selection');
+      await call('set_properties', { address: 'view', properties: { detail_clip: clipAddr } });
+      assert((await call('get_properties', { address: 'view', names: ['detail_clip'] })).properties.detail_clip === clipAddr, 'detail_clip reads back as the clip address');
+      const grid = await call('set_properties', { address: clipView, properties: { grid_quantization: 'g_eighth', grid_is_triplet: true } });
+      assert(grid.applied.grid_quantization.to === 'g_eighth' && grid.applied.grid_is_triplet.to === true, JSON.stringify(grid));
+      const collapsed = await call('set_properties', { address: trackView, properties: { is_collapsed: !savedTrackView.is_collapsed } });
+      assert(collapsed.applied.is_collapsed.to === !savedTrackView.is_collapsed, JSON.stringify(collapsed));
+      const device = (await call('get_properties', { address: `tracks/${T}/devices/${D}/view` })).properties;
+      assert(typeof device.is_collapsed === 'boolean', JSON.stringify(device));
+      const other = savedApp.focused_document_view === 'Session' ? 'Arranger' : 'Session';
+      const focused = await call('set_properties', { address: 'app/view', properties: { focused_document_view: other } });
+      assert(focused.applied.focused_document_view.to === other, JSON.stringify(focused));
+      assert((await call('get_properties', { address: 'app/view', names: ['visible_views'] })).properties.visible_views.includes(other), 'the view in front is visible');
+      await rejectsCode(() => call('set_properties', { address: 'view', properties: { selected_track: 'scenes/0' } }), 'TYPE_ERROR');
+      await rejectsCode(() => call('set_properties', { address: 'view', properties: { selected_parameter: `tracks/${T}/devices/${D}/parameters/1` } }), 'INVALID_ARGUMENT');
+      await rejectsCode(() => call('set_properties', { address: 'app/view', properties: { focused_document_view: 'Browser' } }), 'INVALID_ARGUMENT');
+      await rejectsCode(() => call('get_properties', { address: 'view/extra' }), 'NOT_FOUND');
+    } finally {
+      await call('set_properties', { address: clipView, properties: { grid_quantization: savedClipView.grid_quantization, grid_is_triplet: savedClipView.grid_is_triplet } }).catch(() => {});
+      await call('set_properties', { address: trackView, properties: { is_collapsed: savedTrackView.is_collapsed } }).catch(() => {});
+      await call('set_properties', { address: 'app/view', properties: { focused_document_view: savedApp.focused_document_view } }).catch(() => {});
+      await call('set_properties', { address: 'view', properties: { selected_track: saved.selected_track, selected_scene: saved.selected_scene } }).catch(() => {});
+      // writing detail_clip switches the Detail pane to its Clip tab and the server cannot set panels: put back the tab that was showing
+      const tab = ['Detail/Clip', 'Detail/DeviceChain'].find((name) => savedApp.visible_views.includes(name));
+      if (tab) await call('eval', { code: `self.application().view.show_view('${tab}')` }).catch(() => {});
+    }
+    const after = (await call('get_properties', { address: 'view' })).properties;
+    for (const key of ['selected_track', 'selected_scene', 'highlighted_clip_slot', 'follow_song', 'draw_mode']) assert(after[key] === saved[key], `${key}: ${saved[key]} -> ${after[key]}`);
+    assert(JSON.stringify((await call('get_properties', { address: 'app/view', names: ['visible_views'] })).properties.visible_views) === JSON.stringify(savedApp.visible_views), 'the visible panels are back');
+    assert((await call('describe_set', { include_clips: false })).fingerprint === fingerprint, 'view state must not move the Set fingerprint');
+  });
+
   console.log('\nStructure, capabilities, transport and history');
   await check('get_capabilities describes this Live and this bridge', async () => {
     const caps = await call('get_capabilities');
@@ -659,6 +711,26 @@ try {
       assert(await waitFor(async () => !(await clipState(['is_playing'])).properties.is_playing), 'the clip never stopped');
     }
   });
+  await check('an unquantized stop of a slot or clip is immediate (ClipSlot.stop alone waits for the next bar); the default stop follows the launch quantization', async () => {
+    const tempo = await call('eval', { code: 'self._song.tempo' });
+    const clipPlaying = async () => (await clipState(['is_playing'])).properties.is_playing;
+    for (const address of [`${lt}/slots/0`, launchClip]) {
+      await call('launch', { address: `${lt}/slots/0`, quantization: 'q_no_q' });
+      assert(await waitFor(clipPlaying, 2000), 'the clip never started');
+      const position = () => call('eval', { code: 'self._song.current_song_time % 4.0' });
+      assert(await waitFor(async () => { const t = await position(); return t > 0.5 && t < 2.5; }, 8000), 'never reached the middle of a bar');
+      const toBar = (4 - (await position())) * 60 / tempo;                          // seconds to the next bar line: a quantized stop would take about this long
+      const t0 = Date.now();
+      await call('launch', { address, action: 'stop', quantized: false });
+      assert(await waitFor(async () => !(await clipPlaying()), 3000), `${address}: the clip never stopped`);
+      const took = (Date.now() - t0) / 1000;
+      assert(took < 0.5 * toBar && took < 0.8, `${address}: an unquantized stop took ${took.toFixed(2)} s with the bar line ${toBar.toFixed(2)} s away`);
+    }
+    await call('launch', { address: `${lt}/slots/0`, quantization: 'q_no_q' });
+    assert(await waitFor(clipPlaying, 2000), 'the clip never started');
+    await call('launch', { address: `${lt}/slots/0`, action: 'stop' });
+    assert(await waitFor(async () => !(await clipPlaying()), 6000), 'a quantized stop should still stop the clip, at the next bar');
+  });
   await check('launch reports errors with codes and does not start anything', async () => {
     for (const [params, code] of [[{ address: lt }, 'INVALID_ARGUMENT'], [{ address: 'song' }, 'INVALID_ARGUMENT'],
       [{ address: `${lt}/slots/0`, quantization: 'q_never' }, 'INVALID_ARGUMENT'], [{ address: `${lt}/slots/999` }, 'OUT_OF_RANGE'],
@@ -672,6 +744,85 @@ try {
       throw new Error(`${JSON.stringify(params)} should have failed`);
     }
     assert(!(await clipState(['is_playing'])).properties.is_playing, 'a rejected launch started the clip');
+  });
+  await check('hold presses the fire button: a gate clip plays while held and the timer releases it; trigger clips keep playing; a plain fire is ended with hold false', async () => {
+    const before = (await clipState(['launch_mode', 'launch_quantization'])).properties;
+    const playing = async () => (await clipState(['is_playing'])).properties.is_playing;
+    try {
+      await call('set_properties', { address: launchClip, properties: { launch_mode: 'gate', launch_quantization: 'q_none' } });
+      const t0 = Date.now();
+      const held = await call('launch', { address: `${lt}/slots/0`, hold: true, hold_seconds: 1.2 });
+      assert(held.action === 'hold' && held.release_in_seconds === 1.2 && held.holding === 1, JSON.stringify(held));
+      assert(await waitFor(playing, 1000), 'the held gate clip never started');
+      assert(await waitFor(async () => !(await playing()), 3000), 'the hold never released itself');
+      const lasted = Date.now() - t0;
+      assert(lasted >= 1000 && lasted < 2800, `a 1.2 s hold lasted ${lasted} ms`);
+      const tempo = await call('eval', { code: 'self._song.tempo' });
+      const beats = await call('launch', { address: `${lt}/slots/0`, hold: true, hold_beats: 1 });
+      near(beats.release_in_seconds, 60 / tempo, 0.002, 'one beat in seconds');
+      const manual = await call('launch', { address: launchClip, hold: false });           // the clip address is the same button as its slot
+      assert(manual.action === 'release' && manual.was_held === true && manual.holding === 0, JSON.stringify(manual));
+      assert(await waitFor(async () => !(await playing()), 1500), 'a released gate clip keeps playing');
+      await call('launch', { address: `${lt}/slots/0` });                                    // a plain fire never gets its release...
+      assert(await waitFor(playing, 1500), 'the plain fire never started the clip');
+      const ended = await call('launch', { address: `${lt}/slots/0`, hold: false });         // ...so a release ends it
+      assert(ended.was_held === false, JSON.stringify(ended));
+      assert(await waitFor(async () => !(await playing()), 1500), 'hold false did not end a gate clip that a plain fire started');
+      await call('set_properties', { address: launchClip, properties: { launch_mode: 'trigger' } });
+      await call('launch', { address: `${lt}/slots/0`, hold: true, hold_seconds: 0.4 });
+      await sleep(1200);
+      assert(await playing(), 'a trigger clip should keep playing after its button is released');
+      for (const [params, code] of [[{ address: lt, hold: true }, 'INVALID_ARGUMENT'], [{ address: `${lt}/slots/0`, hold: true, legato: true }, 'INVALID_ARGUMENT'],
+        [{ address: `${lt}/slots/0`, hold: true, hold_seconds: 500 }, 'OUT_OF_RANGE'], [{ address: `${lt}/slots/0`, hold_seconds: 1 }, 'INVALID_ARGUMENT'],
+        [{ address: `${lt}/slots/0`, hold: 'yes' }, 'TYPE_ERROR']]) {
+        await rejectsCode(() => call('launch', params), code);
+      }
+    } finally {
+      await call('launch', { address: `${lt}/slots/0`, hold: false }).catch(() => {});
+      await call('launch', { address: lt, action: 'stop', quantized: false }).catch(() => {});
+      await call('set_properties', { address: launchClip, properties: before }).catch(() => {});
+    }
+  });
+  await check('duplicate copies a clip to a chosen slot (also on another track) and refuses an occupied slot, which Live would silently replace', async () => {
+    const other = await makeScratchTrack();
+    const here = `${lt}/slots/2`;
+    const there = `tracks/${other}/slots/1`;
+    const name = (address) => call('get_properties', { address, names: ['name'] }).then((r) => r.properties.name);
+    const copy = await call('duplicate', { address: `${lt}/slots/0`, to: here });
+    assert(copy.address === here && copy.name === 'MCP TEST LAUNCH' && (await name(`${here}/clip`)) === 'MCP TEST LAUNCH', JSON.stringify(copy));
+    const crossed = await call('duplicate', { address: `${lt}/slots/0`, to: there });
+    assert(crossed.address === there && (await name(`${there}/clip`)) === 'MCP TEST LAUNCH', JSON.stringify(crossed));
+    assert((await name(launchClip)) === 'MCP TEST LAUNCH', 'the source must be untouched');
+    await call('set_properties', { address: `${here}/clip`, properties: { name: 'MCP TEST KEEP' } });
+    await rejectsCode(() => call('duplicate', { address: `${lt}/slots/0`, to: here }), 'INVALID_ARGUMENT');
+    assert((await name(`${here}/clip`)) === 'MCP TEST KEEP', 'an occupied destination must be left alone');
+    for (const to of [`${lt}/slots/0`, launchClip, 'scenes/0']) await rejectsCode(() => call('duplicate', { address: `${lt}/slots/0`, to }), 'INVALID_ARGUMENT');
+    await rejectsCode(() => call('duplicate', { address: `${lt}/slots/3`, to: `${lt}/slots/4` }), 'INVALID_ARGUMENT');       // nothing to copy
+    await rejectsCode(() => call('duplicate', { address: lt, to: there }), 'INVALID_ARGUMENT');
+    await call('delete', { address: `${here}/clip`, expect: { name: 'MCP TEST KEEP' } });
+    await call('delete', { address: `${there}/clip`, expect: { name: 'MCP TEST LAUNCH' } });
+  });
+  await check('audio_snapshot lists every track, the master, the transport and the CPU; a playing clip shows with its mute state and the reasons it is silent', async () => {
+    const set = await call('describe_set', { include_clips: false, include_scenes: false });
+    const quiet = await call('audio_snapshot');
+    assert(quiet.tracks.length === set.tracks.length + set.returns.length + 1 && quiet.tracks.at(-1).address === 'master', `${quiet.tracks.length} rows`);
+    assert(typeof quiet.cpu.average === 'number' && typeof quiet.transport.tempo === 'number' && Array.isArray(quiet.notes) && Array.isArray(quiet.audible), JSON.stringify(quiet).slice(0, 200));
+    const row = (snap) => snap.tracks.find((r) => r.address === lt);
+    assert(row(quiet).playing_clip === null && typeof row(quiet).meter.left === 'number', JSON.stringify(row(quiet)));
+    try {
+      await call('launch', { address: `${lt}/slots/0`, quantization: 'q_no_q' });
+      assert(await waitFor(async () => (await call('audio_snapshot', { address: lt })).tracks[0].playing_clip !== null, 3000), 'the playing clip never showed up');
+      const playing = await call('audio_snapshot', { address: lt });
+      assert(playing.scope === lt && playing.tracks.length === 1 && playing.tracks[0].playing_clip.name === 'MCP TEST LAUNCH' && playing.tracks[0].playing_clip.address === launchClip, JSON.stringify(playing.tracks[0]));
+      assert(playing.notes.some((n) => n.includes('has no instrument')), `a MIDI clip on a track without an instrument is silent: ${JSON.stringify(playing.notes)}`);
+      await call('set_properties', { address: lt, properties: { mute: true } });
+      const muted = await call('audio_snapshot', { address: lt });
+      assert(muted.tracks[0].mute === true && muted.tracks[0].audible === false && muted.notes.some((n) => n.includes('is muted')), JSON.stringify(muted).slice(0, 300));
+      await rejectsCode(() => call('audio_snapshot', { address: `${lt}/slots/0` }), 'INVALID_ARGUMENT');
+    } finally {
+      await call('set_properties', { address: lt, properties: { mute: false } }).catch(() => {});
+      await call('launch', { address: lt, action: 'stop', quantized: false }).catch(() => {});
+    }
   });
   await check('record_length is refused by Live for a slot that already holds a clip, and the message comes through', async () => {
     try {
@@ -1264,6 +1415,14 @@ try {
   await check('browse lists the roots, pages a folder, and gives every item a path that browses deeper', async () => {
     const roots = await call('browse');
     assert(roots.roots.some((r) => r.name === 'instruments' && r.child_count > 5) && roots.roots.some((r) => r.name === 'audio_effects'), JSON.stringify(roots).slice(0, 300));
+    const lists = Object.fromEntries(roots.roots.map((r) => [r.name, r.child_count]));
+    assert('user_folders' in lists && 'colors' in lists && 'legacy_libraries' in lists, `the list-type roots are missing: ${Object.keys(lists)}`);
+    if (lists.user_folders > 0) {
+      const folders = await call('browse', { path: 'user_folders' });
+      assert(folders.total === lists.user_folders && folders.items.every((i) => i.path.startsWith('user_folders/') && i.uri.startsWith('userfolder:')), JSON.stringify(folders).slice(0, 300));
+      const first = folders.items.find((i) => i.has_children);
+      if (first) assert((await call('browse', { path: first.path, limit: 3 })).path === first.path, 'a user folder lists its content');
+    }
     const page = await call('browse', { path: 'instruments', limit: 5 });
     assert(page.items.length === 5 && page.total > 5 && page.truncated === true, JSON.stringify(page).slice(0, 200));
     const drift = (await call('browse', { path: 'instruments', kind: 'devices', limit: 200 })).items.find((i) => i.name === 'Drift');
@@ -1780,6 +1939,11 @@ try {
   console.log('\nAutomation by address: breakpoints, get_automation, merge edges');
   const autoClip = `tracks/${T}/slots/${S}/clip`;
   const autoParam = `tracks/${T}/devices/${D}/parameters/${pA.index}`;
+  // automation_state turns 1 when the clip is TRIGGERED, a bar before it plays; a write then is not an override. Wait for it to be playing.
+  const autoClipPlaying = async () => {
+    const p = (await call('get_properties', { address: autoClip, names: ['is_playing', 'is_triggered'] })).properties;
+    return p.is_playing && !p.is_triggered;
+  };
   const spanA = pA.max - pA.min;
   await check('breakpoint drawing is light: a linear ramp is two breakpoints, a curve a few dozen, and Live interpolates between them', async () => {
     const lin = await call('draw_automation', { clip: autoClip, parameter: autoParam, points: [{ time: 0, value: pA.min + 0.2 * spanA }, { time: 4, value: pA.min + 0.8 * spanA }] });
@@ -1842,10 +2006,10 @@ try {
       await call('device_action', { action: 're_enable_automation', address: 'song' }).catch(() => {});
     });
     await call('launch', { address: autoClip, quantized: false });
-    assert(await waitFor(async () => (await stateOf()) === 1, 8000), 'the clip automation should take the parameter over once the clip plays');
+    assert(await waitFor(async () => (await stateOf()) === 1 && (await autoClipPlaying()), 8000), 'the clip automation should take the parameter over once the clip plays');
     assert(!(await songCanReEnable()), 'nothing is overridden yet');
     await call('set_properties', { address: autoParam, properties: { value: pA.min + 0.9 * spanA } });   // a write while the automation plays is an override
-    assert(await waitFor(async () => (await stateOf()) === 2 && (await songCanReEnable()), 2000), `a write during playback should override the clip automation (state ${await stateOf()})`);
+    assert(await waitFor(async () => (await stateOf()) === 2 && (await songCanReEnable()), 2000), `a write during playback should override the clip automation (state ${await stateOf()}, can re-enable ${await songCanReEnable()}, clip ${JSON.stringify((await call('get_properties', { address: autoClip, names: ['is_playing', 'is_triggered', 'playing_position'] })).properties)}, song ${JSON.stringify((await call('get_properties', { address: 'song', names: ['is_playing', 'current_song_time'] })).properties)}, track ${JSON.stringify((await call('get_properties', { address: `tracks/${T}`, names: ['arm', 'playing_slot_index', 'fired_slot_index', 'current_monitoring_state'] })).properties)})`);
     await call('device_action', { action: 're_enable_automation', address: autoParam });
     assert(await waitFor(async () => (await stateOf()) === 1 && !(await songCanReEnable()), 2000), 're_enable_automation on the parameter should hand it back to the clip');
     await call('ramp_parameter', { parameter: autoParam, from: pA.min + 0.9 * spanA, to: pA.min + 0.95 * spanA, seconds: 0.3 });
@@ -1855,6 +2019,60 @@ try {
     assert(await waitFor(async () => (await stateOf()) === 1 && !(await songCanReEnable()), 2000), 're_enable_automation on the song should hand back everything');
     await call('launch', { address: autoClip, action: 'stop', quantized: false });
     await call('clear_automation', { clip: autoClip });
+  });
+
+  await check('the automation command does draw, clear, ramp and cancel; get_automation without a clip lists what is automated, playing or overridden', async () => {
+    const stateOf = async () => (await call('get_properties', { address: autoParam, names: ['automation_state'] })).properties.automation_state;
+    const overview = (params = {}) => call('get_automation', { address: `tracks/${T}`, ...params });
+    const listed = (ov) => ov.automated.find((a) => a.address === autoParam);
+    cleanupsRegistry.push(async () => {
+      await call('launch', { address: autoClip, action: 'stop', quantized: false }).catch(() => {});
+      await call('device_action', { action: 're_enable_automation', address: 'song' }).catch(() => {});
+      await call('automation', { action: 'cancel' }).catch(() => {});
+      await call('automation', { action: 'clear', clip: autoClip }).catch(() => {});
+    });
+    await call('launch', { address: autoClip, action: 'stop', quantized: false });
+    assert(await waitFor(async () => !(await call('get_properties', { address: autoClip, names: ['is_playing'] })).properties.is_playing, 3000), 'the scratch clip should be stopped before this check starts');
+    const clipNow = async () => JSON.stringify((await call('get_properties', { address: autoClip, names: ['is_playing', 'is_triggered', 'has_envelopes'] })).properties);
+    const atStart = `state ${await stateOf()}, clip ${await clipNow()}, song playing ${await call('eval', { code: 'bool(self._song.is_playing)' })}`;
+    try {
+      const drawn = await call('automation', { action: 'draw', clip: autoClip, parameter: autoParam, points: [{ time: 0, value: pA.min + 0.3 * spanA }, { time: 4, value: pA.min + 0.6 * spanA }] });
+      assert(drawn.style === 'breakpoints' && drawn.breakpoints >= 2, JSON.stringify(drawn));
+      let ov = await call('get_automation', {});
+      assert(ov.scope === 'song' && ov.parameters_scanned > 0, JSON.stringify(ov).slice(0, 200));
+      const clipRow = ov.clips_with_envelopes.find((c) => c.address === autoClip);
+      assert(clipRow && clipRow.parameters.some((p) => p.address === autoParam), `the envelope is not listed: ${JSON.stringify(ov.clips_with_envelopes).slice(0, 300)}`);
+      assert(!listed(await overview()), `a Session envelope that is not playing does not make the parameter automated: ${JSON.stringify(listed(await overview()))}, state ${await stateOf()}; at the start of this check: ${atStart}; now: clip ${await clipNow()}`);
+      await call('launch', { address: autoClip, quantized: false });
+      assert(await waitFor(async () => (await stateOf()) === 1 && (await autoClipPlaying()), 8000), 'the clip automation should take the parameter over once the clip plays');
+      assert(listed(await overview()).state === 'playing', 'playing automation is listed as playing');
+      await call('set_properties', { address: autoParam, properties: { value: pA.min + 0.9 * spanA } });
+      assert(await waitFor(async () => (await stateOf()) === 2, 2000), 'a write during playback overrides');
+      ov = await overview();
+      assert(listed(ov).state === 'overridden' && ov.overridden_count >= 1 && ov.song_has_overridden_automation === true, JSON.stringify(ov).slice(0, 300));
+      await call('device_action', { action: 're_enable_automation', address: 'song' });
+      await call('launch', { address: autoClip, action: 'stop', quantized: false });
+      const ramp = await call('automation', { action: 'ramp', parameter: autoParam, to: pA.min + 0.5 * spanA, seconds: 3 });
+      assert(ramp.active_ramps === 1, JSON.stringify(ramp));
+      const cancelled = await call('automation', { action: 'cancel', parameter: autoParam });
+      assert(cancelled.cancelled === 1 && cancelled.active_ramps === 0, JSON.stringify(cancelled));
+      const cleared = await call('automation', { action: 'clear', clip: autoClip });
+      assert(cleared.had_envelope === false || cleared.cleared === 'all', JSON.stringify(cleared));
+      assert(!(await call('get_automation', {})).clips_with_envelopes.some((c) => c.address === autoClip), 'a cleared clip is no longer listed');
+      const batch = await call('batch', { ops: [{ command: 'automation', params: { action: 'draw', clip: autoClip, parameter: autoParam, points: [{ time: 0, value: pA.min + 0.2 * spanA }, { time: 4, value: pA.min + 0.4 * spanA }] } },
+        { command: 'automation', params: { action: 'clear', clip: autoClip } }] });
+      assert(batch.applied === 2, JSON.stringify(batch).slice(0, 200));
+      await rejectsCode(() => call('batch', { ops: [{ command: 'automation', params: { action: 'ramp', parameter: autoParam, to: pA.min, seconds: 1 } }] }), 'INVALID_ARGUMENT');
+      await rejectsCode(() => call('automation', { action: 'draw', clip: autoClip }), 'INVALID_ARGUMENT');
+      await rejectsCode(() => call('automation', { action: 'sweep' }), 'INVALID_ARGUMENT');
+      await rejectsCode(() => call('get_automation', { address: `tracks/${T}/devices/${D}` }), 'INVALID_ARGUMENT');
+    } finally {
+      await call('launch', { address: autoClip, action: 'stop', quantized: false }).catch(() => {});
+      await call('device_action', { action: 're_enable_automation', address: 'song' }).catch(() => {});
+      await call('automation', { action: 'cancel' }).catch(() => {});
+      await call('automation', { action: 'clear', clip: autoClip }).catch(() => {});
+      await call('set_device_parameter', { ...sendA, value: pA.value }).catch(() => {});
+    }
   });
 
   console.log('\nramp_parameter');
@@ -2342,6 +2560,16 @@ try {
     await call('set_device_parameter', { track_index: T, device_index: D, parameter_index: p.index, value: p.value }).catch(() => {});
   }
   console.log('  scratch clip deleted, parameters restored');
+  await call('eval', { code: `[setattr(t, 'arm', i in ${JSON.stringify(armedBefore)}) for i, t in enumerate(self._song.tracks) if t.can_be_armed and bool(t.arm) != (i in ${JSON.stringify(armedBefore)})]` }).catch(() => {});
+  await check('the tracks you had armed are still armed, and nothing else is (scratch instrument tracks must not steal the arm)', async () => {
+    const now = await call('eval', { code: '[i for i, t in enumerate(self._song.tracks) if t.can_be_armed and t.arm]' });
+    assert(JSON.stringify(now) === JSON.stringify(armedBefore), `armed before ${JSON.stringify(armedBefore)}, after ${JSON.stringify(now)}`);
+  });
+  await call('set_properties', { address: 'view', properties: { selected_track: selectionBefore.selected_track, selected_scene: selectionBefore.selected_scene } }).catch(() => {});
+  await check('your selection is where it was before this run (selected track, scene and clip slot)', async () => {
+    const now = (await call('get_properties', { address: 'view', names: SELECTION })).properties;
+    assert(JSON.stringify(now) === JSON.stringify(selectionBefore), `before ${JSON.stringify(selectionBefore)}, after ${JSON.stringify(now)}`);
+  });
   await check('the Set is exactly as it was before this run (fingerprint invariant)', async () => {
     const setAfter = await call('describe_set');
     if (setAfter.fingerprint === setBefore.fingerprint) return;

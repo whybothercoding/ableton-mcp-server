@@ -149,6 +149,10 @@ class LifecycleMixin(object):
         address = params.get("address")
         kind, obj, canonical = self._resolve(address)
         song = self._song
+        destination = params.get("to")
+        if destination is not None and kind != "slot":
+            raise BridgeError("to names the clip slot a clip is copied to, so it needs a clip slot address as the source (got '{0}')".format(canonical),
+                              "INVALID_ARGUMENT")
         if kind == "track" and canonical.startswith("tracks/"):
             index = int(canonical.split("/")[1])
             song.duplicate_track(index)
@@ -157,6 +161,8 @@ class LifecycleMixin(object):
             index = int(canonical.split("/")[1])
             song.duplicate_scene(index)
             new = "scenes/{0}".format(index + 1)
+        elif kind == "slot" and destination is not None:
+            return self._duplicate_clip_to(obj, canonical, destination)
         elif kind == "slot":
             track_index, slot_index = int(canonical.split("/")[1]), int(canonical.split("/")[3])
             new_index = song.tracks[track_index].duplicate_clip_slot(slot_index)
@@ -165,6 +171,21 @@ class LifecycleMixin(object):
             raise BridgeError("Only regular tracks, scenes and clip slots can be duplicated (got '{0}')".format(canonical),
                               "INVALID_ARGUMENT")
         return {"source": canonical, "address": new, "name": self._resolve(new)[1].name if kind != "slot" else None}
+
+    def _duplicate_clip_to(self, slot, canonical, destination):
+        """Copy the clip of `slot` into the clip slot at `destination`. Live replaces a clip that is already there without asking, so an occupied slot is refused."""
+        kind, target, target_address = self._resolve(destination)
+        if kind != "slot":
+            raise BridgeError("to must be the address of a clip slot (tracks/N/slots/M), got '{0}' which is a {1}".format(target_address, kind), "INVALID_ARGUMENT")
+        if not slot.has_clip:
+            raise BridgeError("'{0}' is empty: there is no clip to duplicate".format(canonical), "INVALID_ARGUMENT")
+        if target == slot:
+            raise BridgeError("'to' is the slot being duplicated: pick another slot", "INVALID_ARGUMENT")
+        if target.has_clip:
+            raise BridgeError("'{0}' already holds the clip '{1}' and Live would replace it without asking: delete it first, or pick an empty slot".format(
+                target_address, target.clip.name), "INVALID_ARGUMENT")
+        slot.duplicate_clip_to(target)                         # Live refuses a track of another type (audio to MIDI) and says so
+        return {"source": canonical, "address": target_address, "name": target.clip.name}
 
     @command("delete", writes=True, destructive=True)
     def _cmd_delete(self, params):

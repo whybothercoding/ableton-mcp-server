@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
-import { runAnalyzeAudioClip, runConvert } from '../../src/tools/audio.js';
+import { runAnalyzeAudioClip, runAudio, runConvert } from '../../src/tools/audio.js';
 
 const clipReply = (over: Record<string, any> = {}) => ({
   address: 'tracks/3/slots/1/clip',
@@ -29,7 +29,7 @@ test('MIDI clips and clips without a file say so instead of failing inside ffmpe
   const reply = (over: Record<string, any>) => async (_type: string, params: any) => (params.names.length === 1 ? { kind: 'clip', address: 'a', properties: { is_audio_clip: over.is_audio_clip ?? true } } : clipReply(over));
   await assert.rejects(runAnalyzeAudioClip({ address: 'a' }, { sendCommand: reply({ is_audio_clip: false }) }, undefined, analyze), /is a MIDI clip/);
   await assert.rejects(runAnalyzeAudioClip({ address: 'a' }, { sendCommand: reply({ file_path: '' }) }, undefined, analyze), /has no source file/);
-  await assert.rejects(runAnalyzeAudioClip({ address: 'tracks/0' }, { sendCommand: async () => ({ kind: 'track', address: 'tracks/0', properties: { is_audio_clip: undefined } }) }, undefined, analyze), /is a track: analyze_audio_clip needs an audio clip/);
+  await assert.rejects(runAnalyzeAudioClip({ address: 'tracks/0' }, { sendCommand: async () => ({ kind: 'track', address: 'tracks/0', properties: { is_audio_clip: undefined } }) }, undefined, analyze), /is a track: audio analyze needs an audio clip/);
 });
 
 test('an analysis error reaches the caller unchanged', async () => {
@@ -85,4 +85,28 @@ test('other conversions are one bridge call with no waiting', async () => {
   const sync = convertBridge(0, false);
   await runConvert({ action: 'audio_to_midi', address: 'a', type: 'drums' }, sync, undefined, 1, 30);
   assert.deepEqual(sync.calls, ['describe_set', 'convert']);    // finished at once: nothing to wait for
+});
+
+test('audio: snapshot is one bridge read (optionally of one track), analyze reaches the analyzer with the curve options, anything else is refused', async () => {
+  const sent: { type: string; params: any }[] = [];
+  const client: any = {
+    sendCommand: async (type: string, params: any) => {
+      sent.push({ type, params });
+      if (type === 'audio_snapshot') return { scope: params.address ?? 'song', tracks: [] };
+      return params.names.length === 1 ? { kind: 'clip', address: params.address, properties: { is_audio_clip: true } } : { address: params.address, properties: { file_path: '/x/a.wav', is_audio_clip: true, name: 'a' } };
+    }
+  };
+  assert.deepEqual(await runAudio({ action: 'snapshot' }, client), { scope: 'song', tracks: [] });
+  assert.deepEqual(sent[0], { type: 'audio_snapshot', params: {} });
+  await runAudio({ action: 'snapshot', address: 'tracks/2' }, client);
+  assert.deepEqual(sent[1], { type: 'audio_snapshot', params: { address: 'tracks/2' } });
+  const seen: any[] = [];
+  const analyze = async (path: string, options?: any) => { seen.push([path, options]); return { ok: true }; };
+  const out: any = await runAudio({ action: 'analyze', address: 'tracks/2/slots/0/clip', curve: true, max_points: 40 }, client, undefined, analyze);
+  assert.deepEqual(seen[0], ['/x/a.wav', { curve: true, maxPoints: 40 }]);
+  assert.deepEqual(out.analysis, { ok: true });
+  await runAudio({ action: 'analyze', address: 'tracks/2/slots/0/clip' }, client, undefined, analyze);
+  assert.deepEqual(seen[1], ['/x/a.wav', { curve: false, maxPoints: undefined }]);
+  await assert.rejects(runAudio({ action: 'analyze' }, client, undefined, analyze), /needs `address`/);
+  await assert.rejects(runAudio({ action: 'listen' }, client), /action must be snapshot or analyze/);
 });

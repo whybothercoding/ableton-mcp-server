@@ -10,8 +10,9 @@ import re
 import Live
 
 from . import api_registry
+from . import device_addressing
 from . import device_specific
-from .helpers import _is_number
+from .helpers import _is_number, _safe_attr
 from .registry import BridgeError, command
 
 
@@ -208,6 +209,38 @@ def _parameter_display(parameter, text):
 
 def _display_set(parameter, raw):
     parameter.value = raw
+
+
+# ---- views: what Live's window shows (selection, the Detail view, grids). UI state, not part of the Set, so never hashed.
+
+DOCUMENT_VIEWS = ("Session", "Arranger")
+
+
+def _selected_device_get(view):
+    """The device selected in the selected track's device chain (Live has no getter on the Song's view)."""
+    return view.selected_track.view.selected_device
+
+
+def _selected_device_set(view, device):
+    view.select_device(device)
+
+
+def _document_view(_view, value):
+    if value not in DOCUMENT_VIEWS:
+        raise BridgeError("focused_document_view must be one of: {0}".format(", ".join(DOCUMENT_VIEWS)), "INVALID_ARGUMENT")
+    return value
+
+
+def _focus_document_view(view, value):
+    view.focus_view(value)
+
+
+def _available_views(view):
+    return [str(name) for name in view.available_main_views()]
+
+
+def _visible_views(view):
+    return [name for name in _available_views(view) if view.is_view_visible(name)]
 
 
 RO = False
@@ -461,7 +494,93 @@ PROPERTY_SPECS = {
         "random_amount": _spec("float", doc="percent"),
         "velocity_amount": _spec("float", doc="percent"),
     },
+    "view": {
+        "selected_track": _spec("ref", ref="track", doc="Track selected in Live's window: tracks/N, returns/N or master. Writing it moves the user's selection"),
+        "selected_scene": _spec("ref", ref="scene", doc="Scene selected in the Session view"),
+        "highlighted_clip_slot": _spec("ref", ref="slot", doc="The slot at the selected track and scene (none for returns and the master)"),
+        "detail_clip": _spec("ref", ref="clip", doc="Clip shown in the Detail view (null when none); write any clip address, Session or arrangement"),
+        "selected_chain": _spec("ref", ref="chain", doc="Rack chain highlighted in the device view (null when none)"),
+        "selected_parameter": _spec("ref", RO, ref="parameter", doc="Device parameter selected in Live's window (null when none)"),
+        "selected_device": _spec("ref", ref="device", doc="Device selected in the selected track's device chain; writing it selects (and appoints) that device",
+                                 get=_selected_device_get, set=_selected_device_set),
+        "follow_song": _spec("bool", doc="The Arrangement view scrolls with the playhead"),
+        "draw_mode": _spec("bool", doc="Envelope / note draw mode"),
+    },
+    "app_view": {
+        "focused_document_view": _spec("str", doc="'Session' or 'Arranger': the view in front. Writing it brings that view forward",
+                                       get=lambda view: view.focused_document_view, set=_focus_document_view, coerce=_document_view),
+        "visible_views": _spec("list", RO, doc="Panels showing now: Browser, Arranger, Session, Detail, Detail/Clip, Detail/DeviceChain", get=_visible_views),
+        "available_views": _spec("list", RO, doc="Every panel name Live knows", get=_available_views),
+        "browse_mode": _spec("bool", RO, doc="Hot-swap (browse) mode is on"),
+    },
+    "track_view": {
+        "is_collapsed": _spec("bool", doc="Track shown collapsed in the Arrangement"),
+        "selected_device": _spec("ref", RO, ref="device", doc="Device selected in this track's device chain (null when none)"),
+    },
+    "clip_view": {
+        "grid_quantization": _spec("enum", enum="Live.Clip.GridQuantization", doc="Grid resolution of the clip editor"),
+        "grid_is_triplet": _spec("bool", doc="Grid shown in triplet mode"),
+    },
+    "device_view": {
+        "is_collapsed": _spec("bool", doc="Device shown collapsed in the device chain (the device's `collapsed` is the same switch)"),
+    },
 }
+
+# What a device's view offers beyond is_collapsed, by kind of device: (Live view class, specs). A view is matched through its device.
+DEVICE_VIEW_EXTRAS = {
+    "rack": ("Live.RackDevice.RackDevice.View", {
+        "is_showing_chain_devices": _spec("bool", doc="The devices of the selected chain are shown"),
+        "selected_chain": _spec("ref", ref="chain", doc="The selected chain (null when none)"),
+    }),
+    "drum_rack": ("Live.RackDevice.RackDevice.View", {
+        "selected_drum_pad": _spec("ref", ref="pad", doc="The selected drum pad (null when none)"),
+        "drum_pads_scroll_position": _spec("int", doc="Index of the lowest visible row of pads", lo=0),
+    }),
+    "eq8": ("Live.Eq8Device.Eq8Device.View", {
+        "selected_band": _spec("int", doc="Filter band shown in the editor, 0 to 7", lo=0, hi=7),
+    }),
+    "simpler": ("Live.SimplerDevice.SimplerDevice.View", {
+        "selected_slice": _spec("int", doc="Selected slice"),
+        "sample_start": _spec("int", RO, doc="Start of the sample as modulated now, in samples (-1: no sample)"),
+        "sample_end": _spec("int", RO, doc="End of the sample as modulated now, in samples (-1: no sample)"),
+        "sample_loop_start": _spec("int", RO, doc="Loop start as modulated now, in samples (-1: none)"),
+        "sample_loop_end": _spec("int", RO, doc="Loop end as modulated now, in samples (-1: none)"),
+        "sample_loop_fade": _spec("int", RO, doc="Loop fade as modulated now, in samples (-1: none)"),
+        "sample_env_fade_in": _spec("int", RO, doc="Envelope fade-in, in samples"),
+        "sample_env_fade_out": _spec("int", RO, doc="Envelope fade-out, in samples"),
+    }),
+}
+
+
+# What the chains of a Drum Rack (Live's DrumChain, a Chain with a note mapping) have beyond an ordinary chain. Live refuses values outside these.
+DRUM_CHAIN_SPECS = {
+    "choke_group": _spec("int", doc="Choke group 1 to 16, or 0 for none: a pad cuts off the others in its group (open and closed hi-hat)", lo=0, hi=16),
+    "in_note": _spec("int", doc="The MIDI note that triggers this chain, 0 to 127", lo=0, hi=127),
+    "out_note": _spec("int", doc="The MIDI note sent to the devices in the chain, 0 to 127", lo=0, hi=127),
+}
+DRUM_CHAIN_CLASS = "Live.DrumChain.DrumChain"
+
+
+def _is_drum_chain(chain):
+    return device_addressing._is(chain, "DrumChain", "DrumChain")
+
+
+def _device_view_flavors(view):
+    """Which DEVICE_VIEW_EXTRAS apply to a device's view, judged from the device it belongs to."""
+    device = _safe_attr(view, "canonical_parent")
+    if device is None:
+        return []
+    flavors = []
+    if _safe_attr(device, "can_have_chains", False):
+        flavors.append("rack")
+    if _safe_attr(device, "can_have_drum_pads", False):
+        flavors.append("drum_rack")
+    class_name = _safe_attr(device, "class_name")
+    if class_name == "Eq8":
+        flavors.append("eq8")
+    elif class_name == "OriginalSimpler":
+        flavors.append("simpler")
+    return flavors
 
 
 def _enum_class(path):
@@ -541,6 +660,13 @@ def _kind_specs(kind, obj=None):
         return dict(PROPERTY_SPECS["device"], **extras) if extras else PROPERTY_SPECS["device"]
     if kind == "sample":
         return device_specific.specs_for_sample()
+    if kind == "chain" and obj is not None and _is_drum_chain(obj):
+        return dict(PROPERTY_SPECS[kind], **DRUM_CHAIN_SPECS)
+    if kind == "device_view" and obj is not None:
+        specs = dict(PROPERTY_SPECS[kind])
+        for flavor in _device_view_flavors(obj):
+            specs.update(DEVICE_VIEW_EXTRAS[flavor][1])
+        return specs
     return PROPERTY_SPECS[kind]
 
 

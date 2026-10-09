@@ -171,6 +171,15 @@ class FakeClip(object):
     def has_envelopes(self):
         return bool(self.envelopes)
 
+    @property
+    def automation_envelopes(self):
+        override = self.__dict__.get("_envelope_list")
+        return list(self.envelopes.values()) if override is None else override
+
+    @automation_envelopes.setter
+    def automation_envelopes(self, value):
+        self.__dict__["_envelope_list"] = value
+
     def automation_envelope(self, parameter):
         return self.envelopes.get(id(parameter))
 
@@ -242,6 +251,18 @@ class FakeSlot(object):
 
     def stop(self):
         self.calls.append(("stop",))
+
+    def set_fire_button_state(self, pressed):
+        self.calls.append(("button", pressed))
+
+    def duplicate_clip_to(self, target):
+        """Like Live: an occupied target is replaced without a word, an empty source or another kind of track is an error."""
+        self.calls.append(("duplicate_clip_to", target))
+        if not self.has_clip:
+            raise RuntimeError("Cannot duplicate from empty clip slot.")
+        if target in getattr(self, "refuses_copy_to", ()):
+            raise RuntimeError("Incompatible track types for clip duplication")
+        target.clip, target.has_clip = PropClip(self.clip.name, self.clip.length), True
 
     def create_clip(self, length):
         self.clip, self.has_clip = PropClip("", length), True
@@ -347,6 +368,9 @@ class PropScene(Typed):
 
     def fire(self, *args):
         self.calls.append(("fire",) + args)
+
+    def set_fire_button_state(self, pressed):
+        self.calls.append(("button", pressed))
 
 
 class FakeGroove(Typed):
@@ -584,7 +608,9 @@ def load_module():
     live.Clip = types.SimpleNamespace(
         LaunchMode=FakeEnum(trigger=0, gate=1, toggle=2, repeat=3),
         ClipLaunchQuantization=FakeEnum(q_global=0, q_none=1, q_8_bars=2, q_4_bars=3, q_2_bars=4, q_bar=5, q_half=6),
-        WarpMode=FakeEnum(beats=0, tones=1, texture=2, repitch=3, complex=4, rex=5, complex_pro=6, count=7))
+        WarpMode=FakeEnum(beats=0, tones=1, texture=2, repitch=3, complex=4, rex=5, complex_pro=6, count=7),
+        GridQuantization=FakeEnum(no_grid=0, g_8_bars=1, g_4_bars=2, g_2_bars=3, g_bar=4, g_half=5, g_quarter=6, g_eighth=7,
+                                  g_sixteenth=8, g_thirtysecond=9, count=10))
     live.ClipSlot = types.SimpleNamespace(ClipSlotPlayingState=FakeEnum(stopped=0, started=1, recording=2))
     live.Device = types.SimpleNamespace(Device=FakeDevice, DeviceType=FakeEnum(undefined=0, instrument=1, audio_effect=2, midi_effect=4))
     live.Envelope = types.SimpleNamespace(EnvelopeEvent=FakeEnvelopeEvent)
@@ -1589,6 +1615,38 @@ class LifecycleTests(unittest.TestCase):
             self.assertEqual(self.code_of("duplicate", {"address": address}), code, str(address))
         self.assertEqual(len(self.song.tracks), 3)
 
+    def test_duplicate_a_slot_to_a_chosen_slot_even_on_another_track(self):
+        source, target = self.song.tracks[0].clip_slots[0], self.song.tracks[1].clip_slots[1]
+        out = self.run_command("duplicate", {"address": "tracks/0/slots/0", "to": "tracks/name:B/slots/1"})["result"]
+        self.assertEqual((out["source"], out["address"], out["name"]), ("tracks/0/slots/0", "tracks/1/slots/1", "riff"))
+        self.assertEqual((target.has_clip, target.clip.name, source.has_clip), (True, "riff", True))        # the source is untouched
+        self.assertEqual(len(self.song.tracks[0].clip_slots), 3)                                              # not the next-free-slot duplicate
+        out = self.run_command("duplicate", {"address": "tracks/0/slots/0", "to": "tracks/0/slots/2"})["result"]
+        self.assertEqual(out["address"], "tracks/0/slots/2")
+
+    def test_duplicate_to_refuses_what_would_replace_or_cannot_work_and_copies_nothing(self):
+        occupied = self.song.tracks[1].clip_slots[0]                      # holds "loop"
+        before = occupied.clip
+        for params, code in (({"address": "tracks/0/slots/0", "to": "tracks/1/slots/0"}, "INVALID_ARGUMENT"),      # would replace a clip
+                             ({"address": "tracks/0/slots/0", "to": "tracks/0/slots/0"}, "INVALID_ARGUMENT"),      # onto itself
+                             ({"address": "tracks/0/slots/1", "to": "tracks/1/slots/1"}, "INVALID_ARGUMENT"),      # nothing to copy
+                             ({"address": "tracks/0/slots/0", "to": "scenes/0"}, "INVALID_ARGUMENT"),
+                             ({"address": "tracks/0/slots/0", "to": "tracks/1/slots/0/clip"}, "INVALID_ARGUMENT"),
+                             ({"address": "tracks/0/slots/0", "to": "tracks/9/slots/0"}, "OUT_OF_RANGE"),
+                             ({"address": "tracks/0", "to": "tracks/1/slots/1"}, "INVALID_ARGUMENT"),              # to belongs to clip slots
+                             ({"address": "scenes/0", "to": "tracks/1/slots/1"}, "INVALID_ARGUMENT")):
+            self.assertEqual(self.code_of("duplicate", params), code, str(params))
+        self.assertTrue(all(c[0] != "duplicate_clip_to" for slot in (self.song.tracks[0].clip_slots + self.song.tracks[1].clip_slots) for c in slot.calls))
+        self.assertIs(occupied.clip, before)
+        self.assertEqual(len(self.song.tracks), 3)
+
+    def test_duplicate_to_passes_lives_refusal_of_another_kind_of_track(self):
+        self.song.tracks[0].clip_slots[0].refuses_copy_to = (self.song.tracks[1].clip_slots[1],)
+        response = self.run_command("duplicate", {"address": "tracks/0/slots/0", "to": "tracks/1/slots/1"})
+        self.assertEqual((response["status"], response["code"]), ("error", "LIVE_ERROR"))
+        self.assertIn("Incompatible track types", response["message"])
+        self.assertFalse(self.song.tracks[1].clip_slots[1].has_clip)
+
     # ---- delete
     def test_delete_requires_an_expect_guard(self):
         for expect in (None, {}, {"class_name": "X"}, "B", ["name"]):
@@ -1686,6 +1744,22 @@ class ClipActionTests(unittest.TestCase):
     def test_stop_a_slot(self):
         self.run_command("launch", {"address": "tracks/0/slots/0", "action": "stop"})
         self.assertEqual(self.slot.calls, [("stop",)])
+
+    def test_an_immediate_stop_of_the_playing_slot_goes_through_its_track_because_a_slot_stop_always_waits_for_the_bar(self):
+        track = self.song.tracks[0]
+        track.playing_slot_index = 0
+        for address in ("tracks/0/slots/0", "tracks/0/slots/0/clip"):
+            self.run_command("launch", {"address": address, "action": "stop", "quantized": False})
+        self.assertEqual((self.song.stops, self.slot.calls), ([("track", False), ("track", False)], []))
+        self.song.stops.clear()
+        track.playing_slot_index = 1                                    # another clip plays: this slot is only cancelled, the playing one is not stopped
+        self.run_command("launch", {"address": "tracks/0/slots/0", "action": "stop", "quantized": False})
+        self.assertEqual((self.song.stops, self.slot.calls), ([], [("stop",)]))
+        self.slot.calls.clear()
+        track.playing_slot_index = 0                                    # quantized (the default) is the slot's own stop
+        self.run_command("launch", {"address": "tracks/0/slots/0", "action": "stop"})
+        self.run_command("launch", {"address": "tracks/0/slots/0", "action": "stop", "quantized": True})
+        self.assertEqual((self.song.stops, self.slot.calls), ([], [("stop",), ("stop",)]))
 
     def test_scenes_fire_with_legato_and_select_and_cannot_be_stopped(self):
         self.run_command("launch", {"address": "scenes/1"})
@@ -2912,6 +2986,135 @@ class AutomationAddressTests(unittest.TestCase):
 
 # ---------------------------------------------------------------- browser
 
+class AutomationCommandTests(unittest.TestCase):
+    """The writing `automation` command (draw, clear, ramp, cancel) and the Set-wide overview of get_automation, on the DeviceTests world."""
+    setUp = DeviceTests.setUp
+    move = DeviceTests.move
+    run_command = DeviceTests.run_command
+    ok = DeviceTests.ok
+    code = DeviceTests.code
+    prepare = AutomationAddressTests.prepare
+
+    def test_each_action_does_what_its_own_command_did(self):
+        self.prepare()
+        out = self.ok("automation", action="draw", clip=self.clip_address, parameter=self.parameter_address, points=[{"time": 0, "value": 0.2}, {"time": 8, "value": 0.9}])
+        self.assertEqual((out["style"], out["breakpoints"]), ("breakpoints", 2))
+        self.assertEqual(self.clip.envelopes[id(self.parameter)].breakpoints, [(0.0, 0.2), (8.0, 0.9)])
+        out = self.ok("automation", action="clear", clip=self.clip_address, parameter=self.parameter_address)
+        self.assertEqual((out["had_envelope"], self.clip.envelopes), (True, {}))
+        self.ok("automation", action="draw", clip=self.clip_address, parameter=self.parameter_address, points=[{"time": 0, "value": 0.1}, {"time": 4, "value": 0.5}])
+        self.assertEqual(self.ok("automation", action="clear", clip=self.clip_address)["cleared"], "all")
+        ramp = self.ok("automation", action="ramp", parameter=self.parameter_address, to=0.8, seconds=2.0)
+        self.assertEqual(len(self.script._ramps), 1, ramp)
+        self.assertEqual(self.ok("automation", action="cancel", parameter=self.parameter_address)["cancelled"], 1)
+        self.assertEqual(self.script._ramps, {})
+        self.ok("automation", action="ramp", parameter=self.parameter_address, to=0.8, seconds=2.0)
+        self.assertEqual(self.ok("automation", action="cancel")["cancelled"], 1)
+
+    def test_a_bad_action_is_refused_and_the_old_commands_are_still_there(self):
+        for params in ({}, {"action": "sweep"}, {"action": None}, {"action": "draw_automation"}):
+            self.assertEqual(self.code("automation", **params), "INVALID_ARGUMENT", str(params))
+        for name in ("draw_automation", "clear_automation", "ramp_parameter", "cancel_ramps", "automation"):
+            self.assertIn(name, mod._COMMANDS, name)
+        self.assertTrue(mod._COMMANDS["automation"]["writes"])
+        self.assertEqual(self.code("automation", action="draw", clip="tracks/0/slots/0/clip", parameter="tracks/0/devices/0/parameters/1"), "INVALID_ARGUMENT")       # no points
+
+    def test_draw_and_clear_run_in_a_batch_but_ramp_and_cancel_do_not(self):
+        self.prepare()
+        out = self.ok("batch", ops=[
+            {"command": "automation", "params": {"action": "draw", "clip": self.clip_address, "parameter": self.parameter_address, "points": [{"time": 0, "value": 0.3}, {"time": 8, "value": 0.6}]}},
+            {"command": "get_automation", "params": {"clip": self.clip_address}},
+            {"command": "automation", "params": {"action": "clear", "clip": self.clip_address}}])
+        self.assertEqual(out["applied"], 3)
+        self.assertEqual(len(out["results"][1]["result"]["envelopes"]), 1)
+        self.assertEqual(self.clip.envelopes, {})
+        for action in ("ramp", "cancel"):
+            response = self.run_command("batch", {"ops": [{"command": "automation", "params": {"action": "clear", "clip": self.clip_address}},
+                                                           {"command": "automation", "params": {"action": action, "parameter": self.parameter_address, "to": 1.0, "seconds": 1}}]})
+            self.assertEqual((response["status"], response["code"]), ("error", "INVALID_ARGUMENT"))
+            self.assertIn("cannot run inside a batch", response["message"])
+        self.assertEqual(self.script._ramps, {})
+
+    # ---- the overview
+
+    def mark(self):
+        """Automation states on a few parameters across the world; returns the expected addresses."""
+        s = self.synth
+        wavetable, rack = s.devices[0], s.devices[1]
+        inner = rack.chains[0].devices[1]
+        deep_effect = inner.chains[0].devices[0]
+        fx_reverb = rack.return_chains[0].devices[0]
+        wavetable.parameters[1].automation_state = 1
+        deep_effect.parameters[2].automation_state = 2
+        fx_reverb.parameters[1].automation_state = 1
+        s.mixer_device.volume.automation_state = 1
+        self.song.return_tracks[0].devices[0].parameters[1].automation_state = 1
+        return {"tracks/0/devices/0/parameters/1", "tracks/0/devices/1/chains/0/devices/1/chains/0/devices/0/parameters/2",
+                "tracks/0/devices/1/return_chains/0/devices/0/parameters/1", "tracks/0/mixer/volume", "returns/0/devices/0/parameters/1"}
+
+    def overview(self, **params):
+        return self.ok("get_automation", **params)
+
+    def test_a_set_without_automation_has_an_empty_overview(self):
+        out = self.overview()
+        self.assertEqual((out["scope"], out["automated_count"], out["automated"], out["clips_with_envelopes"], out["truncated"]), ("song", 0, [], [], False))
+        self.assertGreater(out["parameters_scanned"], 30)                 # it did look at the mixers, racks, chains and nested devices
+
+    def test_the_overview_finds_automated_parameters_everywhere_with_their_state(self):
+        expected = self.mark()
+        out = self.overview()
+        found = dict((a["address"], a) for a in out["automated"])
+        self.assertEqual(set(found), expected)
+        self.assertEqual((out["automated_count"], out["overridden_count"]), (5, 1))
+        deep = found["tracks/0/devices/1/chains/0/devices/1/chains/0/devices/0/parameters/2"]
+        self.assertEqual((deep["state"], deep["name"], deep["device"], deep["track"]), ("overridden", "Drive", "Deep Effect", "tracks/0"))
+        self.assertEqual(found["tracks/0/devices/0/parameters/1"]["state"], "playing")
+        self.assertEqual((found["tracks/0/mixer/volume"]["device"], found["returns/0/devices/0/parameters/1"]["track"]), ("Mixer", "returns/0"))
+        self.assertEqual(found["tracks/0/devices/1/return_chains/0/devices/0/parameters/1"]["device"], "Reverb")
+
+    def test_the_overview_can_be_limited_to_one_track_and_refuses_what_is_not_one(self):
+        self.mark()
+        self.assertEqual(len(self.overview(address="tracks/0")["automated"]), 4)
+        self.assertEqual([a["address"] for a in self.overview(address="returns/0")["automated"]], ["returns/0/devices/0/parameters/1"])
+        self.assertEqual(self.overview(address="master")["automated"], [])
+        self.assertEqual(self.overview(address="song")["automated_count"], 5)
+        self.assertEqual(self.code("get_automation", address="tracks/0/devices/0"), "INVALID_ARGUMENT")       # a device is not a track
+        self.assertEqual(self.code("get_automation", address="tracks/0/devices/0/parameters/1"), "INVALID_ARGUMENT")
+        self.assertEqual(self.code("get_automation", address="nowhere"), "NOT_FOUND")
+        self.assertEqual(self.code("get_automation", address="tracks/9"), "OUT_OF_RANGE")
+
+    def test_the_overview_lists_session_clips_with_envelopes_and_what_they_control(self):
+        self.prepare()
+        self.ok("automation", action="draw", clip=self.clip_address, parameter=self.parameter_address, points=[{"time": 0, "value": 0.2}, {"time": 8, "value": 0.9}])
+        self.ok("automation", action="draw", clip=self.clip_address, parameter="tracks/0/mixer/volume", points=[{"time": 0, "value": 0.5}, {"time": 8, "value": 0.7}])
+        out = self.overview()
+        self.assertEqual([c["address"] for c in out["clips_with_envelopes"]], [self.clip_address])
+        clip = out["clips_with_envelopes"][0]
+        self.assertEqual(clip["name"], "auto")
+        self.assertEqual(sorted(p["address"] for p in clip["parameters"]), sorted([self.parameter_address, "tracks/0/mixer/volume"]))
+        self.assertEqual(self.overview(address="returns/0")["clips_with_envelopes"], [])
+        self.ok("automation", action="clear", clip=self.clip_address)
+        self.assertEqual(self.overview()["clips_with_envelopes"], [])
+
+    def test_the_overview_is_capped_and_says_so(self):
+        self.mark()
+        out = self.overview(max_items=2)
+        self.assertEqual((len(out["automated"]), out["automated_count"], out["truncated"]), (2, 5, True))
+        for bad in (0, -1, 1.5, "2", True):
+            self.assertEqual(self.code("get_automation", max_items=bad), "INVALID_ARGUMENT", repr(bad))
+
+    def test_the_overview_changes_nothing_and_reading_a_clip_still_works_as_before(self):
+        self.prepare()
+        self.mark()
+        self.song.undo_log.clear()
+        self.overview()
+        self.assertEqual(self.song.undo_log, [])                           # a read opens no undo step
+        self.ok("automation", action="draw", clip=self.clip_address, parameter=self.parameter_address, points=[{"time": 0, "value": 0.2}, {"time": 8, "value": 0.9}])
+        out = self.ok("get_automation", clip=self.clip_address)
+        self.assertEqual((out["clip_name"], len(out["envelopes"])), ("auto", 1))
+        self.assertEqual(self.ok("get_automation", track_index=0, clip_index=0)["clip_name"], "auto")        # the older form is still a clip read
+
+
 class FakeBrowserItem(object):
     def __init__(self, name, children=(), uri=None, loadable=False, device=False, folder=None):
         self.name, self.children = name, list(children)
@@ -3128,6 +3331,62 @@ class BrowserTests(unittest.TestCase):
 
 
 # ---------------------------------------------------------------- audio clips, warp markers, conversions
+
+class BrowserListRootTests(unittest.TestCase):
+    """The folders added to Live's sidebar, the colour collections and the old libraries are lists of items, not roots with children: they are
+    presented as roots so they list, search and load like the others."""
+    setUp = BrowserTests.setUp
+    run_command = BrowserTests.run_command
+    ok = BrowserTests.ok
+    code = BrowserTests.code
+
+    def arrange(self):
+        kick = FakeBrowserItem("Kick 01", uri="userfolder:/Volumes/Samples/Library/Kick 01.wav", loadable=True)
+        self.browser.user_folders = [FakeBrowserItem("Desktop", [], uri="userfolder:/Users/me/Desktop", folder=True),
+                                     FakeBrowserItem("Samples", [FakeBrowserItem("Library", [kick, FakeBrowserItem("Snare 02", loadable=True)],
+                                                                                  uri="userfolder:/Volumes/Samples/Library")],
+                                                     uri="userfolder:/Volumes/Samples")]
+        self.browser.colors = [FakeBrowserItem("Favorites", [FakeBrowserItem("Sub Pulse", uri="query:Synths#Drift:Sub", loadable=True)], uri="color:colors=1", folder=False)]
+        self.browser.legacy_libraries = []
+
+    def test_the_roots_include_them_with_their_item_counts(self):
+        self.arrange()
+        roots = dict((r["name"], r) for r in self.ok("browse")["roots"])
+        self.assertEqual((roots["user_folders"]["child_count"], roots["colors"]["child_count"], roots["legacy_libraries"]["child_count"]), (2, 1, 0))
+        self.assertEqual(roots["user_folders"]["path"], "user_folders")
+
+    def test_without_them_nothing_changes(self):
+        names = [r["name"] for r in self.ok("browse")["roots"]]
+        self.assertEqual(names, ["instruments", "audio_effects", "samples"])
+
+    def test_you_can_browse_into_your_own_folders_and_collections(self):
+        self.arrange()
+        out = self.ok("browse", path="user_folders/samples/library")                      # names ignore case, the path comes back canonical
+        self.assertEqual((out["path"], out["total"], [i["name"] for i in out["items"]]), ("user_folders/Samples/Library", 2, ["Kick 01", "Snare 02"]))
+        self.assertEqual(out["items"][0]["path"], "user_folders/Samples/Library/Kick 01")
+        fav = self.ok("browse", path="colors/Favorites")
+        self.assertEqual([i["name"] for i in fav["items"]], ["Sub Pulse"])
+        self.assertEqual(self.code("browse", path="user_folders/Nope"), "NOT_FOUND")
+
+    def test_a_walk_can_cover_them_and_names_them_among_the_roots(self):
+        self.arrange()
+        out = self.ok("browser_walk", roots=["user_folders", "colors"])
+        paths = [i["path"] for i in out["items"]]
+        self.assertIn("user_folders/Samples/Library/Snare 02", paths)
+        self.assertIn("colors/Favorites/Sub Pulse", paths)
+        self.assertTrue(out["done"])
+        response = self.run_command("browser_walk", {"roots": ["downloads"]})
+        self.assertEqual(response["code"], "INVALID_ARGUMENT")
+        for name in ("user_folders", "colors", "legacy_libraries"):
+            self.assertIn(name, response["message"])
+
+    def test_a_sample_from_your_own_library_loads_into_a_clip_slot(self):
+        self.arrange()
+        out = self.ok("load_item", path="user_folders/Samples/Library/Kick 01", target="tracks/0/slots/0")
+        self.assertEqual((out["name"], out["has_clip"], out["clip"]), ("Kick 01", True, "tracks/0/slots/0/clip"))
+        self.assertEqual(self.browser.loaded, [("Kick 01", None)])
+        self.assertEqual(self.code("load_item", path="user_folders/Samples", target="tracks/0"), "INVALID_ARGUMENT")      # a folder cannot be loaded
+
 
 class AudioTests(unittest.TestCase):
     def setUp(self):
@@ -4594,18 +4853,24 @@ class RegistryTests(unittest.TestCase):
         track.devices = [device]
         lane = self.make_fake("lane")
         track.take_lanes = [lane]
+        clip.view = self.make_fake("clip_view")
+        track.view = self.make_fake("track_view")
         song = self.make_fake("song", tracks=[track], return_tracks=[], scenes=[scene], master_track=master,
-                              groove_pool=types.SimpleNamespace(grooves=[groove]), cue_points=[cue])
+                              groove_pool=types.SimpleNamespace(grooves=[groove]), cue_points=[cue], view=self.make_fake("view"))
         script._song = song
+        script._c_instance.app.view = self.make_fake("app_view")
         addresses = {"song": "song", "track": "tracks/0", "scene": "scenes/0", "slot": "tracks/0/slots/0", "clip": "tracks/0/slots/0/clip",
                      "groove": "grooves/0", "cue": "cue_points/0", "app": "app", "device": "tracks/0/devices/0",
-                     "chain": "tracks/0/devices/0/chains/0", "pad": "tracks/0/devices/0/drum_pads/36", "parameter": "tracks/0/devices/0/parameters/1", "lane": "tracks/0/take_lanes/0"}
+                     "chain": "tracks/0/devices/0/chains/0", "pad": "tracks/0/devices/0/drum_pads/36", "parameter": "tracks/0/devices/0/parameters/1", "lane": "tracks/0/take_lanes/0",
+                     "view": "view", "app_view": "app/view", "track_view": "tracks/0/view", "clip_view": "tracks/0/slots/0/clip/view",
+                     "device_view": "tracks/0/devices/0/view"}
         checked = 0
         for kind, specs in self.specs.items():
             for name, spec in sorted(specs.items()):
                 if not spec["rw"] or spec["type"] == "ref":       # references are covered by the groove tests; read-only kinds have nothing to write
                     continue
-                if (kind, name) == ("parameter", "display"):      # takes the text Live shows ('35 Hz'), not a sample string: see DeviceTests
+                if (kind, name) in (("parameter", "display"),        # takes the text Live shows ('35 Hz'), not a sample string: see DeviceTests
+                                    ("app_view", "focused_document_view")):   # takes 'Session' or 'Arranger': see ViewTests
                     continue
                 value = self.sample_value(spec)
                 script._set_properties(addresses[kind], {name: value})
@@ -4625,6 +4890,666 @@ class RegistryTests(unittest.TestCase):
             clip.pitch_coarse = 1.5
         clip.velocity_amount = 1                                   # int is accepted for a float property
         clip.muted = 1                                             # so is int for a bool property
+
+
+# ---------------------------------------------------------------- views: selection and what Live's window shows
+
+class FakeSongView(Typed):
+    _types = {"follow_song": bool, "draw_mode": bool}
+
+    def __init__(self):
+        self.selected_track = self.selected_scene = self.highlighted_clip_slot = self.detail_clip = None
+        self.selected_chain = self.selected_parameter = None
+        self.follow_song, self.draw_mode = False, False
+        self.calls = []
+
+    def select_device(self, device, appoint=True):
+        self.calls.append(("select_device", device, appoint))
+        self.selected_track = device.canonical_parent
+        device.canonical_parent.view.selected_device = device
+
+
+class FakeTrackView(Typed):
+    _types = {"is_collapsed": bool}
+
+    def __init__(self, track):
+        self.canonical_parent, self.is_collapsed, self.selected_device = track, False, None
+
+
+class FakeClipView(Typed):
+    _types = {"grid_quantization": int, "grid_is_triplet": bool}
+
+    def __init__(self):
+        self.grid_quantization, self.grid_is_triplet = 6, False
+
+
+class FakeDeviceView(Typed):
+    _types = {"is_collapsed": bool, "selected_band": int, "selected_slice": int, "drum_pads_scroll_position": int, "is_showing_chain_devices": bool}
+
+    def __init__(self, device):
+        self.canonical_parent, self.is_collapsed = device, False
+
+
+class FakeAppView(object):
+    def __init__(self):
+        self.focused_document_view, self.browse_mode, self.calls = "Session", False, []
+        self.panels = {"Browser": False, "Arranger": False, "Session": True, "Detail": True}
+
+    def available_main_views(self):
+        return list(self.panels)
+
+    def is_view_visible(self, name, main_window_only=True):
+        return self.panels[name]
+
+    def focus_view(self, name):
+        self.calls.append(("focus_view", name))
+        self.focused_document_view = name
+        self.panels["Session"], self.panels["Arranger"] = name == "Session", name == "Arranger"
+
+
+class ViewTests(unittest.TestCase):
+    """Tracks 'Synth' (devices: 0 EQ Eight, 1 Simpler, 2 Audio Effect Rack, 3 Drum Rack, 4 Limiter) and 'Drums'; scenes Verse and Chorus."""
+
+    def setUp(self):
+        self.script = make_script()
+        self.addCleanup(self.script._stop_server)
+        song = make_song()
+        self.synth, self.drums = DevTrack("Synth"), DevTrack("Drums")
+        for track in (self.synth, self.drums):
+            track.clip_slots = [FakeSlot(PropClip("loop", 4.0)), FakeSlot()]
+            track.clip_slots[0].clip.view = FakeClipView()
+            track.arrangement_clips = [PropClip("arr", 8.0)]
+            track.arrangement_clips[0].view = FakeClipView()
+            track.view = FakeTrackView(track)
+        eq, simpler, rack, kit, limiter = DevDevice("EQ Eight"), FakeSimpler(), DevDevice("Audio Effect Rack"), DevDevice("Drum Rack", dev_type=1), DevDevice("Limiter")
+        eq.class_name, simpler.class_name = "Eq8", "OriginalSimpler"
+        rack.make_rack()
+        kit.make_rack(drum=True)
+        self.chain = rack.insert_chain()
+        for pad in kit.drum_pads:
+            pad.canonical_parent = kit
+        self.synth.adopt([eq, simpler, rack, kit, limiter])
+        for device in (eq, simpler, rack, kit, limiter):
+            device.view = FakeDeviceView(device)
+        eq.view.selected_band = 2
+        simpler.view.selected_slice = 3
+        for name, value in (("sample_start", 100), ("sample_end", 900), ("sample_loop_start", -1), ("sample_loop_end", -1), ("sample_loop_fade", -1),
+                            ("sample_env_fade_in", 0), ("sample_env_fade_out", 12)):
+            setattr(simpler.view, name, value)
+        rack.view.selected_chain, rack.view.is_showing_chain_devices = self.chain, True
+        kit.view.selected_chain, kit.view.is_showing_chain_devices = None, False
+        kit.view.selected_drum_pad, kit.view.drum_pads_scroll_position = kit.drum_pads[36], 2
+        self.eq, self.simpler, self.rack, self.kit, self.limiter = eq, simpler, rack, kit, limiter
+        song.tracks = [self.synth, self.drums]
+        song.scenes = [PropScene("Verse"), PropScene("Chorus")]
+        song.return_tracks[0].view = FakeTrackView(song.return_tracks[0])
+        song.master_track.view = FakeTrackView(song.master_track)
+        song.view = FakeSongView()
+        song.view.selected_track, song.view.selected_scene = self.synth, song.scenes[1]
+        song.view.highlighted_clip_slot = self.synth.clip_slots[1]
+        song.can_undo = song.can_redo = False
+        self.script._song = self.song = song
+        self.app_view = self.script._c_instance.app.view = FakeAppView()
+
+    def code_of(self, fn, *args):
+        with self.assertRaises(mod.BridgeError) as ctx:
+            fn(*args)
+        return ctx.exception.code
+
+    def get(self, address, *names):
+        return self.script._get_properties(address, list(names) or None)["properties"]
+
+    def test_every_view_address_resolves_to_its_view_kind(self):
+        resolve = self.script._resolve
+        cases = [("view", "view"), ("app/view", "app_view"), ("tracks/0/view", "track_view"), ("tracks/name:Drums/view", "track_view"),
+                 ("returns/0/view", "track_view"), ("master/view", "track_view"), ("tracks/0/slots/0/clip/view", "clip_view"),
+                 ("tracks/1/arrangement/0/view", "clip_view"), ("tracks/0/devices/0/view", "device_view"), ("tracks/0/devices/name:Limiter/view", "device_view")]
+        for address, kind in cases:
+            got_kind, obj, canonical = resolve(address)
+            self.assertEqual(got_kind, kind, address)
+            self.assertEqual(canonical, address.replace("name:Drums", "1").replace("name:Limiter", "4"))
+        self.assertIs(resolve("view")[1], self.song.view)
+        self.assertIs(resolve("tracks/0/view")[1], self.synth.view)
+        self.assertIs(resolve("tracks/0/slots/0/clip/view")[1], self.synth.clip_slots[0].clip.view)
+        self.assertIs(resolve("tracks/0/devices/0/view")[1], self.eq.view)
+
+    def test_things_that_are_not_views_stay_not_found(self):
+        for address in ("view/x", "app/other", "tracks/0/view/x", "tracks/0/slots/0/view", "tracks/0/slots/1/clip/view", "tracks/0/slots/0/clip/view/x",
+                        "tracks/0/arrangement/0/other", "tracks/0/devices/0/view/x", "returns/0/view/x"):
+            self.assertEqual(self.code_of(self.script._resolve, address), "NOT_FOUND", address)
+
+    def test_selection_reads_as_addresses(self):
+        got = self.get("view")
+        self.assertEqual((got["selected_track"], got["selected_scene"], got["highlighted_clip_slot"]), ("tracks/0", "scenes/1", "tracks/0/slots/1"))
+        self.assertEqual((got["detail_clip"], got["selected_chain"], got["selected_parameter"], got["selected_device"]), (None, None, None, None))
+        self.assertEqual((got["follow_song"], got["draw_mode"]), (False, False))
+        self.song.view.selected_track = self.song.master_track
+        self.assertEqual(self.get("view", "selected_track"), {"selected_track": "master"})
+        self.song.view.selected_track = self.song.return_tracks[0]
+        self.assertEqual(self.get("view", "selected_track"), {"selected_track": "returns/0"})
+
+    def test_selection_writes_take_addresses_of_the_right_kind(self):
+        out = self.script._set_properties("view", {"selected_track": "tracks/name:Drums", "selected_scene": "scenes/0", "follow_song": True})
+        self.assertEqual(out["applied"]["selected_track"], {"from": "tracks/0", "to": "tracks/1"})
+        self.assertEqual((self.song.view.selected_track, self.song.view.selected_scene, self.song.view.follow_song), (self.drums, self.song.scenes[0], True))
+        self.script._set_properties("view", {"selected_track": "master"})
+        self.assertIs(self.song.view.selected_track, self.song.master_track)
+        self.script._set_properties("view", {"detail_clip": "tracks/0/slots/0/clip", "highlighted_clip_slot": "tracks/1/slots/0"})
+        self.assertIs(self.song.view.detail_clip, self.synth.clip_slots[0].clip)
+        self.assertIs(self.song.view.highlighted_clip_slot, self.drums.clip_slots[0])
+        self.script._set_properties("view", {"detail_clip": "tracks/1/arrangement/0"})
+        self.assertIs(self.song.view.detail_clip, self.drums.arrangement_clips[0])
+        self.assertEqual(self.get("view", "detail_clip"), {"detail_clip": "tracks/1/arrangement/0"})
+        self.script._set_properties("view", {"selected_chain": "tracks/0/devices/2/chains/0"})
+        self.assertIs(self.song.view.selected_chain, self.chain)
+        self.assertEqual(self.get("view", "selected_chain"), {"selected_chain": "tracks/0/devices/2/chains/0"})
+
+    def test_selection_refuses_the_wrong_kind_a_read_only_property_and_a_missing_object(self):
+        for values in ({"selected_track": "scenes/0"}, {"selected_scene": "tracks/0"}, {"detail_clip": "tracks/0/slots/0"}, {"selected_track": 3}):
+            self.assertEqual(self.code_of(self.script._set_properties, "view", values), "TYPE_ERROR", str(values))
+        self.assertEqual(self.code_of(self.script._set_properties, "view", {"selected_parameter": "tracks/0/devices/0/parameters/1"}), "INVALID_ARGUMENT")
+        self.assertEqual(self.code_of(self.script._set_properties, "view", {"selected_track": "tracks/9"}), "OUT_OF_RANGE")
+        self.assertEqual(self.code_of(self.script._set_properties, "view", {"detail_clip": "tracks/0/slots/1/clip"}), "NOT_FOUND")
+        self.assertEqual(self.code_of(self.script._set_properties, "view", {"follow_song": "yes"}), "TYPE_ERROR")
+        self.assertIs(self.song.view.selected_track, self.synth)               # nothing moved
+
+    def test_a_failing_selection_write_restores_the_selection(self):
+        view = self.song.view
+
+        def refuse(_self, name, value):
+            if name == "selected_scene":
+                raise RuntimeError("no such scene")
+            Typed.__setattr__(_self, name, value)
+        original = FakeSongView.__setattr__
+        FakeSongView.__setattr__ = refuse
+        self.addCleanup(setattr, FakeSongView, "__setattr__", original)
+        with self.assertRaises(RuntimeError):
+            self.script._set_properties("view", {"selected_track": "tracks/1", "selected_scene": "scenes/0"})
+        self.assertIs(view.selected_track, self.synth)
+
+    def test_selected_device_is_read_from_the_selected_track_and_written_through_select_device(self):
+        self.assertIsNone(self.get("view", "selected_device")["selected_device"])
+        out = self.script._set_properties("view", {"selected_device": "tracks/0/devices/1"})
+        self.assertEqual(out["applied"]["selected_device"], {"from": None, "to": "tracks/0/devices/1"})
+        self.assertEqual(self.song.view.calls, [("select_device", self.simpler, True)])
+        self.assertEqual(self.get("tracks/0/view", "selected_device"), {"selected_device": "tracks/0/devices/1"})
+        self.assertEqual(self.get("view", "selected_device"), {"selected_device": "tracks/0/devices/1"})
+        self.assertEqual(self.code_of(self.script._set_properties, "tracks/0/view", {"selected_device": "tracks/0/devices/0"}), "INVALID_ARGUMENT")   # read-only there
+        self.assertEqual(self.code_of(self.script._set_properties, "view", {"selected_device": "tracks/0"}), "TYPE_ERROR")
+
+    def test_the_application_view(self):
+        got = self.get("app/view")
+        self.assertEqual(got, {"focused_document_view": "Session", "visible_views": ["Session", "Detail"],
+                               "available_views": ["Browser", "Arranger", "Session", "Detail"], "browse_mode": False})
+        out = self.script._set_properties("app/view", {"focused_document_view": "Arranger"})
+        self.assertEqual(out["applied"]["focused_document_view"], {"from": "Session", "to": "Arranger"})
+        self.assertEqual(self.app_view.calls, [("focus_view", "Arranger")])
+        self.assertEqual(self.get("app/view", "visible_views"), {"visible_views": ["Arranger", "Detail"]})
+        for bad in ("Browser", "arranger", "", 5):
+            self.assertEqual(self.code_of(self.script._set_properties, "app/view", {"focused_document_view": bad}), "INVALID_ARGUMENT", repr(bad))
+        for name in ("visible_views", "available_views", "browse_mode"):
+            self.assertEqual(self.code_of(self.script._set_properties, "app/view", {name: True}), "INVALID_ARGUMENT", name)
+        self.assertEqual(self.app_view.calls, [("focus_view", "Arranger")])
+
+    def test_track_and_clip_views(self):
+        self.script._set_properties("returns/0/view", {"is_collapsed": True})
+        self.assertTrue(self.song.return_tracks[0].view.is_collapsed)
+        self.script._set_properties("master/view", {"is_collapsed": True})
+        self.assertEqual(self.get("tracks/0/view"), {"is_collapsed": False, "selected_device": None})
+        out = self.script._set_properties("tracks/0/slots/0/clip/view", {"grid_quantization": "g_sixteenth", "grid_is_triplet": True})
+        self.assertEqual(out["applied"]["grid_quantization"], {"from": "g_quarter", "to": "g_sixteenth"})
+        self.assertEqual(self.synth.clip_slots[0].clip.view.grid_quantization, 8)
+        self.assertEqual(self.get("tracks/0/slots/0/clip/view"), {"grid_quantization": "g_sixteenth", "grid_is_triplet": True})
+        self.script._set_properties("tracks/1/arrangement/0/view", {"grid_quantization": "no_grid"})          # arrangement clips have a view too
+        self.assertEqual(self.get("tracks/1/arrangement/0/view", "grid_quantization"), {"grid_quantization": "no_grid"})
+        self.assertEqual(self.code_of(self.script._set_properties, "tracks/0/slots/0/clip/view", {"grid_quantization": "count"}), "INVALID_ARGUMENT")
+        self.assertEqual(self.code_of(self.script._set_properties, "tracks/0/slots/0/clip/view", {"grid_quantization": 4}), "INVALID_ARGUMENT")
+
+    def test_a_device_view_offers_what_its_kind_of_device_has(self):
+        names = lambda address: sorted(self.script._list_properties(address)["properties"])
+        self.assertEqual(names("tracks/0/devices/4/view"), ["is_collapsed"])
+        self.assertEqual(names("tracks/0/devices/0/view"), ["is_collapsed", "selected_band"])
+        self.assertEqual(names("tracks/0/devices/2/view"), ["is_collapsed", "is_showing_chain_devices", "selected_chain"])
+        self.assertEqual(names("tracks/0/devices/3/view"), ["drum_pads_scroll_position", "is_collapsed", "is_showing_chain_devices", "selected_chain", "selected_drum_pad"])
+        self.assertIn("selected_slice", names("tracks/0/devices/1/view"))
+        self.assertEqual(self.get("tracks/0/devices/0/view"), {"is_collapsed": False, "selected_band": 2})
+        got = self.get("tracks/0/devices/1/view")
+        self.assertEqual((got["selected_slice"], got["sample_start"], got["sample_end"], got["sample_loop_start"], got["sample_env_fade_out"]), (3, 100, 900, -1, 12))
+        self.assertEqual(self.get("tracks/0/devices/2/view"), {"is_collapsed": False, "is_showing_chain_devices": True, "selected_chain": "tracks/0/devices/2/chains/0"})
+        self.assertEqual(self.get("tracks/0/devices/3/view", "selected_drum_pad", "drum_pads_scroll_position", "selected_chain"),
+                         {"selected_drum_pad": "tracks/0/devices/3/drum_pads/36", "drum_pads_scroll_position": 2, "selected_chain": None})
+
+    def test_device_view_writes(self):
+        self.script._set_properties("tracks/0/devices/0/view", {"selected_band": 7, "is_collapsed": True})
+        self.assertEqual((self.eq.view.selected_band, self.eq.view.is_collapsed), (7, True))
+        self.assertEqual(self.get("tracks/0/devices/0", "collapsed"), {"collapsed": True})                    # the device's own `collapsed` is the same switch
+        for value in (8, -1):
+            self.assertEqual(self.code_of(self.script._set_properties, "tracks/0/devices/0/view", {"selected_band": value}), "OUT_OF_RANGE", value)
+        self.assertEqual(self.code_of(self.script._set_properties, "tracks/0/devices/0/view", {"selected_band": 1.5}), "TYPE_ERROR")
+        self.script._set_properties("tracks/0/devices/3/view", {"selected_drum_pad": "tracks/0/devices/3/drum_pads/38", "drum_pads_scroll_position": 4})
+        self.assertIs(self.kit.view.selected_drum_pad, self.kit.drum_pads[38])
+        self.assertEqual(self.code_of(self.script._set_properties, "tracks/0/devices/3/view", {"selected_drum_pad": "tracks/0/devices/3"}), "TYPE_ERROR")
+        self.script._set_properties("tracks/0/devices/1/view", {"selected_slice": 5})
+        self.assertEqual(self.simpler.view.selected_slice, 5)
+        self.assertEqual(self.code_of(self.script._set_properties, "tracks/0/devices/1/view", {"sample_start": 0}), "INVALID_ARGUMENT")        # modulated position: read-only
+        self.assertEqual(self.code_of(self.script._set_properties, "tracks/0/devices/4/view", {"selected_band": 1}), "NOT_FOUND")           # a Limiter has no bands
+
+    def test_view_state_is_not_part_of_the_set_fingerprint(self):
+        script = make_script()
+        self.addCleanup(script._stop_server)
+        song = make_song()
+        song.tracks = [FakeTrack("Lead"), FakeTrack("Bass")]
+        song.tracks[0].clip_slots = [FakeSlot(PropClip("riff", 4.0)), FakeSlot()]
+        song.scenes = [PropScene("Verse"), PropScene("Chorus")]
+        song.is_playing, song.current_song_time, song.can_undo, song.can_redo = False, 0.0, True, False
+        song.metronome, song.loop, song.loop_start, song.loop_length = False, False, 0.0, 4.0
+        song.root_note, song.scale_name, song.scale_mode, song.groove_amount, song.swing_amount = 0, "Major", True, 0.0, 0.0
+        song.view = FakeSongView()
+        song.view.selected_track, song.view.selected_scene = song.tracks[0], song.scenes[0]
+        for track in song.tracks:
+            track.view = FakeTrackView(track)
+        script._song = song
+        script._c_instance.app.view = FakeAppView()
+
+        def fingerprint():
+            return script._process_command({"type": "describe_set", "params": {}})["result"]["fingerprint"]
+        before = fingerprint()
+        script._set_properties("view", {"selected_track": "tracks/1", "selected_scene": "scenes/1", "follow_song": True})
+        script._set_properties("tracks/0/view", {"is_collapsed": True})
+        script._set_properties("app/view", {"focused_document_view": "Arranger"})
+        self.assertEqual(fingerprint(), before)
+        script._set_properties("tracks/0", {"name": "Renamed"})           # the check can see a real edit
+        self.assertNotEqual(fingerprint(), before)
+
+    def test_list_properties_knows_every_view_kind(self):
+        for kind, expected in (("view", "selected_track"), ("app_view", "focused_document_view"), ("track_view", "is_collapsed"),
+                               ("clip_view", "grid_quantization"), ("device_view", "is_collapsed")):
+            listing = self.script._list_properties(kind=kind)
+            self.assertIn(expected, listing["properties"], kind)
+            self.assertIn("not_exposed", listing)
+        self.assertIn("g_quarter", self.script._list_properties(kind="clip_view")["properties"]["grid_quantization"]["values"])
+        self.assertNotIn("count", self.script._list_properties(kind="clip_view")["properties"]["grid_quantization"]["values"])
+
+    def test_the_device_view_extras_agree_with_the_registry(self):
+        registry, problems = mod.api_registry, []
+        for flavor, (qualname, specs) in mod.properties.DEVICE_VIEW_EXTRAS.items():
+            live = registry.class_properties(qualname)
+            for name, spec in specs.items():
+                if name not in live:
+                    problems.append("{0}.{1}: not in {2}".format(flavor, name, qualname))
+                    continue
+                info = live[name]
+                wanted = {"int": {"int"}, "bool": {"bool"}, "ref": {"ref"}}[spec["type"]]
+                if registry.family(info["get"]) not in wanted:
+                    problems.append("{0}.{1}: overlay {2} but Live's getter returns {3}".format(flavor, name, spec["type"], info["get"]))
+                if spec["rw"] != (info["set"] is not None):
+                    problems.append("{0}.{1}: writable here is {2} but Live says {3}".format(flavor, name, spec["rw"], info["set"]))
+                if spec["rw"] and registry.family(info["set"]) not in (spec["type"], "object"):
+                    problems.append("{0}.{1}: overlay {2} but Live's setter takes {3}".format(flavor, name, spec["type"], info["set"]))
+        self.assertEqual(problems, [])
+        self.assertEqual(set(mod.properties.DEVICE_VIEW_EXTRAS), {"rack", "drum_rack", "eq8", "simpler"})
+
+
+# ---------------------------------------------------------------- drum chains and CC Control
+
+class FakeDrumChain(Typed, DevChain):
+    """A chain of a Drum Rack: a Chain with a note mapping and a choke group, strict about types like Boost."""
+    _types = {"choke_group": int, "in_note": int, "out_note": int}
+
+    def __init__(self, name, note):
+        DevChain.__init__(self, name)
+        self.choke_group, self.in_note, self.out_note = 0, note, 60
+
+
+class FakeCcControl(DevDevice):
+    NAMES = ["None", "1: Modulation Wheel", "2: Breath Controller", "3: Undefined"]
+
+    def __init__(self):
+        DevDevice.__init__(self, "CC Control", dev_type=4)
+        for i in range(12):
+            setattr(self, "custom_float_target_{0}".format(i), 0)
+            setattr(self, "custom_float_target_{0}_list".format(i), list(self.NAMES))
+        self.custom_bool_target, self.custom_bool_target_list = 3, list(self.NAMES)
+
+
+class DrumChainAndCcControlTests(unittest.TestCase):
+    """Track 'Drums': 0 CC Control, 1 Drum Rack (pad 36 'Kick' and pad 42 'Hat', each one DrumChain), 2 Audio Effect Rack (one ordinary chain)."""
+
+    def setUp(self):
+        self.script = make_script()
+        self.addCleanup(self.script._stop_server)
+        song = make_song()
+        track = DevTrack("Drums")
+        self.cc = FakeCcControl()
+        self.kit = DevDevice("Drum Rack", dev_type=1)
+        self.kit.make_rack(drum=True)
+        self.kick, self.hat = FakeDrumChain("Kick", 36), FakeDrumChain("Hat", 42)
+        for pad_note, chain in ((36, self.kick), (42, self.hat)):
+            chain.canonical_parent = self.kit.drum_pads[pad_note]
+            self.kit.drum_pads[pad_note].chains = [chain]
+        self.kit.chains = [self.kick, self.hat]
+        for chain in self.kit.chains:
+            chain.canonical_parent = self.kit
+        for pad in self.kit.drum_pads:
+            pad.canonical_parent = self.kit
+        self.fx = DevDevice("Audio Effect Rack")
+        self.fx.make_rack()
+        self.plain = self.fx.insert_chain()
+        track.adopt([self.cc, self.kit, self.fx])
+        song.tracks = [track]
+        self.script._song = self.song = song
+        live = sys.modules["Live"]
+        for module, cls in (("DrumChain", FakeDrumChain), ("CcControlDevice", FakeCcControl)):
+            setattr(live, module, types.SimpleNamespace(**{module: cls}))
+            self.addCleanup(lambda m=module: delattr(live, m))
+
+    def code_of(self, fn, *args):
+        with self.assertRaises(mod.BridgeError) as ctx:
+            fn(*args)
+        return ctx.exception.code
+
+    def test_drum_chains_expose_choke_group_and_the_note_mapping_by_every_address(self):
+        for address in ("tracks/0/devices/1/drum_pads/36/chains/0", "tracks/0/devices/1/chains/0"):
+            got = self.script._get_properties(address, ["name", "choke_group", "in_note", "out_note"])["properties"]
+            self.assertEqual(got, {"name": "Kick", "choke_group": 0, "in_note": 36, "out_note": 60}, address)
+        out = self.script._set_properties("tracks/0/devices/1/chains/name:Hat", {"choke_group": 1, "out_note": 62, "in_note": 46})
+        self.assertEqual(out["applied"]["choke_group"], {"from": 0, "to": 1})
+        self.assertEqual((self.hat.choke_group, self.hat.in_note, self.hat.out_note), (1, 46, 62))
+        self.script._set_properties("tracks/0/devices/1/drum_pads/36/chains/0", {"choke_group": 1})        # the kick joins the hat's group
+        self.assertEqual((self.kick.choke_group, self.hat.choke_group), (1, 1))
+
+    def test_drum_chain_values_are_checked_before_live_sees_them(self):
+        address = "tracks/0/devices/1/chains/0"
+        for values, code in (({"choke_group": 17}, "OUT_OF_RANGE"), ({"choke_group": -1}, "OUT_OF_RANGE"), ({"in_note": 128}, "OUT_OF_RANGE"),
+                             ({"out_note": -1}, "OUT_OF_RANGE"), ({"in_note": 36.5}, "TYPE_ERROR"), ({"choke_group": "1"}, "TYPE_ERROR"),
+                             ({"choke_group": True}, "TYPE_ERROR")):
+            self.assertEqual(self.code_of(self.script._set_properties, address, values), code, str(values))
+        self.assertEqual((self.kick.choke_group, self.kick.in_note, self.kick.out_note), (0, 36, 60))
+        self.script._set_properties(address, {"choke_group": 16, "in_note": 127, "out_note": 0})              # inclusive bounds
+        self.assertEqual((self.kick.choke_group, self.kick.in_note, self.kick.out_note), (16, 127, 0))
+
+    def test_an_ordinary_chain_has_none_of_them(self):
+        address = "tracks/0/devices/2/chains/0"
+        self.assertEqual(self.code_of(self.script._get_properties, address, ["choke_group"]), "NOT_FOUND")
+        self.assertEqual(self.code_of(self.script._set_properties, address, {"in_note": 36}), "NOT_FOUND")
+        self.assertNotIn("choke_group", self.script._list_properties(address)["properties"])
+        listing = self.script._list_properties("tracks/0/devices/1/chains/0")["properties"]
+        self.assertEqual((listing["choke_group"]["min"], listing["choke_group"]["max"], listing["in_note"]["writable"]), (0, 16, True))
+        self.assertNotIn("choke_group", self.script._get_properties(address)["properties"])
+
+    def test_the_drum_chain_extras_agree_with_the_registry(self):
+        live = mod.api_registry.class_properties(mod.properties.DRUM_CHAIN_CLASS)
+        for name, spec in mod.properties.DRUM_CHAIN_SPECS.items():
+            self.assertIn(name, live, name)
+            self.assertEqual((mod.api_registry.family(live[name]["get"]), mod.api_registry.family(live[name]["set"]), spec["type"], spec["rw"]),
+                             ("int", "int", "int", True), name)
+
+    def test_cc_control_targets_are_chosen_by_the_name_of_the_controller(self):
+        listing = self.script._list_properties("tracks/0/devices/0")["properties"]
+        for name in ("custom_float_target_0", "custom_float_target_11", "custom_bool_target"):
+            self.assertEqual((listing[name]["type"], listing[name]["writable"]), ("choice", True), name)
+            self.assertIn(name + "_options", listing)
+        got = self.script._get_properties("tracks/0/devices/0", ["custom_float_target_0", "custom_bool_target", "custom_float_target_0_options"])["properties"]
+        self.assertEqual(got, {"custom_float_target_0": "None", "custom_bool_target": "3: Undefined", "custom_float_target_0_options": FakeCcControl.NAMES})
+        out = self.script._set_properties("tracks/0/devices/0", {"custom_float_target_3": "1: Modulation Wheel", "custom_bool_target": "None"})
+        self.assertEqual(out["applied"]["custom_float_target_3"], {"from": "None", "to": "1: Modulation Wheel"})
+        self.assertEqual((self.cc.custom_float_target_3, self.cc.custom_bool_target), (1, 0))
+        self.assertEqual(self.code_of(self.script._set_properties, "tracks/0/devices/0", {"custom_float_target_0": "7: Nothing"}), "INVALID_ARGUMENT")
+        self.assertEqual(self.cc.custom_float_target_0, 0)
+
+    def test_get_device_names_the_cc_control_class_and_its_properties(self):
+        info = self.script._process_command({"type": "get_device", "params": {"address": "tracks/0/devices/0"}})["result"]
+        self.assertEqual(info["specific"]["class"], "CcControlDevice")
+        self.assertIn("custom_float_target_5", info["specific"]["properties"])
+
+
+# ---------------------------------------------------------------- audio awareness
+
+class MeterTrackFake(FakeTrack):
+    """A track with the audio-state properties of Live's Track."""
+
+    def __init__(self, name, instrument=False, midi=False, clip=None, midi_clip=False, mute=False, silenced=False, solo=False, fader=0.85, meter=(0.0, 0.0)):
+        FakeTrack.__init__(self, name, with_clips=False)
+        self.devices = [FakeDevice("Synth", dev_type=1)] if instrument else [FakeDevice("Utility", dev_type=2)]
+        self.has_midi_input, self.is_foldable = midi, False
+        self.mute, self.solo, self.muted_via_solo = mute, solo, silenced
+        self.output_meter_left, self.output_meter_right = meter
+        self.mixer_device.volume.value = fader
+        self.output_routing_type = types.SimpleNamespace(display_name="Main")
+        self.output_routing_channel = types.SimpleNamespace(display_name="1/2")
+        playing = PropClip(clip, 4.0) if clip else None
+        if playing:
+            playing.is_playing, playing.is_midi_clip = True, midi_clip
+        self.clip_slots = [FakeSlot(playing), FakeSlot()]
+
+
+class AudioSnapshotTests(unittest.TestCase):
+    def setUp(self):
+        self.script = make_script()
+        self.addCleanup(self.script._stop_server)
+        song = make_song()
+        song.tracks = [MeterTrackFake("Lead", instrument=True, midi=True, clip="riff", midi_clip=True, meter=(0.4, 0.5)),
+                       MeterTrackFake("Pad", midi=True, clip="chords", midi_clip=True),
+                       MeterTrackFake("Bass", clip="loop", mute=True),
+                       MeterTrackFake("Perc", clip="hats", silenced=True),
+                       MeterTrackFake("Gone", clip="vox", fader=0.0),
+                       MeterTrackFake("Idle")]
+        ret = FakeReturnTrack("Return A", with_clips=False)
+        ret.output_meter_left = ret.output_meter_right = 0.0
+        song.return_tracks = [ret]
+        song.master_track.output_meter_left, song.master_track.output_meter_right = 0.6, 0.62
+        song.is_playing, song.current_song_time = True, 12.0
+        self.script._song = self.song = song
+        app = self.script._c_instance.app
+        app.average_process_usage, app.peak_process_usage = 0.11, 0.3
+
+    def snapshot(self, **params):
+        response = self.script._process_command({"type": "audio_snapshot", "params": params})
+        self.assertEqual(response["status"], "success", response)
+        return response["result"]
+
+    def test_every_track_return_and_the_master_reports_meters_clip_mute_fader_and_output(self):
+        out = self.snapshot()
+        self.assertEqual([r["address"] for r in out["tracks"]], ["tracks/0", "tracks/1", "tracks/2", "tracks/3", "tracks/4", "tracks/5", "returns/0", "master"])
+        lead = out["tracks"][0]
+        self.assertEqual((lead["name"], lead["kind"], lead["meter"], lead["fader"], lead["audible"]), ("Lead", "midi", {"left": 0.4, "right": 0.5}, 0.85, True))
+        self.assertEqual(lead["playing_clip"], {"address": "tracks/0/slots/0/clip", "name": "riff", "midi": True})
+        self.assertEqual(lead["output"], {"type": "Main", "channel": "1/2"})
+        self.assertEqual((out["tracks"][-1]["kind"], out["tracks"][-1]["meter"]), ("master", {"left": 0.6, "right": 0.62}))
+        self.assertEqual(out["transport"], {"is_playing": True, "tempo": 120.0, "current_song_time": 12.0})
+        self.assertEqual(out["cpu"], {"average": 0.11, "peak": 0.3})
+        self.assertEqual(out["audible"], ["tracks/0", "master"])             # audible and moving a meter
+
+    def test_notes_say_why_something_that_plays_is_silent(self):
+        out = self.snapshot()
+        text = " | ".join(out["notes"])
+        self.assertIn("tracks/1 'Pad' plays a MIDI clip but has no instrument", text)
+        self.assertIn("tracks/2 'Bass' plays 'loop' but is muted.", text)
+        self.assertIn("tracks/3 'Perc' plays 'hats' but another track is soloed", text)
+        self.assertIn("tracks/4 'Gone' plays 'vox' but its fader is at -inf.", text)
+        self.assertNotIn("Lead", text)                                          # a track that sounds needs no explanation
+        self.assertNotIn("Idle", text)                                          # neither does one that plays nothing
+        rows = dict((r["name"], r) for r in out["tracks"])
+        self.assertEqual((rows["Bass"]["audible"], rows["Perc"]["audible"], rows["Gone"]["audible"], rows["Pad"]["audible"]), (False, False, False, True))
+        self.assertEqual((rows["Bass"]["mute"], rows["Perc"]["silenced_by_solo"]), (True, True))
+
+    def test_a_soloed_track_is_reported_and_the_scope_can_be_one_track(self):
+        self.song.tracks[0].solo = True
+        self.assertTrue(self.snapshot()["someone_is_soloed"])
+        one = self.snapshot(address="tracks/2")
+        self.assertEqual((one["scope"], [r["address"] for r in one["tracks"]]), ("tracks/2", ["tracks/2"]))
+        self.assertEqual([r["address"] for r in self.snapshot(address="master")["tracks"]], ["master"])
+        self.assertEqual([r["address"] for r in self.snapshot(address="returns/0")["tracks"]], ["returns/0"])
+
+    def test_silent_cases_get_their_own_notes(self):
+        self.song.is_playing = False
+        for track in self.song.tracks:
+            track.clip_slots[0].clip = None
+            track.clip_slots[0].has_clip = False
+        self.assertIn("The transport is stopped and no clip is playing: nothing is audible.", self.snapshot()["notes"])
+        for track in self.song.tracks[:1]:
+            clip = PropClip("riff", 4.0)
+            clip.is_playing, clip.is_midi_clip = True, True
+            track.clip_slots[0].clip, track.clip_slots[0].has_clip = clip, True
+        self.song.is_playing = True
+        self.song.tracks[0].output_meter_left = self.song.tracks[0].output_meter_right = 0.0
+        self.song.master_track.output_meter_left = self.song.master_track.output_meter_right = 0.0
+        self.assertTrue(any("every meter reads 0" in n for n in self.snapshot()["notes"]))
+        self.song.master_track.mixer_device.volume.value = 0.0
+        self.assertIn("The master fader is at -inf: nothing is audible.", self.snapshot()["notes"])
+
+    def test_bad_scopes_are_refused_and_a_snapshot_is_a_plain_read(self):
+        for address in ("tracks/0/devices/0", "scenes/0", "tracks/0/slots/0"):
+            response = self.script._process_command({"type": "audio_snapshot", "params": {"address": address}})
+            self.assertEqual(response["status"], "error", address)
+        self.assertEqual(self.script._process_command({"type": "audio_snapshot", "params": {"address": "tracks/9"}})["code"], "OUT_OF_RANGE")
+        self.song.undo_log.clear()
+        self.snapshot()
+        self.assertEqual(self.song.undo_log, [])
+        self.assertFalse(mod._COMMANDS["audio_snapshot"]["writes"])
+
+
+# ---------------------------------------------------------------- held fire buttons
+
+class HoldTests(unittest.TestCase):
+    """launch with hold: the fire button itself, pressed now and released by the pump (or by hand)."""
+
+    def setUp(self):
+        self.script = make_script()
+        self.addCleanup(self.script._stop_server)
+        self.clock = FakeClock()
+        self.original_now = mod.clock.now
+        mod.clock.now = self.clock.time
+        self.addCleanup(setattr, mod.clock, "now", self.original_now)
+        song = make_song()
+        self.gate = FakeSlot(PropClip("gate", 4.0))
+        self.other = FakeSlot(PropClip("other", 4.0))
+        song.tracks[0].clip_slots = [self.gate, self.other, FakeSlot()]
+        song.scenes = [PropScene("Verse"), PropScene("Chorus")]
+        self.script._song = self.song = song
+
+    def launch(self, **params):
+        return self.script._process_command({"type": "launch", "params": params})
+
+    def ok(self, **params):
+        response = self.launch(**params)
+        self.assertEqual(response["status"], "success", response)
+        return response["result"]
+
+    def code(self, **params):
+        response = self.launch(**params)
+        self.assertEqual(response["status"], "error", response)
+        return response["code"]
+
+    def advance(self, seconds):
+        self.clock.now += seconds
+        self.script._tick_holds()
+
+    def test_hold_presses_the_button_and_the_default_hold_ends_at_the_maximum(self):
+        out = self.ok(address="tracks/0/slots/0", hold=True)
+        self.assertEqual(self.gate.calls, [("button", True)])                 # the button, not a fire
+        self.assertEqual((out["action"], out["address"], out["release_in_seconds"], out["holding"]), ("hold", "tracks/0/slots/0", 120.0, 1))
+        self.advance(119.0)
+        self.assertEqual(self.gate.calls, [("button", True)])
+        self.advance(1.5)
+        self.assertEqual(self.gate.calls, [("button", True), ("button", False)])
+
+    def test_a_timed_hold_is_released_by_the_pump_once_and_only_then(self):
+        self.ok(address="tracks/0/slots/0", hold=True, hold_seconds=1.5)
+        self.advance(1.0)
+        self.assertEqual(self.gate.calls, [("button", True)])
+        self.advance(0.6)
+        self.assertEqual(self.gate.calls, [("button", True), ("button", False)])
+        self.advance(5.0)
+        self.assertEqual(self.gate.calls, [("button", True), ("button", False)])      # not released twice
+        self.ok(address="tracks/0/slots/0", hold=True, hold_seconds=1)                   # and it can be held again
+        self.assertEqual(self.gate.calls[-1], ("button", True))
+
+    def test_the_pump_itself_releases_holds(self):
+        self.ok(address="tracks/0/slots/0", hold=True, hold_seconds=0.5)
+        self.clock.now += 1.0
+        self.script._pump()
+        self.assertEqual(self.gate.calls[-1], ("button", False))
+
+    def test_hold_beats_follow_the_tempo(self):
+        out = self.ok(address="tracks/0/slots/0", hold=True, hold_beats=4)
+        self.assertEqual(out["release_in_seconds"], 2.0)                       # 4 beats at 120 BPM
+        self.ok(address="tracks/0/slots/1", hold=True, hold_beats=4)
+        self.song.tempo = 60.0
+        self.assertEqual(self.ok(address="scenes/0", hold=True, hold_beats=4)["release_in_seconds"], 4.0)
+
+    def test_a_manual_release_ends_the_hold_and_a_stray_release_is_still_forwarded(self):
+        self.ok(address="tracks/0/slots/0", hold=True, hold_seconds=30)
+        out = self.ok(address="tracks/0/slots/0", hold=False)
+        self.assertEqual((out["action"], out["was_held"], out["holding"]), ("release", True, 0))
+        self.advance(60.0)
+        self.assertEqual(self.gate.calls, [("button", True), ("button", False)])      # the pump has nothing left to release
+        out = self.ok(address="tracks/0/slots/1", hold=False)                              # a gate clip a plain fire started can be ended this way
+        self.assertEqual((out["was_held"], self.other.calls), (False, [("button", False)]))
+
+    def test_a_target_cannot_be_pressed_twice_and_targets_are_independent(self):
+        self.ok(address="tracks/0/slots/0", hold=True)
+        self.assertEqual(self.code(address="tracks/0/slots/0/clip", hold=True), "INVALID_ARGUMENT")       # the clip is the same button
+        self.assertEqual(self.gate.calls, [("button", True)])
+        out = self.ok(address="tracks/0/slots/1", hold=True, hold_seconds=1)
+        self.assertEqual(out["holding"], 2)
+        self.advance(2.0)
+        self.assertEqual((self.gate.calls, self.other.calls), ([("button", True)], [("button", True), ("button", False)]))
+
+    def test_scenes_have_a_fire_button_too_and_clips_go_through_their_slot(self):
+        self.ok(address="scenes/name:Chorus", hold=True, hold_seconds=1)
+        self.assertEqual(self.song.scenes[1].calls, [("button", True)])
+        self.advance(2.0)
+        self.assertEqual(self.song.scenes[1].calls, [("button", True), ("button", False)])
+        self.assertEqual(self.ok(address="tracks/0/slots/0/clip", hold=True)["address"], "tracks/0/slots/0")
+
+    def test_only_things_with_a_fire_button_can_be_held(self):
+        self.song.cue_points = [FakeCue("Intro", 0.0)]
+        self.song.tracks[0].arrangement_clips = [PropClip("arr", 8.0)]
+        for address in ("tracks/0", "song", "master", "cue_points/0", "tracks/0/arrangement/0"):
+            self.assertEqual(self.code(address=address, hold=True), "INVALID_ARGUMENT", address)
+        self.assertEqual(self.code(address="tracks/0/slots/2/clip", hold=True), "NOT_FOUND")          # an empty slot has no clip to hold
+        self.assertEqual(self.gate.calls, [])
+
+    def test_hold_arguments_are_validated_and_nothing_is_pressed_on_a_bad_call(self):
+        slot = "tracks/0/slots/0"
+        cases = [({"hold": "yes"}, "TYPE_ERROR"), ({"hold_seconds": 2}, "INVALID_ARGUMENT"), ({"hold_beats": 2}, "INVALID_ARGUMENT"),
+                 ({"hold": True, "hold_seconds": 0}, "INVALID_ARGUMENT"), ({"hold": True, "hold_seconds": -1}, "INVALID_ARGUMENT"),
+                 ({"hold": True, "hold_seconds": "2"}, "INVALID_ARGUMENT"), ({"hold": True, "hold_beats": float("inf")}, "INVALID_ARGUMENT"),
+                 ({"hold": True, "hold_seconds": 1, "hold_beats": 1}, "INVALID_ARGUMENT"), ({"hold": True, "hold_seconds": 121}, "OUT_OF_RANGE"),
+                 ({"hold": True, "hold_beats": 500}, "OUT_OF_RANGE"), ({"hold": False, "hold_seconds": 1}, "INVALID_ARGUMENT"),
+                 ({"hold": True, "action": "stop"}, "INVALID_ARGUMENT"), ({"hold": True, "legato": True}, "INVALID_ARGUMENT"),
+                 ({"hold": True, "record_length": 4}, "INVALID_ARGUMENT"), ({"hold": True, "quantization": "q_bar"}, "INVALID_ARGUMENT"),
+                 ({"hold": True, "select": False}, "INVALID_ARGUMENT")]
+        for params, code in cases:
+            self.assertEqual(self.code(address=slot, **params), code, str(params))
+        self.assertEqual(self.gate.calls, [])
+        self.assertEqual(self.script._hold_entries(), {})
+
+    def test_stopping_the_script_releases_every_held_button(self):
+        self.ok(address="tracks/0/slots/0", hold=True)
+        self.ok(address="scenes/0", hold=True)
+        self.script._stop_server()
+        self.assertEqual((self.gate.calls[-1], self.song.scenes[0].calls[-1]), (("button", False), ("button", False)))
+        self.assertEqual(self.script._hold_entries(), {})
+        self.script._stop_server()                                                          # a second stop releases nothing again
+        self.assertEqual(self.gate.calls.count(("button", False)), 1)
+
+    def test_a_release_that_fails_is_dropped_and_does_not_stop_the_other_holds(self):
+        self.ok(address="tracks/0/slots/0", hold=True, hold_seconds=1)
+        self.ok(address="tracks/0/slots/1", hold=True, hold_seconds=1)
+
+        def broken(pressed):
+            raise RuntimeError("the clip is gone")
+        self.gate.set_fire_button_state = broken
+        self.advance(2.0)
+        self.assertEqual(self.other.calls, [("button", True), ("button", False)])
+        self.assertEqual(self.script._hold_entries(), {})
+
+    def test_a_plain_launch_is_unchanged_and_holds_are_not_part_of_the_capabilities_list_twice(self):
+        self.ok(address="tracks/0/slots/0")
+        self.assertEqual(self.gate.calls, [("fire",)])
+        self.assertEqual(self.script._get_script_info()["capabilities"].count("launch"), 1)
 
 
 # ---------------------------------------------------------------- introspection parsing

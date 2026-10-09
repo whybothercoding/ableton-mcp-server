@@ -52,6 +52,12 @@ async function fails(name, args, fragment) {
   assert(r.text.includes(fragment), `${name}: expected "${fragment}" in "${r.text}"`);
 }
 
+// creating and inserting things moves the user's selection, which is not part of the fingerprint: restore it and check it at the end
+const SELECTION = ['selected_track', 'selected_scene', 'highlighted_clip_slot'];
+const selectionBefore = (await ok('get_properties', { address: 'view', names: SELECTION })).properties;
+// Live's exclusive arm disarms the user's armed track when this suite loads an instrument onto a scratch track: remember what was armed
+const armedBefore = (await ok('describe_set', { include_clips: false, include_scenes: false })).tracks.filter((t) => t.arm).map((t) => t.address);
+
 // discovery through the public tools
 const session = await ok('describe_set');
 let T, S, D, P;
@@ -84,31 +90,29 @@ try {
   const byName = Object.fromEntries(tools.map((t) => [t.name, t]));
   await check('the automation tools are listed exactly once with object schemas', async () => {
     assert(new Set(tools.map((t) => t.name)).size === tools.length, 'duplicate tool names');
-    for (const name of ['draw_automation', 'get_automation', 'clear_automation', 'ramp_parameter', 'cancel_ramps']) {
+    for (const name of ['automation', 'get_automation']) {
       assert(byName[name], `${name} missing`);
       assert(byName[name].inputSchema.type === 'object', `${name} schema is not an object`);
       assert(byName[name].description.length > 40, `${name} has no useful description`);
     }
+    for (const retired of ['draw_automation', 'clear_automation', 'ramp_parameter', 'cancel_ramps']) assert(byName[retired] === undefined, `${retired} is part of automation now`);
   });
   await check('required arguments are declared and read-only/destructive hints are right', async () => {
-    assert(JSON.stringify(byName.draw_automation.inputSchema.required) === JSON.stringify(['clip', 'parameter', 'points']), 'draw_automation.required');
-    assert(JSON.stringify(byName.get_automation.inputSchema.required) === JSON.stringify(['clip']), 'get_automation.required');
-    assert(JSON.stringify(byName.clear_automation.inputSchema.required) === JSON.stringify(['clip']), 'clear_automation.required');
-    assert(JSON.stringify(byName.ramp_parameter.inputSchema.required) === JSON.stringify(['parameter', 'to']), 'ramp_parameter.required');
-    assert(byName.cancel_ramps.inputSchema.required === undefined, 'cancel_ramps takes no required args');
-    assert(byName.get_automation.annotations.readOnlyHint === true && byName.clear_automation.annotations.destructiveHint === true, 'annotations');
+    assert(JSON.stringify(byName.automation.inputSchema.required) === JSON.stringify(['action']), 'automation.required');
+    assert(JSON.stringify(byName.automation.inputSchema.properties.action.enum) === JSON.stringify(['draw', 'clear', 'ramp', 'cancel']), 'automation actions');
+    assert(byName.get_automation.inputSchema.required === undefined, 'get_automation without a clip is the overview');
+    assert(byName.get_automation.annotations.readOnlyHint === true && byName.automation.annotations.destructiveHint === true && byName.automation.annotations.readOnlyHint === false, 'annotations');
   });
   await check('point schema and curve enums are exposed', async () => {
-    const point = byName.draw_automation.inputSchema.properties.points.items;
+    const point = byName.automation.inputSchema.properties.points.items;
     assert(JSON.stringify(point.required) === JSON.stringify(['time', 'value']), 'point.required');
-    assert(byName.draw_automation.inputSchema.properties.curve.enum.includes('step'), 'draw curve enum');
-    assert(JSON.stringify(byName.draw_automation.inputSchema.properties.style.enum) === JSON.stringify(['breakpoints', 'steps']), 'style enum');
-    assert(!byName.ramp_parameter.inputSchema.properties.curve.enum.includes('step'), 'ramp curve must not offer step');
+    assert(byName.automation.inputSchema.properties.curve.enum.includes('step'), 'draw curve enum');
+    assert(JSON.stringify(byName.automation.inputSchema.properties.style.enum) === JSON.stringify(['breakpoints', 'steps']), 'style enum');
   });
 
   console.log('\nTool calls');
-  await check('draw_automation via MCP with a device parameter writes real breakpoints and reads them back', async () => {
-    const out = await ok('draw_automation', {
+  await check('automation draw via MCP with a device parameter writes real breakpoints and reads them back', async () => {
+    const out = await ok('automation', { action: 'draw',
       ...target, clip: clipTarget, points: [{ time: 0, value: P.min + 0.2 * span }, { time: 4, value: P.min + 0.8 * span }], curve: 'smooth'
     });
     assert(out.parameter === P.name && out.style === 'breakpoints' && out.breakpoints > 5 && out.mode === 'replace', JSON.stringify(out));
@@ -118,54 +122,63 @@ try {
     near(back.envelopes[0].breakpoints[0].value, P.min + 0.2 * span, 1e-3 * span, 'first breakpoint');
     near(back.envelopes[0].breakpoints.at(-1).value, P.min + 0.8 * span, 1e-3 * span, 'last breakpoint');
   });
-  await check('draw_automation via MCP on the mixer by address, in steps style', async () => {
-    const out = await ok('draw_automation', { clip: clipTarget, parameter: `tracks/${T}/mixer/volume`, style: 'steps', points: [{ time: 0, value: 0.4 }, { time: 4, value: 0.7 }] });
+  await check('get_automation without a clip is the overview: the clip that carries the envelope, and the state of what is automated', async () => {
+    const out = await ok('get_automation', {});
+    assert(out.scope === 'song' && out.parameters_scanned > 0 && Array.isArray(out.automated) && Array.isArray(out.clips_with_envelopes), JSON.stringify(out).slice(0, 300));
+    const clip = out.clips_with_envelopes.find((c) => c.address === clipTarget);
+    assert(clip && clip.parameters.some((q) => q.address === parameterAddress), `the drawn envelope is not listed: ${JSON.stringify(out.clips_with_envelopes).slice(0, 300)}`);
+    const own = await ok('get_automation', { address: `tracks/${T}` });
+    assert(own.scope === `tracks/${T}` && own.clips_with_envelopes.some((c) => c.address === clipTarget), 'the overview of one track');
+    await fails('get_automation', { address: `tracks/${T}/devices/${D}` }, 'must be');
+  });
+  await check('automation draw via MCP on the mixer by address, in steps style', async () => {
+    const out = await ok('automation', { action: 'draw', clip: clipTarget, parameter: `tracks/${T}/mixer/volume`, style: 'steps', points: [{ time: 0, value: 0.4 }, { time: 4, value: 0.7 }] });
     assert(/vol/i.test(out.parameter) && out.style === 'steps' && out.steps > 4, JSON.stringify(out));
   });
-  await check('draw_automation merge and hold=false through MCP', async () => {
-    const out = await ok('draw_automation', {
+  await check('automation draw merge and hold=false through MCP', async () => {
+    const out = await ok('automation', { action: 'draw',
       ...target, clip: clipTarget, mode: 'merge', hold: false, curve: 'step',
       points: [{ time: 1, value: P.min + 0.5 * span }, { time: 3, value: P.min + 0.5 * span }]
     });
     assert(out.mode === 'merge', JSON.stringify(out));
   });
-  await check('clear_automation via MCP: one parameter, then everything', async () => {
-    const one = await ok('clear_automation', { ...target, clip: clipTarget });
+  await check('automation clear via MCP: one parameter, then everything', async () => {
+    const one = await ok('automation', { action: 'clear', ...target, clip: clipTarget });
     assert(one.had_envelope === true && one.cleared === P.name, JSON.stringify(one));
-    const all = await ok('clear_automation', { clip: clipTarget });
+    const all = await ok('automation', { action: 'clear', clip: clipTarget });
     assert(all.cleared === 'all' && all.clip_has_envelopes === false, JSON.stringify(all));
   });
-  await check('ramp_parameter via MCP in beats, with optional fields omitted', async () => {
-    const out = await ok('ramp_parameter', { ...target, to: P.min + 0.9 * span, from: P.min + 0.1 * span, beats: 0.5, curve: 'ease_out' });
+  await check('automation ramp via MCP in beats, with optional fields omitted', async () => {
+    const out = await ok('automation', { action: 'ramp', ...target, to: P.min + 0.9 * span, from: P.min + 0.1 * span, beats: 0.5, curve: 'ease_out' });
     assert(out.curve === 'ease_out' && out.seconds > 0 && out.active_ramps >= 1, JSON.stringify(out));
     await sleep(out.seconds * 1000 + 300);
     const now = await ok('get_device', { address: `tracks/${T}/devices/${D}` });
     near(now.parameters.find((x) => x.index === P.index).value, P.min + 0.9 * span, 1e-6 * span, 'landed on target');
   });
-  await check('cancel_ramps via MCP with and without arguments', async () => {
-    await ok('ramp_parameter', { ...target, to: P.max, from: P.min, seconds: 5 });
-    const one = await ok('cancel_ramps', target);
+  await check('automation cancel via MCP with and without arguments', async () => {
+    await ok('automation', { action: 'ramp', ...target, to: P.max, from: P.min, seconds: 5 });
+    const one = await ok('automation', { action: 'cancel', ...target });
     assert(one.cancelled === 1, JSON.stringify(one));
-    await ok('ramp_parameter', { ...target, to: P.max, from: P.min, seconds: 5 });
-    const all = await ok('cancel_ramps');
+    await ok('automation', { action: 'ramp', ...target, to: P.max, from: P.min, seconds: 5 });
+    const all = await ok('automation', { action: 'cancel' });
     assert(all.cancelled === 1 && all.active_ramps === 0, JSON.stringify(all));
   });
   await check('errors come back as tool errors with the reason', async () => {
-    await fails('draw_automation', { ...target, clip: clipTarget }, "missing required argument 'points'");
-    await fails('draw_automation', { ...target, clip: clipTarget, points: [] }, 'non-empty');
-    await fails('draw_automation', { ...target, clip: clipTarget, points: [{ time: 99, value: 0 }] }, 'outside the clip');
-    await fails('draw_automation', { clip: clipTarget, parameter: 'tracks/999/mixer/volume', points: [{ time: 0, value: 0.5 }] }, 'out of range');
-    await fails('draw_automation', { ...target, clip: `tracks/${T}/slots/${S + 1}/clip`, points: [{ time: 0, value: P.min }] }, 'empty');
-    await fails('draw_automation', { clip: `tracks/${T}`, parameter: parameterAddress, points: [{ time: 0, value: P.min }] }, 'address of a clip');
-    await fails('draw_automation', { clip: clipTarget, parameter: `tracks/${T}`, points: [{ time: 0, value: P.min }] }, 'address of a device or mixer parameter');
-    await fails('clear_automation', {}, "missing required argument 'clip'");
-    await fails('ramp_parameter', { ...target, to: P.max }, 'exactly one');
-    await fails('ramp_parameter', { ...target, seconds: 1 }, "missing required argument 'to'");
-    await fails('ramp_parameter', { ...target, to: P.max + 1000, seconds: 1 }, 'to must');
+    await fails('automation', { action: 'draw', ...target, clip: clipTarget }, "missing required argument 'points'");
+    await fails('automation', { action: 'draw', ...target, clip: clipTarget, points: [] }, 'non-empty');
+    await fails('automation', { action: 'draw', ...target, clip: clipTarget, points: [{ time: 99, value: 0 }] }, 'outside the clip');
+    await fails('automation', { action: 'draw', clip: clipTarget, parameter: 'tracks/999/mixer/volume', points: [{ time: 0, value: 0.5 }] }, 'out of range');
+    await fails('automation', { action: 'draw', ...target, clip: `tracks/${T}/slots/${S + 1}/clip`, points: [{ time: 0, value: P.min }] }, 'empty');
+    await fails('automation', { action: 'draw', clip: `tracks/${T}`, parameter: parameterAddress, points: [{ time: 0, value: P.min }] }, 'address of a clip');
+    await fails('automation', { action: 'draw', clip: clipTarget, parameter: `tracks/${T}`, points: [{ time: 0, value: P.min }] }, 'address of a device or mixer parameter');
+    await fails('automation', { action: 'clear' }, "missing required argument 'clip'");
+    await fails('automation', { action: 'ramp', ...target, to: P.max }, 'exactly one');
+    await fails('automation', { action: 'ramp', ...target, seconds: 1 }, "missing required argument 'to'");
+    await fails('automation', { action: 'ramp', ...target, to: P.max + 1000, seconds: 1 }, 'to must');
   });
   await check('get_health lists the new capabilities', async () => {
     const health = await ok('get_health');
-    for (const c of ['draw_automation', 'clear_automation', 'ramp_parameter', 'cancel_ramps']) assert(health.capabilities.includes(c), `${c} missing`);
+    for (const c of ['automation', 'draw_automation', 'clear_automation', 'ramp_parameter', 'cancel_ramps', 'get_automation']) assert(health.capabilities.includes(c), `${c} missing`);
   });
   await check('get_health reports the opt-in gates of the script (eval and record) as booleans', async () => {
     const health = await ok('get_health');
@@ -193,6 +206,17 @@ try {
     assert(typeof song.properties.tempo === 'number' && typeof song.properties.clip_trigger_quantization === 'string', JSON.stringify(song));
     const listing = await ok('list_properties', { kind: 'clip' });
     assert(listing.properties.launch_mode.values.includes('gate'), JSON.stringify(listing.properties.launch_mode));
+  });
+  await check('view addresses work through the property tools: selection reads as addresses and is documented in the address grammar', async () => {
+    assert(/'view'/.test(byName.get_properties.description) && /app\/view/.test(byName.get_properties.description), 'the address grammar must name the view addresses');
+    const view = await ok('get_properties', { address: 'view', names: ['selected_track', 'selected_scene', 'follow_song'] });
+    assert(/^(tracks\/\d+|returns\/\d+|master)$/.test(view.properties.selected_track) && /^scenes\/\d+$/.test(view.properties.selected_scene) && typeof view.properties.follow_song === 'boolean', JSON.stringify(view));
+    const app = await ok('get_properties', { address: 'app/view', names: ['focused_document_view', 'visible_views'] });
+    assert(['Session', 'Arranger'].includes(app.properties.focused_document_view) && Array.isArray(app.properties.visible_views), JSON.stringify(app));
+    const listing = await ok('list_properties', { address: 'view' });
+    assert(listing.kind === 'view' && listing.properties.selected_track.writable === true && listing.properties.selected_parameter.writable === false, JSON.stringify(listing).slice(0, 300));
+    const same = await ok('set_properties', { address: 'view', properties: { selected_track: view.properties.selected_track } });
+    assert(same.applied.selected_track.from === same.applied.selected_track.to, JSON.stringify(same));
   });
   await check('set_properties changes a scratch clip and reports old and new values', async () => {
     const out = await ok('set_properties', { address: clipAddress, properties: { muted: true, launch_mode: 'toggle' } });
@@ -273,6 +297,29 @@ try {
     await fails('clip_action', { address: clipAddress, action: 'crop', expect: { name: 'Definitely Not This' } }, 'Guard failed');
     await fails('clip_action', { address: clipAddress, action: 'quantize', grid: 'sixteenth' }, 'grid must be one of');
   });
+  await check('launch declares hold and duplicate declares to, and a typed hold call works through MCP and releases itself', async () => {
+    const schema = byName.launch.inputSchema.properties;
+    assert(schema.hold?.type === 'boolean' && schema.hold_seconds?.type === 'number' && schema.hold_beats?.type === 'number', JSON.stringify(schema).slice(0, 300));
+    assert(byName.duplicate.inputSchema.properties.to?.type === 'string' && byName.duplicate.annotations.destructiveHint === false, 'duplicate takes a destination slot');
+    const slot = `tracks/${T}/slots/${S}`;
+    const before = (await ok('get_properties', { address: 'song', names: ['is_playing', 'current_song_time'] })).properties;
+    try {
+      const held = await ok('launch', { address: slot, hold: true, hold_seconds: 0.3 });
+      assert(held.action === 'hold' && held.release_in_seconds === 0.3 && held.holding === 1, JSON.stringify(held));
+      await sleep(700);
+      const gone = await ok('launch', { address: slot, hold: false });
+      assert(gone.was_held === false && gone.holding === 0, 'the hold should have released itself');
+      await fails('launch', { address: slot, hold: true, legato: true }, 'hold presses or releases the fire button itself');
+      await fails('launch', { address: slot, hold: true, hold_seconds: 500 }, 'a hold lasts at most 120 seconds');
+    } finally {
+      await tool('launch', { address: `tracks/${T}`, action: 'stop', quantized: false });
+      if (!before.is_playing) {
+        await tool('transport', { action: 'stop' });
+        await sleep(300);
+        await tool('set_properties', { address: 'song', properties: { current_song_time: before.current_song_time } });
+      }
+    }
+  });
   await check('a clip_action goes through MCP on the scratch clip, and history undoes it', async () => {
     const before = await ok('get_properties', { address: clipAddress, names: ['length', 'loop_end'] });
     const result = await ok('clip_action', { address: clipAddress, action: 'duplicate_loop' });
@@ -349,17 +396,32 @@ try {
     await fails('browse', { action: 'search' }, 'search needs a query');
     await fails('load_item', { path: 'audio_effects/EQ Eight', target: 'tracks/9999' }, 'out of range');
   });
-  await check('analyze_audio_clip works by address: settings and file analysis together, and MIDI clips are refused readably', async () => {
+  await check('audio analyze works by address: settings and file analysis together, and MIDI clips are refused readably', async () => {
     const audioClip = (await ok('describe_set')).tracks.flatMap((t) => (t.clips ?? []).filter((c) => c.kind === 'audio').map((c) => `${t.address}/slots/${c.slot}/clip`))[0];
     if (!audioClip) {
-      skips.push('analyze_audio_clip on an audio clip: no audio clip in the Set');
+      skips.push('audio analyze on an audio clip: no audio clip in the Set');
       console.log('       no audio clip in the Set: that part skipped');
     } else {
-      const out = await ok('analyze_audio_clip', { address: audioClip });
+      const out = await ok('audio', { action: 'analyze', address: audioClip, curve: true });
       assert(out.clip.address === audioClip && out.clip.file_path && out.analysis, JSON.stringify(out).slice(0, 200));
+      assert(out.analysis.loudness_over_time === null || Array.isArray(out.analysis.loudness_over_time.points), 'the loudness curve');
     }
-    await fails('analyze_audio_clip', { address: clipAddress }, 'is a MIDI clip');
-    await fails('analyze_audio_clip', {}, "missing required argument 'address'");
+    await fails('audio', { action: 'analyze', address: clipAddress }, 'is a MIDI clip');
+    await fails('audio', { action: 'analyze' }, 'needs `address`');
+    await fails('audio', {}, "missing required argument 'action'");
+  });
+  await check('audio snapshot reads what is audible in one call: every track, the master, the transport and the CPU, and can be limited to one track', async () => {
+    assert(byName.audio.annotations.readOnlyHint === true && byName.analyze_audio_clip === undefined, 'audio is read-only and replaces analyze_audio_clip');
+    const set = await ok('describe_set', { include_clips: false, include_scenes: false });
+    const out = await ok('audio', { action: 'snapshot' });
+    assert(out.scope === 'song' && out.tracks.length === set.tracks.length + set.returns.length + 1, `${out.tracks.length} rows for ${set.tracks.length} tracks, ${set.returns.length} returns and the master`);
+    assert(out.tracks.at(-1).address === 'master' && out.tracks.at(-1).kind === 'master', JSON.stringify(out.tracks.at(-1)).slice(0, 200));
+    const row = out.tracks[0];
+    assert(typeof row.meter.left === 'number' && 'playing_clip' in row && typeof row.audible === 'boolean' && typeof row.fader === 'number', JSON.stringify(row).slice(0, 300));
+    assert(typeof out.transport.is_playing === 'boolean' && typeof out.cpu.average === 'number' && Array.isArray(out.notes) && Array.isArray(out.audible), JSON.stringify(out).slice(0, 300));
+    const one = await ok('audio', { action: 'snapshot', address: `tracks/${T}` });
+    assert(one.tracks.length === 1 && one.tracks[0].address === `tracks/${T}`, JSON.stringify(one.tracks.map((r) => r.address)));
+    await fails('audio', { action: 'snapshot', address: `tracks/${T}/devices/${D}` }, 'must be');
   });
   await check('argument problems are caught in TypeScript with a readable message', async () => {
     await fails('get_properties', {}, "missing required argument 'address'");
@@ -409,7 +471,7 @@ try {
       try {
         const set = await ok('set_properties', { address: prm.address, properties: { value: prm.min + 0.25 * rspan } });
         near(set.applied.value.to, prm.min + 0.25 * rspan, 1e-4 * rspan, 'set value');
-        await ok('ramp_parameter', { parameter: prm.address, to: prm.min + 0.5 * rspan, seconds: 0.2 });
+        await ok('automation', { action: 'ramp', parameter: prm.address, to: prm.min + 0.5 * rspan, seconds: 0.2 });
         await sleep(500);
         const returns = (await ok('describe_set', { include_clips: false })).returns;
         assert(returns[0].address === 'returns/0' && returns[0].devices.length >= 1, JSON.stringify(returns[0]).slice(0, 160));
@@ -424,11 +486,11 @@ try {
     await fails('set_properties', { address: 'master', properties: { mute: true } }, 'mute');
     await fails('get_properties', { address: 'returns/99' }, 'out of range');
     const currentVolume = (await ok('describe_set', { include_clips: false })).master.volume;
-    const volume = await tool('ramp_parameter', { parameter: 'master/mixer/volume', to: currentVolume, seconds: 0.05 });
+    const volume = await tool('automation', { action: 'ramp', parameter: 'master/mixer/volume', to: currentVolume, seconds: 0.05 });
     assert(!volume.isError, volume.text);
-    const cancelled = await ok('cancel_ramps', { parameter: 'master/mixer/volume' });
+    const cancelled = await ok('automation', { action: 'cancel', parameter: 'master/mixer/volume' });
     assert(typeof cancelled.cancelled === 'number', JSON.stringify(cancelled));
-    await ok('cancel_ramps');
+    await ok('automation', { action: 'cancel' });
   });
   await check('device address errors surface through the tools', async () => {
     await fails('get_device', { address: `tracks/${T}/devices/${D}/chains/0` }, 'is not a rack');
@@ -437,10 +499,20 @@ try {
     await fails('set_properties', { address: `tracks/${T}/devices/99/parameters/1`, properties: { value: 0 } }, 'out of range');
   });
 } finally {
-  await tool('cancel_ramps');
-  await tool('clear_automation', { clip: clipTarget });
+  await tool('automation', { action: 'cancel' });
+  await tool('automation', { action: 'clear', clip: clipTarget });
   await tool('delete', { address: `tracks/${T}/slots/${S}/clip`, expect: { name: 'MCP TOOL TEST' } });
   await tool('set_properties', { address: `tracks/${T}/devices/${D}/parameters/${P.index}`, properties: { value: original } });
+  for (const address of armedBefore) await tool('set_properties', { address, properties: { arm: true } });
+  await check('the tracks you had armed are still armed, and nothing else is', async () => {
+    const now = (await ok('describe_set', { include_clips: false, include_scenes: false })).tracks.filter((t) => t.arm).map((t) => t.address);
+    assert(JSON.stringify(now) === JSON.stringify(armedBefore), `armed before ${JSON.stringify(armedBefore)}, after ${JSON.stringify(now)}`);
+  });
+  await tool('set_properties', { address: 'view', properties: { selected_track: selectionBefore.selected_track, selected_scene: selectionBefore.selected_scene } });
+  await check('your selection is where it was before this run (selected track, scene and clip slot)', async () => {
+    const now = (await ok('get_properties', { address: 'view', names: SELECTION })).properties;
+    assert(JSON.stringify(now) === JSON.stringify(selectionBefore), `before ${JSON.stringify(selectionBefore)}, after ${JSON.stringify(now)}`);
+  });
   await client.close();
 }
 

@@ -43,7 +43,7 @@ test('references pass validation for any type, real mistakes do not', async () =
 });
 
 test('tools that are not one undoable edit, compose calls or are legacy are refused with the list of allowed ones', async () => {
-  for (const tool of ['transport', 'launch', 'history', 'batch', 'transform_notes', 'generate_notes', 'ramp_parameter', 'cancel_ramps', 'record', 'follow_actions', 'get_health', 'nonsense']) {
+  for (const tool of ['transport', 'launch', 'history', 'batch', 'transform_notes', 'generate_notes', 'record', 'follow_actions', 'get_health', 'nonsense']) {
     await assert.rejects(runBatch({ ops: [{ tool, args: {} }] }, new Recorder(), TOOL_SPEC_BY_NAME), /cannot be used in a batch. Batchable tools: get_properties/, tool);
   }
   await assert.rejects(runBatch({ ops: [] }, new Recorder(), TOOL_SPEC_BY_NAME), /non-empty list/);
@@ -51,7 +51,7 @@ test('tools that are not one undoable edit, compose calls or are legacy are refu
 });
 
 test('the tool description lists exactly the batchable tools', () => {
-  const batchable = Object.values(TOOL_SPEC_BY_NAME).filter((s) => !s.run && !['transport', 'launch', 'history', 'batch', 'ramp_parameter', 'cancel_ramps', 'record', 'follow_actions'].includes(s.name)).map((s) => s.name).sort();
+  const batchable = Object.values(TOOL_SPEC_BY_NAME).filter((s) => !s.run && !['transport', 'launch', 'history', 'batch', 'record', 'follow_actions'].includes(s.name)).map((s) => s.name).sort();
   const listed = /Batchable tools: ([a-z_, ]+)\./.exec(TOOL_SPEC_BY_NAME.batch.description)![1].split(', ').sort();
   assert.deepEqual(listed, batchable);
   assert.equal(TOOL_SPEC_BY_NAME.batch.annotations.destructiveHint, true);

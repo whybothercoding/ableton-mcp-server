@@ -7,7 +7,7 @@ import { CompositionError } from './composition.js';
 import type { BridgeClient, ToolSpec } from './spec.js';
 
 export const DEFAULT_ROOTS = ['instruments', 'audio_effects', 'midi_effects', 'drums', 'sounds', 'max_for_live', 'user_library', 'packs'];
-const ALL_ROOTS = ['instruments', 'sounds', 'drums', 'audio_effects', 'midi_effects', 'samples', 'user_library', 'current_project', 'clips', 'packs', 'plugins', 'max_for_live'];
+const ALL_ROOTS = ['instruments', 'sounds', 'drums', 'audio_effects', 'midi_effects', 'samples', 'user_library', 'current_project', 'clips', 'packs', 'plugins', 'max_for_live', 'user_folders', 'colors', 'legacy_libraries'];
 const INDEX_TIME_LIMIT_MS = 90_000;
 
 interface IndexedItem {
@@ -132,7 +132,7 @@ export const BROWSE_SPECS: ToolSpec[] = [
       "`kind` all|folders|loadable|devices, paged with `limit` (default 100) and `offset`; every item has a `path` to browse deeper or load. " +
       "search: `query` words (all must appear in the item's path, e.g. 'drift bass sub') over the preset and device names of `roots` (default: instruments, audio_effects, midi_effects, drums, sounds, max_for_live, user_library, packs); " +
       "`kind` loadable (default), devices or folders; ranked with exact and prefix name matches first. The first search builds an index by walking the browser in short slices (a few seconds, Live stays responsive) and keeps it until `refresh: true`; " +
-      "the big sample libraries ('samples', 'clips') are only indexed if you name them in `roots`. index: (re)build the index for `roots`. Load what you find with load_item.",
+      "the big sample libraries ('samples', 'clips'), the folders you added to Live's sidebar ('user_folders') and 'colors' (Favorites) are only indexed if you name them in `roots`. index: (re)build the index for `roots`. Load what you find with load_item.",
     inputSchema: {
       type: 'object',
       properties: {

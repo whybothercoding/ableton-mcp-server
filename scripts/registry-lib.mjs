@@ -6,7 +6,11 @@ export const INCLUDE_CLASSES = ['Live.Song.Song', 'Live.Track.Track', 'Live.Scen
   'Live.DeviceParameter.DeviceParameter', 'Live.TakeLane.TakeLane', 'Live.Sample.Sample', 'Live.SimplerDevice.SimplerDevice',
   'Live.WavetableDevice.WavetableDevice', 'Live.DriftDevice.DriftDevice', 'Live.MeldDevice.MeldDevice', 'Live.Eq8Device.Eq8Device', 'Live.LooperDevice.LooperDevice',
   'Live.HybridReverbDevice.HybridReverbDevice', 'Live.RoarDevice.RoarDevice', 'Live.SpectralResonatorDevice.SpectralResonatorDevice',
-  'Live.ShifterDevice.ShifterDevice', 'Live.DrumCellDevice.DrumCellDevice', 'Live.PluginDevice.PluginDevice'];
+  'Live.ShifterDevice.ShifterDevice', 'Live.DrumCellDevice.DrumCellDevice', 'Live.PluginDevice.PluginDevice', 'Live.CcControlDevice.CcControlDevice',
+  'Live.DrumChain.DrumChain',
+  // view state: selection, the Detail view, grids, what a device shows
+  'Live.Song.Song.View', 'Live.Application.Application.View', 'Live.Track.Track.View', 'Live.Clip.Clip.View', 'Live.Device.Device.View',
+  'Live.RackDevice.RackDevice.View', 'Live.Eq8Device.Eq8Device.View', 'Live.SimplerDevice.SimplerDevice.View'];
 
 /** Enum types referenced by property overlays (an int property has no enum type of its own). */
 export const INCLUDE_ENUMS = [
@@ -14,7 +18,7 @@ export const INCLUDE_ENUMS = [
   'Live.Clip.WarpMode', 'Live.Groove.Base', 'Live.ClipSlot.ClipSlotPlayingState', 'Live.Song.SessionRecordStatus', 'Live.Device.DeviceType', 'Live.MixerDevice.MixerDevice.crossfade_assignments', 'Live.SimplerDevice.PlaybackMode', 'Live.SimplerDevice.SlicingPlaybackMode',
   'Live.WavetableDevice.EffectMode', 'Live.WavetableDevice.FilterRouting', 'Live.WavetableDevice.ModulationSource', 'Live.WavetableDevice.UnisonMode',
   'Live.WavetableDevice.VoiceCount', 'Live.WavetableDevice.Voicing', 'Live.Eq8Device.GlobalMode', 'Live.Sample.SlicingStyle',
-  'Live.Sample.SlicingBeatDivision', 'Live.Sample.TransientLoopMode', 'Live.MixerDevice.MixerDevice.panning_modes', 'Live.Track.Track.monitoring_states'
+  'Live.Sample.SlicingBeatDivision', 'Live.Sample.TransientLoopMode', 'Live.MixerDevice.MixerDevice.panning_modes', 'Live.Track.Track.monitoring_states', 'Live.Clip.GridQuantization'
 ];
 
 function sortKeys(value) {

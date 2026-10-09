@@ -1,7 +1,7 @@
 import { AUDIO_SPECS } from './audio.js';
 import { BATCH_SPECS } from './batch.js';
 import { BROWSE_SPECS } from './browse.js';
-import { COMPOSITION_SPECS } from './composition.js';
+import { COMPOSITION_SPECS, CompositionError } from './composition.js';
 import { MEASURE_SPECS } from './measure.js';
 
 /**
@@ -23,7 +23,10 @@ export interface BridgeClient {
 
 export interface ToolSpec {
   name: string;
+  /** What the client sees in the tool list. The whole list has a size budget (spec.test.ts), so keep it to what a first call needs. */
   description: string;
+  /** The long form, returned (without touching Live) when the tool is called with `help: true`. Not advertised. */
+  help?: string;
   inputSchema: { type: 'object'; properties: Record<string, any>; required?: string[] };
   annotations: ToolAnnotations;
   bridge: {
@@ -42,8 +45,36 @@ export { validateArgs, BATCH_REFERENCE } from './schema.js';
 
 const ADDRESS_HELP =
   "Addresses: 'song', 'master', 'tracks/N', 'returns/N', 'scenes/N', 'tracks/N/slots/M' (clip slot) and " +
-  "'tracks/N/slots/M/clip', 'tracks/N/arrangement/M' (arrangement clips in time order), 'tracks/N/take_lanes/K', 'tracks/N/devices/M' (also returns/N and master; then '/parameters/P', '/sample' for a Simpler, '/chains/C/devices/...', '/drum_pads/NOTE', '/mixer/volume', 'master/mixer/crossfader'), 'grooves/N' (groove pool), 'cue_points/N' and 'app' (the Live application). Indices are 0-based. A name selector works anywhere a number does, e.g. 'tracks/name:Drift' " +
+  "'tracks/N/slots/M/clip', 'tracks/N/arrangement/M' (arrangement clips in time order), 'tracks/N/take_lanes/K', 'tracks/N/devices/M' (also returns/N and master; then '/parameters/P', '/sample' for a Simpler, '/chains/C/devices/...', '/drum_pads/NOTE', '/mixer/volume', 'master/mixer/crossfader'), 'grooves/N' (groove pool), 'cue_points/N' and 'app' (the Live application). Views, i.e. what Live's window shows (not part of the Set): 'view' (selected track, scene, slot, Detail clip: writing moves the user's selection), 'app/view' (Session or Arranger in front), and '<track|clip|device>/view' (collapsed, grid, a rack's selected chain). Indices are 0-based. A name selector works anywhere a number does, e.g. 'tracks/name:Drift' " +
   '(exact match; several matches is an error that lists their indices).';
+
+/** Declared on every tool that has a `help` text; the handler answers it before validating anything else. */
+const HELP_ARG = { type: 'boolean' };
+
+// The long forms of the `automation` actions (they were separate tools once: draw_automation, clear_automation, ramp_parameter, cancel_ramps).
+const AUTOMATION_DRAW_HELP =
+  "Draw a clip automation envelope for a device or mixer parameter, inside Live (tempo-locked, sample-accurate). `clip`: a Session clip address ('tracks/2/slots/0/clip'); `parameter`: a parameter address on that clip's track " +
+  "('tracks/2/devices/0/parameters/5', 'tracks/2/mixer/volume', 'tracks/2/mixer/sends/0'). `points`: [{time, value, curve?}] with time in beats from clip start and value in the parameter's own units (get_device shows min/max). " +
+  "The default `style` 'breakpoints' writes real envelope breakpoints (straight lines between them; smooth/ease curves get a breakpoint every `resolution` beats, default 0.25; step curves make jumps), so it is editable in Live and light. " +
+  "'steps' writes a staircase of fine steps instead (`resolution` default 0.125). `curve`: linear (default), step, smooth, ease_in, ease_out (a point's own curve shapes the segment after it). " +
+  "`mode` replace (default) rebuilds the parameter's envelope, merge rewrites only the drawn range (breakpoints outside connect to it by straight lines). With `hold` (default true) the clip edges are filled with the first/last value. " +
+  "The result includes a readback of Live's stored values. Arrangement clips have no envelopes in Live's API. One undo step per call.";
+const AUTOMATION_CLEAR_HELP =
+  "Clear one parameter's envelope on a Session clip (`clip` + `parameter`), or every envelope on the clip when no parameter is given. Returns whether an envelope existed. One undo step.";
+const AUTOMATION_RAMP_HELP =
+  "Sweep a device or mixer parameter (`parameter` address) to `to` over `beats` or `seconds`, driven inside Live at about 100 updates per second. For live gestures; use the draw action for motion that belongs to a looping clip. " +
+  "`from` defaults to the current value; `curve`: linear, smooth, ease_in, ease_out (a ramp has no 'step'). A new ramp on the same parameter replaces the old one. Values are in the parameter's own units. Ramps are not undoable and cannot run inside a batch.";
+const AUTOMATION_CANCEL_HELP = 'Cancel the ramp on one `parameter`, or every active ramp when no parameter is given. The parameter stays wherever the ramp had taken it.';
+
+const AUTOMATION_REQUIRED: Record<string, string[]> = { draw: ['clip', 'parameter', 'points'], clear: ['clip'], ramp: ['parameter', 'to'], cancel: [] };
+
+/** The schema is shared by the four actions, so what each one needs is checked here (batch calls this too). */
+export function checkAutomationArgs(args: Record<string, any>): void {
+  for (const key of AUTOMATION_REQUIRED[args.action] ?? []) {
+    if (args[key] === undefined || args[key] === null) throw new CompositionError(`automation ${args.action}: missing required argument '${key}'`);
+  }
+  if (args.action === 'ramp' && args.curve === 'step') throw new CompositionError('automation ramp: curve must be one of: linear, smooth, ease_in, ease_out');
+}
 
 export const TOOL_SPECS: ToolSpec[] = [
   {
@@ -67,7 +98,7 @@ export const TOOL_SPECS: ToolSpec[] = [
   {
     name: 'set_properties',
     description:
-      'Set properties on the Song, a Track, Scene, ClipSlot, Clip, Groove, cue point, device, rack chain, drum pad or device PARAMETER (`value`, or `display` as Live shows it, e.g. "35 Hz"). A clip\'s `groove` is set to a groove address (grooves/N). ' + ADDRESS_HELP +
+      'Set properties on the Song, a Track, Scene, ClipSlot, Clip, Groove, cue point, device, rack chain, drum pad or device PARAMETER (`value`, or `display` as Live shows it, e.g. "35 Hz"). A clip\'s `groove` is set to a groove address (grooves/N). Addresses are as in get_properties.' +
       ' Values are checked strictly (booleans must be true/false, integers whole numbers, enums given by name; see list_properties). ' +
       'Interdependent properties (e.g. loop_start/loop_end) can be set together in any order, and the call is all-or-nothing: if one ' +
       'write fails, the others are restored. Returns each property\'s previous and new value. Each call is one undo step in Live. ' +
@@ -163,6 +194,9 @@ export const TOOL_SPECS: ToolSpec[] = [
   {
     name: 'create',
     description:
+      "Create a track, return track, scene, MIDI clip, audio clip, arrangement clip or take lane; returns its address. `kind` decides which of `address`, `index`, `time`, `length`, `path` apply (their descriptions say where; `help: true` has the full rules). " +
+      "Optional `name` and `color`. One undo step. Cue points cannot be created.",
+    help:
       "Create a track, return track, scene, MIDI clip, audio clip, arrangement clip or take lane and get back its address. kind: audio_track, midi_track, return_track (always appended), scene, audio_clip (`address` of an EMPTY slot on an audio track and `path`: an absolute path to an audio file; it is auto-warped by Live's settings and the result reports its length), " +
       "arrangement_midi_clip (`address` of a track or take lane, `time` in beats on the timeline, `length` default 4) and arrangement_audio_clip (`address`, `time`, `path`), take_lane (`address` of a track), midi_clip " +
       "(`address` of an EMPTY clip slot like 'tracks/2/slots/0', `length` in beats, default 4). Cue points cannot be created (Live only toggles them at the arrangement insert marker, which is UI state). For tracks and scenes `index` is the insertion position (0-based; omit or -1 to append; existing objects shift, so re-read addresses afterwards). " +
@@ -177,7 +211,8 @@ export const TOOL_SPECS: ToolSpec[] = [
         length: { type: 'number', description: 'midi_clip: length in beats (default 4)' },
         time: { type: 'number', description: 'arrangement clips: position in beats' },
         name: { type: 'string', description: 'Name to give it' },
-        color: { type: 'number', description: 'RGB color integer' }
+        color: { type: 'number', description: 'RGB color integer' },
+        help: HELP_ARG
       },
       required: ['kind']
     },
@@ -188,10 +223,13 @@ export const TOOL_SPECS: ToolSpec[] = [
     name: 'duplicate',
     description:
       "Duplicate a regular track ('tracks/N', with its devices and clips), a scene ('scenes/N') or a clip slot ('tracks/N/slots/M', with its clip). " +
-      "The copy lands right after the source (a duplicated slot goes into the next scene); returns the new address. Return tracks and the master cannot be duplicated.",
+      "The copy lands right after the source (a duplicated slot goes into the next scene); returns the new address. A clip slot can instead go to a chosen empty slot with `to`, also on another track of the same type. Return tracks and the master cannot be duplicated.",
     inputSchema: {
       type: 'object',
-      properties: { address: { type: 'string', description: "What to duplicate, e.g. 'tracks/3', 'scenes/name:Verse', 'tracks/0/slots/2'" } },
+      properties: {
+        address: { type: 'string', description: "What to duplicate, e.g. 'tracks/3', 'scenes/name:Verse', 'tracks/0/slots/2'" },
+        to: { type: 'string', description: "Clip slot to copy the clip to, e.g. 'tracks/2/slots/4'. It must be empty: Live would replace a clip there without asking" }
+      },
       required: ['address']
     },
     annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: false },
@@ -226,7 +264,8 @@ export const TOOL_SPECS: ToolSpec[] = [
       "stop stops it), a scene ('scenes/N': fire only) , a track ('tracks/N': stop all its clips), a cue point ('cue_points/N': jump there) or 'song' (stop all clips, transport keeps running). " +
       "Options for a slot: `quantization` overrides the launch quantization for this launch (q_no_q, q_bar, q_half...), `legato` starts the clip in sync with the one playing, " +
       "`record_length` (beats, empty slot only) starts a recording that ends by itself. Scenes take `legato` and `select` (false keeps the selection where it is). " +
-      "Stops take `quantized` (default true; false stops immediately). Launching does not change the Set's content. Arrangement clips cannot be launched (use transport).",
+      "Stops take `quantized` (default true; false stops immediately). `hold: true` presses the fire button of a slot, clip or scene instead of clicking it: a gate-mode clip plays only while held, trigger, toggle and repeat clips keep playing after release. " +
+      "It takes no other launch option and releases itself after `hold_seconds` or `hold_beats` (default and maximum 120 s); `hold: false` releases now. Launching does not change the Set's content. Arrangement clips cannot be launched (use transport).",
     inputSchema: {
       type: 'object',
       properties: {
@@ -236,7 +275,10 @@ export const TOOL_SPECS: ToolSpec[] = [
         legato: { type: 'boolean', description: 'Start in sync with the playing clip (slots and scenes)' },
         record_length: { type: 'number', description: 'Beats to record (empty slots only)' },
         select: { type: 'boolean', description: 'Scenes: whether launching selects the scene (default true)' },
-        quantized: { type: 'boolean', description: 'Stops: wait for the launch quantization (default true)' }
+        quantized: { type: 'boolean', description: 'Stops: wait for the launch quantization (default true)' },
+        hold: { type: 'boolean', description: 'Press (true) or release (false) the fire button of a slot, clip or scene' },
+        hold_seconds: { type: 'number', description: 'hold: release after this many seconds (max 120)' },
+        hold_beats: { type: 'number', description: 'hold: release after this many beats at the current tempo' }
       },
       required: ['address']
     },
@@ -246,6 +288,10 @@ export const TOOL_SPECS: ToolSpec[] = [
   {
     name: 'clip_action',
     description:
+      "Edit a clip in place. `action`: crop, duplicate_loop (MIDI), quantize (`grid`, `amount`), quantize_pitch (MIDI), scrub / stop_scrub, move_playing_pos, " +
+      "add_warp_marker / move_warp_marker / remove_warp_marker (audio), to_arrangement (copies a Session clip onto the timeline at `time`; its envelopes become arrangement automation, so draw_automation on the Session clip first). " +
+      "`address` must be a clip. crop and quantize rewrite content: one undo step each; `expect` ({name}) refuses to act on the wrong clip. `help: true` lists every action's parameters.",
+    help:
       "Edit a clip in place: crop (discard everything outside the loop), duplicate_loop (loop twice as long, notes and envelopes copied; MIDI only), " +
       "quantize (`grid`: rec_q_quarter, rec_q_eight, rec_q_eight_triplet, rec_q_sixtenth, rec_q_thirtysecond...; `amount` 0-1, default 1; on audio clips it aligns warp markers), " +
       "quantize_pitch (like quantize for one `pitch`, 0-127; MIDI only), scrub (`position` in beats) / stop_scrub, move_playing_pos (`amount` beats, negative goes back; clip must be playing), and on AUDIO clips add_warp_marker (`beat_time`; `sample_time` = seconds in the file, default: where it changes nothing), " +
@@ -265,7 +311,8 @@ export const TOOL_SPECS: ToolSpec[] = [
         amount: { type: 'number', description: 'quantize: 0-1 strength; move_playing_pos: beats' },
         pitch: { type: 'number', description: 'MIDI note number (quantize_pitch)' },
         position: { type: 'number', description: 'Beats from the clip start (scrub)' },
-        expect: { type: 'object', description: 'Guard: {"name": "..."} must match the clip' }
+        expect: { type: 'object', description: 'Guard: {"name": "..."} must match the clip' },
+        help: HELP_ARG
       },
       required: ['address', 'action']
     },
@@ -329,6 +376,9 @@ export const TOOL_SPECS: ToolSpec[] = [
   {
     name: 'edit_notes',
     description:
+      "Change notes that already exist in a MIDI clip. `action`: modify, remove, replace, duplicate, duplicate_region, select; the parameters of each are in the property descriptions (`help: true` has the full rules). " +
+      "Get ids from get_notes; unknown ids are refused with nothing changed. `expect` ({name}) guards against the wrong clip. One undo step; DESTRUCTIVE (remove, replace).",
+    help:
       "Change notes that already exist in a MIDI clip. `action`: modify (`changes`: [{id, <fields>}] or `ids` + `set`: {field: value}; keeps note ids and per-note events), " +
       "remove (exactly one of `ids`, a range from_time/time_span/from_pitch/pitch_span, or all: true), replace (swap the notes in a range, or all notes, for `notes` in one step; if Live refuses the new notes the old ones are restored; " +
       "omit `notes` to clear the range), duplicate (`ids`, optional `destination_time` and `transposition` semitones), duplicate_region (`start`, `length`, `destination_time`, optional `pitch` and `transposition`) " +
@@ -353,7 +403,8 @@ export const TOOL_SPECS: ToolSpec[] = [
         destination_time: { type: 'number', description: 'duplicate, duplicate_region: where the copies start' },
         pitch: { type: 'number', description: 'duplicate_region: only this pitch (-1 = all)' },
         transposition: { type: 'number', description: 'duplicate, duplicate_region: semitones' },
-        expect: { type: 'object', description: 'Guard: {"name": "..."} must match the clip' }
+        expect: { type: 'object', description: 'Guard: {"name": "..."} must match the clip' },
+        help: HELP_ARG
       },
       required: ['address', 'action']
     },
@@ -368,7 +419,7 @@ export const TOOL_SPECS: ToolSpec[] = [
       "Device names per track are in describe_set. " +
       "Change a parameter with set_properties on its address ('.../parameters/5' or '.../parameters/name:Frequency', field `value` or `display` such as '35 Hz'; a quantized parameter also takes its label such as 'Low-pass'); " +
       "many at once with `items`. Devices also have properties (name, `on`, `collapsed`) and racks chains, pads and mixers have theirs: see list_properties. " +
-      "Simpler, Wavetable, Drift, Meld, Eq Eight, Looper, Hybrid Reverb, Roar, Spectral Resonator, Shifter, Drum Cell and plug-ins also have their own properties and methods: the result's `specific` block lists them (choices such as a wavetable or voice mode are properties that take the label the device shows; `..._options` lists the labels), and a Simpler's sample is at '<device>/sample'.",
+      "Simpler, Wavetable, Drift, Meld, Eq Eight, Looper, Hybrid Reverb, Roar, Spectral Resonator, Shifter, Drum Cell, CC Control and plug-ins also have their own properties and methods: the result's `specific` block lists them (choices such as a wavetable or voice mode are properties that take the label the device shows; `..._options` lists the labels), and a Simpler's sample is at '<device>/sample'.",
     inputSchema: {
       type: 'object',
       properties: {
@@ -384,6 +435,11 @@ export const TOOL_SPECS: ToolSpec[] = [
   {
     name: 'device_action',
     description:
+      "Change device structure. `action`: insert (`address` of a track, return, master or chain; `name` as in Live's browser; `position`), delete (`expect` {name} mandatory), duplicate, move (`to` a track or chain), save_ab, " +
+      "rack actions (insert_chain, add_macro, remove_macro, randomize_macros, store_variation, recall_variation, delete_variation, copy_pad, clear_pad with `expect` mandatory), " +
+      "re_enable_automation (a parameter, or 'song' for all: hands back a parameter that a write overrode) and call (`method` + `args` on a device or a Simpler's '/sample'; the methods are listed by get_device). " +
+      "Live's refusals come through with its reason. Returns the new address where one is created. One undo step. DESTRUCTIVE for delete, clear_pad, remove_macro, delete_variation. `help: true` lists every action's parameters.",
+    help:
       "Change device structure. `action`: insert (`address` of a track, return track, master or rack chain; `name` as in Live's browser, e.g. 'EQ Eight', 'Drum Rack', 'Audio Effect Rack'; optional `position`, default end; Live refuses bad placements " +
       "such as effects before an instrument and says why), delete (`address` of a device; `expect` {name} mandatory), duplicate (a device; the copy goes right after it), move (`address` of a device, `to` a track or chain, optional `position`; returns where it landed), " +
       "save_ab (store the current preset in the A/B compare slot), and for racks: insert_chain (optional `position`), add_macro, remove_macro, randomize_macros, store_variation, recall_variation (`index` selects the variation first; else the selected one; `which` last = the last recalled), delete_variation (`index` or the selected one; Live does nothing when none is selected, so this refuses), " +
@@ -407,7 +463,8 @@ export const TOOL_SPECS: ToolSpec[] = [
         to_note: { type: 'number', description: 'copy_pad: destination pad note' },
         method: { type: 'string', description: 'call: the method name' },
         args: { type: 'object', description: 'call: the method arguments by name' },
-        expect: { type: 'object', description: 'Guard for delete and clear_pad: {"name": "..."} must match' }
+        expect: { type: 'object', description: 'Guard for delete and clear_pad: {"name": "..."} must match' },
+        help: HELP_ARG
       },
       required: ['address', 'action']
     },
@@ -439,22 +496,23 @@ export const TOOL_SPECS: ToolSpec[] = [
     bridge: { command: 'routing' }
   },
   {
-    name: 'draw_automation',
+    name: 'automation',
     description:
-      "Draw a clip automation envelope for a device or mixer parameter, inside Live (tempo-locked, sample-accurate). `clip`: a Session clip address ('tracks/2/slots/0/clip'); `parameter`: a parameter address on that clip's track " +
-      "('tracks/2/devices/0/parameters/5', 'tracks/2/mixer/volume', 'tracks/2/mixer/sends/0'). `points`: [{time, value, curve?}] with time in beats from clip start and value in the parameter's own units (get_device shows min/max). " +
-      "The default `style` 'breakpoints' writes real envelope breakpoints (straight lines between them; smooth/ease curves get a breakpoint every `resolution` beats, default 0.25; step curves make jumps), so it is editable in Live and light. " +
-      "'steps' writes a staircase of fine steps instead (`resolution` default 0.125). `curve`: linear (default), step, smooth, ease_in, ease_out (a point's own curve shapes the segment after it). " +
-      "`mode` replace (default) rebuilds the parameter's envelope, merge rewrites only the drawn range (breakpoints outside connect to it by straight lines). With `hold` (default true) the clip edges are filled with the first/last value. " +
-      "The result includes a readback of Live's stored values. Arrangement clips have no envelopes in Live's API. One undo step per call.",
+      "Write automation. `action`: draw (a Session clip's envelope for a device or mixer parameter: `clip`, `parameter`, `points` [{time, value, curve?}] with time in beats from clip start and value in the parameter's own units; `mode` replace or merge), " +
+      "clear (`clip`, optional `parameter`: one envelope, or all on the clip), ramp (sweep `parameter` to `to` over `beats` or `seconds` right now, about 100 updates a second: a live gesture, not undoable, not batchable), cancel (stop the ramp of one `parameter`, or all). " +
+      "Arrangement automation is written by drawing on a Session clip and then clip_action to_arrangement. Read envelopes and see what is automated with get_automation. `help: true` has the full rules.",
+    help:
+      "ACTION draw: " + AUTOMATION_DRAW_HELP + "\n\nACTION clear: " + AUTOMATION_CLEAR_HELP + "\n\nACTION ramp: " + AUTOMATION_RAMP_HELP + "\n\nACTION cancel: " + AUTOMATION_CANCEL_HELP +
+      "\n\nRequired per action: draw needs clip, parameter and points; clear needs clip; ramp needs parameter, to and beats or seconds; cancel needs nothing. In a batch only draw and clear are allowed.",
     inputSchema: {
       type: 'object',
       properties: {
-        clip: { type: 'string', description: "Session clip address, e.g. 'tracks/2/slots/0/clip'" },
-        parameter: { type: 'string', description: "Parameter address, e.g. 'tracks/2/devices/0/parameters/5' or 'tracks/2/mixer/volume'" },
+        action: { type: 'string', enum: ['draw', 'clear', 'ramp', 'cancel'], description: 'What to do' },
+        clip: { type: 'string', description: "draw, clear: Session clip address, e.g. 'tracks/2/slots/0/clip'" },
+        parameter: { type: 'string', description: "Parameter address, e.g. 'tracks/2/devices/0/parameters/5' or 'tracks/2/mixer/volume' (clear, cancel: omit for all)" },
         points: {
           type: 'array',
-          description: 'Breakpoints, e.g. [{"time":0,"value":0.2},{"time":8,"value":0.9}]',
+          description: 'draw: breakpoints, e.g. [{"time":0,"value":0.2},{"time":8,"value":0.9}]',
           items: {
             type: 'object',
             properties: {
@@ -465,75 +523,46 @@ export const TOOL_SPECS: ToolSpec[] = [
             required: ['time', 'value']
           }
         },
-        curve: { type: 'string', enum: ['linear', 'step', 'smooth', 'ease_in', 'ease_out'], description: "Default curve between points (default 'linear')" },
-        style: { type: 'string', enum: ['breakpoints', 'steps'], description: "Default 'breakpoints'" },
-        resolution: { type: 'number', description: 'Beats between generated breakpoints (or steps) on curved segments' },
-        mode: { type: 'string', enum: ['replace', 'merge'], description: "'replace' (default) or 'merge'" },
-        hold: { type: 'boolean', description: 'Fill the clip before the first and after the last point (default true)' }
+        curve: { type: 'string', enum: ['linear', 'step', 'smooth', 'ease_in', 'ease_out'], description: "draw, ramp: default curve (default 'linear'; a ramp has no 'step')" },
+        style: { type: 'string', enum: ['breakpoints', 'steps'], description: "draw: default 'breakpoints'" },
+        resolution: { type: 'number', description: 'draw: beats between generated breakpoints (or steps) on curved segments' },
+        mode: { type: 'string', enum: ['replace', 'merge'], description: "draw: 'replace' (default) or 'merge'" },
+        hold: { type: 'boolean', description: 'draw: fill the clip before the first and after the last point (default true)' },
+        to: { type: 'number', description: 'ramp: target value' },
+        from: { type: 'number', description: 'ramp: start value (default: current)' },
+        beats: { type: 'number', description: 'ramp: duration in beats (give beats or seconds)' },
+        seconds: { type: 'number', description: 'ramp: duration in seconds (0.01 to 3600)' },
+        help: HELP_ARG
       },
-      required: ['clip', 'parameter', 'points']
+      required: ['action']
     },
     annotations: { readOnlyHint: false, destructiveHint: true, idempotentHint: false },
-    bridge: { command: 'draw_automation' }
+    bridge: {
+      command: 'automation',
+      params: (args) => {
+        checkAutomationArgs(args);
+        return args;
+      }
+    }
   },
   {
     name: 'get_automation',
     description:
-      "Read a Session clip's automation: every envelope on the clip (or only `parameter`'s) as breakpoints in the parameter's own units: {time, value, jump_from?} (`jump_from` marks a step: the value just before it), " +
-      "with the parameter's address, name and range. `max_points` caps each envelope (default 500; `truncated` says if more exist). Use it to inspect what a clip already does before drawing over it.",
+      "Read automation. With `clip` (a Session clip address): every envelope on it (or only `parameter`'s) as breakpoints in the parameter's own units, {time, value, jump_from?} (`jump_from` marks a step: the value just before it), with the parameter's address, name and range; " +
+      "`max_points` caps each envelope (default 500). Without `clip`: an overview of the whole Set, or of the track in `address` ('song' by default): every parameter that is automated now (state `playing`, or `overridden` by a hand or bridge write) and every Session clip " +
+      "that carries envelopes, with the parameters they control. Arrangement automation shows up as a playing parameter, but its breakpoints cannot be read through Live's API.",
     inputSchema: {
       type: 'object',
       properties: {
-        clip: { type: 'string', description: "Session clip address, e.g. 'tracks/2/slots/0/clip'" },
-        parameter: { type: 'string', description: 'Only this parameter' },
-        max_points: { type: 'number', description: 'Breakpoints per envelope (default 500)' }
-      },
-      required: ['clip']
+        clip: { type: 'string', description: "Session clip address, e.g. 'tracks/2/slots/0/clip'; omit for the overview" },
+        parameter: { type: 'string', description: 'Only this parameter (with clip)' },
+        max_points: { type: 'number', description: 'Breakpoints per envelope (default 500)' },
+        address: { type: 'string', description: "Overview scope: 'song' (default), a track, a return track or 'master'" },
+        max_items: { type: 'number', description: 'Overview: most parameters and clips listed (default 500)' }
+      }
     },
     annotations: { readOnlyHint: true, destructiveHint: false, idempotentHint: true },
     bridge: { command: 'get_automation' }
-  },
-  {
-    name: 'clear_automation',
-    description:
-      "Clear one parameter's envelope on a Session clip (`clip` + `parameter`), or every envelope on the clip when no parameter is given. Returns whether an envelope existed. One undo step.",
-    inputSchema: {
-      type: 'object',
-      properties: {
-        clip: { type: 'string', description: "Session clip address, e.g. 'tracks/2/slots/0/clip'" },
-        parameter: { type: 'string', description: 'Parameter address; omit to clear all envelopes on the clip' }
-      },
-      required: ['clip']
-    },
-    annotations: { readOnlyHint: false, destructiveHint: true, idempotentHint: false },
-    bridge: { command: 'clear_automation' }
-  },
-  {
-    name: 'ramp_parameter',
-    description:
-      "Sweep a device or mixer parameter (`parameter` address) to `to` over `beats` or `seconds`, driven inside Live at about 100 updates per second. For live gestures; use draw_automation for motion that belongs to a looping clip. " +
-      "`from` defaults to the current value; `curve`: linear, smooth, ease_in, ease_out. A new ramp on the same parameter replaces the old one. Values are in the parameter's own units. Ramps are not undoable and cannot run inside a batch.",
-    inputSchema: {
-      type: 'object',
-      properties: {
-        parameter: { type: 'string', description: "Parameter address, e.g. 'tracks/2/devices/0/parameters/5' or 'tracks/2/mixer/volume'" },
-        to: { type: 'number', description: 'Target value' },
-        from: { type: 'number', description: 'Start value (default: current)' },
-        beats: { type: 'number', description: 'Duration in beats (give beats or seconds)' },
-        seconds: { type: 'number', description: 'Duration in seconds (0.01 to 3600)' },
-        curve: { type: 'string', enum: ['linear', 'smooth', 'ease_in', 'ease_out'], description: 'Default linear' }
-      },
-      required: ['parameter', 'to']
-    },
-    annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: false },
-    bridge: { command: 'ramp_parameter' }
-  },
-  {
-    name: 'cancel_ramps',
-    description: 'Cancel the ramp on one `parameter`, or every active ramp when no parameter is given. The parameter stays wherever the ramp had taken it.',
-    inputSchema: { type: 'object', properties: { parameter: { type: 'string', description: 'Parameter address; omit to cancel all' } } },
-    annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: true },
-    bridge: { command: 'cancel_ramps' }
   },
   {
     name: 'record',

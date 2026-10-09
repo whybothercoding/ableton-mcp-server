@@ -1,5 +1,5 @@
 """Properties and methods that belong to particular devices: Simpler and its Sample, Wavetable, Drift, Meld, Eq Eight, Looper,
-Hybrid Reverb, Roar, Spectral Resonator, Shifter, Drum Cell and plug-ins.
+Hybrid Reverb, Roar, Spectral Resonator, Shifter, Drum Cell, CC Control and plug-ins.
 
 Nothing here is written per property. The property tables are built from the generated API registry (so they are exactly
 what Live's classes offer, and stay right after a Live update), with three touches: integer properties that Live documents
@@ -36,6 +36,10 @@ DEVICE_CLASSES = (
     ("ShifterDevice", "ShifterDevice", {}, {}),
     ("DrumCellDevice", "DrumCellDevice", {}, {}),
     ("PluginDevice", "PluginDevice", {}, {}),
+    # CC Control: each of its 12 knobs and its button picks a MIDI CC by name from a list of 120; the integer property and its list share a stem
+    ("CcControlDevice", "CcControlDevice", {},
+     dict([("custom_float_target_{0}".format(i), ("custom_float_target_{0}".format(i), "custom_float_target_{0}_list".format(i))) for i in range(12)]
+          + [("custom_bool_target", ("custom_bool_target", "custom_bool_target_list"))])),
 )
 SAMPLE_CLASS = ("Sample", "Sample", {"warp_mode": "Live.Clip.WarpMode", "slicing_style": "Live.Sample.SlicingStyle",
                                        "slicing_beat_division": "Live.Sample.SlicingBeatDivision",

@@ -14,7 +14,9 @@ KIND_CLASSES = {"song": "Live.Song.Song", "track": "Live.Track.Track", "scene": 
                 "slot": "Live.ClipSlot.ClipSlot", "clip": "Live.Clip.Clip",
                 "groove": "Live.Groove.Groove", "cue": "Live.Song.CuePoint", "app": "Live.Application.Application",
                 "device": "Live.RackDevice.RackDevice", "chain": "Live.Chain.Chain", "pad": "Live.DrumPad.DrumPad",
-                "parameter": "Live.DeviceParameter.DeviceParameter", "lane": "Live.TakeLane.TakeLane", "sample": "Live.Sample.Sample"}
+                "parameter": "Live.DeviceParameter.DeviceParameter", "lane": "Live.TakeLane.TakeLane", "sample": "Live.Sample.Sample",
+                "view": "Live.Song.Song.View", "app_view": "Live.Application.Application.View", "track_view": "Live.Track.Track.View",
+                "clip_view": "Live.Clip.Clip.View", "device_view": "Live.Device.Device.View"}
 
 
 def data():
@@ -47,5 +49,6 @@ def family(type_name):
     if type_name and "Live." + type_name in data()["enums"]:
         return "enum"
     if type_name and "." in type_name and type_name.split(".")[0] in ("Song", "Clip", "Track", "Scene"):
-        return "enum"
+        module, name = type_name.split(".", 1)
+        return "ref" if name == module else "enum"        # Track.Track is an object (a selected track); Clip.GridQuantization is an enum
     return "ref"

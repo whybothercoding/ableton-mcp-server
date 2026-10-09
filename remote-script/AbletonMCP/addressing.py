@@ -11,6 +11,13 @@
     cue_points/0             cue point 0 (by time order)    cue_points/name:Chorus
     app                      the Live application (CPU load, dialogs)
 
+Views (what Live's window shows: selection, the Detail view, grids), none of it part of the Set:
+    view                     the Song's view: selected track, scene, clip slot, Detail clip
+    app/view                 the application's view: Session or Arranger in front, which panels are visible
+    tracks/3/view            a track's view (also returns/N/view and master/view)
+    tracks/3/slots/1/clip/view   a clip's view (also an arrangement clip: tracks/3/arrangement/2/view): grid
+    tracks/3/devices/0/view  a device's view (also inside chains): collapsed, a rack's selected chain, an EQ Eight's band
+
 A name selector must match exactly one object: no match is NOT_FOUND, several are AMBIGUOUS (the error lists the
 candidates' indices). Every tool that creates or finds an object returns an address the caller can reuse.
 """
@@ -22,7 +29,8 @@ class AddressingMixin(object):
     """Resolve addresses to Live objects and build addresses from objects."""
 
     def _resolve(self, address):
-        """Return (kind, object, canonical_address). kind is song, track, scene, slot, clip, lane, groove, cue, app, device, chain, pad or parameter."""
+        """Return (kind, object, canonical_address). kind is song, track, scene, slot, clip, lane, groove, cue, app, device, chain, pad, parameter
+        or sample, or one of the view kinds: view, app_view, track_view, clip_view, device_view."""
         if not isinstance(address, str) or not address.strip():
             raise BridgeError("address must be a non-empty string such as 'tracks/0/slots/1/clip'", "INVALID_ARGUMENT")
         parts = [p for p in address.strip().strip("/").split("/") if p != ""]
@@ -36,8 +44,12 @@ class AddressingMixin(object):
         if head == "scenes" and len(parts) == 2:
             index = self._select(self._song.scenes, parts[1], "scene", lambda s: s.name)
             return "scene", self._song.scenes[index], "scenes/{0}".format(index)
+        if head == "view" and len(parts) == 1:
+            return "view", self._song.view, "view"
         if head == "app" and len(parts) == 1:
             return "app", self.application(), "app"
+        if head == "app" and parts[1:] == ["view"]:
+            return "app_view", self.application().view, "app/view"
         if head == "cue_points" and len(parts) == 2:
             cues = list(self._song.cue_points)
             index = self._select(cues, parts[1], "cue point", lambda c: c.name)
@@ -53,11 +65,11 @@ class AddressingMixin(object):
             track, canonical = tracks[index], "{0}/{1}".format(head, index)
             if len(parts) == 2:
                 return "track", track, canonical
-            if parts[2] in ("devices", "mixer"):
+            if parts[2] in ("devices", "mixer", "view"):
                 return self._resolve_track_tail(track, canonical, parts[2:], address)
-            if head == "tracks" and parts[2] == "arrangement" and len(parts) == 4:
-                return self._resolve_arrangement_clip(track, canonical, parts[3], address)
-            if head == "tracks" and parts[2] == "take_lanes" and len(parts) in (4, 6):
+            if head == "tracks" and parts[2] == "arrangement" and len(parts) in (4, 5):
+                return self._resolve_arrangement_clip(track, canonical, parts[3], address, parts[4:])
+            if head == "tracks" and parts[2] == "take_lanes" and len(parts) in (4, 6, 7):
                 lanes = list(_safe_attr(track, "take_lanes", []))
                 index = self._select(lanes, parts[3], "take lane", lambda l: l.name)
                 lane, lane_address = lanes[index], "{0}/take_lanes/{1}".format(canonical, index)
@@ -65,8 +77,8 @@ class AddressingMixin(object):
                     return "lane", lane, lane_address
                 if parts[4] != "arrangement":
                     raise BridgeError("Unknown address '{0}'".format(address), "NOT_FOUND")
-                return self._resolve_arrangement_clip(lane, lane_address, parts[5], address)
-            if head == "tracks" and parts[2] == "slots" and len(parts) in (4, 5):
+                return self._resolve_arrangement_clip(lane, lane_address, parts[5], address, parts[6:])
+            if head == "tracks" and parts[2] == "slots" and len(parts) in (4, 5, 6):
                 slots = track.clip_slots
                 slot_index = _as_index(self._number(parts[3], address), "slot index")
                 if not 0 <= slot_index < len(slots):
@@ -78,19 +90,30 @@ class AddressingMixin(object):
                     raise BridgeError("Unknown address '{0}'".format(address), "NOT_FOUND")
                 if not slot.has_clip:
                     raise BridgeError("The clip slot in '{0}' is empty".format(address), "NOT_FOUND")
-                return "clip", slot.clip, canonical + "/clip"
+                return self._clip_or_view(slot.clip, canonical + "/clip", parts[5:], address)
         raise BridgeError("Unknown address '{0}'. Use song, master, tracks/N, returns/N, scenes/N, "
                           "tracks/N/slots/M[/clip], tracks/N/devices/M[/parameters/P | /chains/C/devices/...], grooves/N, cue_points/N, app, "
-                          "or a name: selector such as tracks/name:Drift".format(address), "NOT_FOUND")
+                          "view, app/view, <track|clip|device>/view, or a name: selector such as tracks/name:Drift".format(address), "NOT_FOUND")
 
-    def _resolve_arrangement_clip(self, owner, canonical, token, address):
-        """A clip on the arrangement timeline of a track or take lane, by position in time order."""
+    def _resolve_arrangement_clip(self, owner, canonical, token, address, tail=()):
+        """A clip on the arrangement timeline of a track or take lane, by position in time order (or its view, with tail ['view'])."""
         clips = list(_safe_attr(owner, "arrangement_clips", []))
         index = self._select(clips, token, "arrangement clip", lambda c: c.name)
-        return "clip", clips[index], "{0}/arrangement/{1}".format(canonical, index)
+        return self._clip_or_view(clips[index], "{0}/arrangement/{1}".format(canonical, index), list(tail), address)
+
+    @staticmethod
+    def _clip_or_view(clip, canonical, tail, address):
+        """The clip itself, or with tail ['view'] its view (grid settings)."""
+        if not tail:
+            return "clip", clip, canonical
+        if list(tail) == ["view"]:
+            return "clip_view", clip.view, canonical + "/view"
+        raise BridgeError("Unknown address '{0}'".format(address), "NOT_FOUND")
 
     def _resolve_track_tail(self, track, canonical, rest, address):
-        """Below a track (or the master): its device chain and mixer."""
+        """Below a track (or the master): its device chain, mixer and view."""
+        if rest[0] == "view" and len(rest) == 1:
+            return "track_view", track.view, canonical + "/view"
         if rest[0] == "devices":
             return self._resolve_devices(track, canonical, rest, address)
         if rest[0] == "mixer":

@@ -12,8 +12,11 @@ from .helpers import _safe_attr
 from .registry import BridgeError, command
 
 DEFAULT_WALK_ROOTS = ("instruments", "audio_effects", "midi_effects", "drums", "sounds", "max_for_live", "user_library", "packs")
+# Browser properties that are plain lists of items, not roots with children: the folders added to Live's sidebar, old libraries and the
+# colour collections (Favorites). They are wrapped as roots so they list, search and load like the rest.
+VECTOR_ROOTS = ("user_folders", "legacy_libraries", "colors")
 ALL_ROOTS = ("instruments", "sounds", "drums", "audio_effects", "midi_effects", "samples", "user_library", "current_project", "clips",
-             "packs", "plugins", "max_for_live")
+             "packs", "plugins", "max_for_live") + VECTOR_ROOTS
 MAX_WALK_DEPTH = 12
 LOAD_ACTIONS = ("load", "preview", "stop_preview")
 
@@ -21,6 +24,14 @@ LOAD_ACTIONS = ("load", "preview", "stop_preview")
 def _item_record(item, path):
     return {"name": item.name, "path": path, "uri": _safe_attr(item, "uri"), "is_folder": bool(_safe_attr(item, "is_folder", False)),
             "is_device": bool(_safe_attr(item, "is_device", False)), "is_loadable": bool(_safe_attr(item, "is_loadable", False))}
+
+
+class _ListRoot(object):
+    """A list of browser items presented as a root folder."""
+    is_folder, is_loadable, is_device, uri = True, False, False, None
+
+    def __init__(self, name, items):
+        self.name, self.children = name, list(items)
 
 
 class BrowseMixin(object):
@@ -39,7 +50,9 @@ class BrowseMixin(object):
         roots = []
         for name in names:
             root = _safe_attr(browser, name)
-            if root is not None and hasattr(root, "children"):
+            if root is not None and name in VECTOR_ROOTS:
+                roots.append((name, _ListRoot(name, root)))
+            elif root is not None and hasattr(root, "children"):
                 roots.append((name, root))
         return roots
 

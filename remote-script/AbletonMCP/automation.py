@@ -15,6 +15,12 @@ from .curves import _build_breakpoints
 from .curves import _eval_breakpoints
 from .helpers import _safe_attr
 from .registry import BridgeError
+from .device_addressing import MIXER_PARAMETERS
+
+# action -> the method that does it (the writing `automation` command)
+AUTOMATION_ACTIONS = {"draw": "_draw_automation", "clear": "_clear_automation", "ramp": "_ramp_parameter", "cancel": "_cancel_ramps"}
+AUTOMATION_REQUIRED = {"draw": ("clip", "parameter", "points"), "clear": ("clip",), "ramp": ("parameter", "to"), "cancel": ()}      # as addresses; the old index forms stay with the old commands
+AUTOMATION_STATES = {1: "playing", 2: "overridden"}
 
 
 class AutomationMixin(object):
@@ -36,9 +42,86 @@ class AutomationMixin(object):
     def _cmd_cancel_ramps(self, params):
         return self._cancel_ramps(params)
 
+    @command("automation", writes=True, destructive=True)
+    def _cmd_automation(self, params):
+        """The writing automation tool in one command: draw / clear a Session clip's envelopes, ramp a parameter now, cancel ramps."""
+        action = params.get("action")
+        if action not in AUTOMATION_ACTIONS:
+            raise BridgeError("action must be one of: {0}".format(", ".join(AUTOMATION_ACTIONS)), "INVALID_ARGUMENT")
+        missing = [key for key in AUTOMATION_REQUIRED[action] if params.get(key) is None]
+        if missing:
+            raise BridgeError("automation {0} needs {1}".format(action, ", ".join(AUTOMATION_REQUIRED[action])), "INVALID_ARGUMENT", {"missing": missing})
+        rest = dict((key, value) for key, value in params.items() if key != "action")
+        return getattr(self, AUTOMATION_ACTIONS[action])(rest)
+
     @command("get_automation")
     def _cmd_get_automation(self, params):
+        """A Session clip's envelopes, or (no clip given) which parameters of the whole Set are automated."""
+        if params.get("clip") is None and params.get("track_index") is None:
+            return self._automation_overview(params)
         return self._get_automation(params)
+
+    def _automation_overview(self, params):
+        """Every parameter that has automation now (automation_state 1: playing, 2: overridden by a hand or bridge write) in `address` (a track,
+        return track, 'master', or 'song' for all), and the Session clips that carry envelopes with the parameters those control. Arrangement
+        automation shows up as automation_state 1 on its parameter; its breakpoints cannot be read through Live's API."""
+        scope = params.get("address", "song")
+        limit = params.get("max_items", 500)
+        if isinstance(limit, bool) or not isinstance(limit, int) or limit < 1:
+            raise BridgeError("max_items must be a whole number from 1", "INVALID_ARGUMENT")
+        if scope == "song":
+            owners = [("tracks/{0}".format(i), t) for i, t in enumerate(self._song.tracks)] + \
+                     [("returns/{0}".format(i), t) for i, t in enumerate(self._song.return_tracks)] + [("master", self._song.master_track)]
+        else:
+            kind, track, canonical = self._resolve(scope)
+            if kind != "track":
+                raise BridgeError("address must be 'song', a track, a return track or 'master', got '{0}' which is a {1}".format(canonical, kind), "INVALID_ARGUMENT")
+            owners = [(canonical, track)]
+        automated, clips, scanned = [], [], 0
+        for address, track in owners:
+            for parameter, device_name in self._automatable_parameters(track):
+                scanned += 1
+                state = _safe_attr(parameter, "automation_state", 0)
+                if state:
+                    automated.append({"address": self._address_of(parameter), "name": parameter.name, "device": device_name, "track": address,
+                                      "state": AUTOMATION_STATES.get(state, state)})
+            for slot_index, slot in enumerate(_safe_attr(track, "clip_slots", [])):
+                if slot.has_clip and slot.clip.has_envelopes:
+                    clip = slot.clip
+                    clips.append({"address": "{0}/slots/{1}/clip".format(address, slot_index), "name": clip.name,
+                                  "parameters": [{"address": self._address_of(e.parameter), "name": e.parameter.name}
+                                                 for e in _safe_attr(clip, "automation_envelopes", [])]})
+        return {"scope": scope, "parameters_scanned": scanned, "automated_count": len(automated),
+                "overridden_count": sum(1 for a in automated if a["state"] == "overridden"),
+                "automated": automated[:limit], "clips_with_envelopes": clips[:limit], "truncated": len(automated) > limit or len(clips) > limit,
+                "song_has_overridden_automation": bool(_safe_attr(self._song, "re_enable_automation_enabled", False))}
+
+    def _automatable_parameters(self, track):
+        """(parameter, device name) for the mixer of a track, then every device on it, racks and their chains included."""
+        for parameter in self._mixer_parameters(track):
+            yield parameter, "Mixer"
+        for device in track.devices:
+            for pair in self._device_parameters(device):
+                yield pair
+
+    @staticmethod
+    def _mixer_parameters(owner):
+        mixer = _safe_attr(owner, "mixer_device")
+        if mixer is None:
+            return []
+        found = [p for p in (_safe_attr(mixer, name) for name in MIXER_PARAMETERS) if p is not None]
+        return found + list(_safe_attr(mixer, "sends", []))
+
+    def _device_parameters(self, device):
+        for parameter in device.parameters:
+            yield parameter, device.name
+        for group in ("chains", "return_chains"):
+            for chain in _safe_attr(device, group, []):
+                for parameter in self._mixer_parameters(chain):
+                    yield parameter, "{0} / {1}".format(device.name, chain.name)
+                for inner in chain.devices:
+                    for pair in self._device_parameters(inner):
+                        yield pair
 
     def _resolve_parameter(self, params):
         """Locate a device or mixer parameter from track_index (and track_type) plus device_index or

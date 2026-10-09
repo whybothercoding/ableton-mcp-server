@@ -4,6 +4,7 @@ import path from 'node:path';
 import { test } from 'node:test';
 import { fileURLToPath } from 'node:url';
 import { TOOLS, isToolEnabled } from '../../src/tools/definitions.js';
+import { ToolHandler } from '../../src/tools/handlers.js';
 import { TOOL_SPECS, TOOL_SPEC_BY_NAME, validateArgs } from '../../src/tools/spec.js';
 
 const root = path.dirname(path.dirname(path.dirname(fileURLToPath(import.meta.url))));
@@ -99,6 +100,26 @@ test('the advertised schema stays inside its size budget', () => {
   assert.ok(size < 50_000, `tool list is ${size} characters; trim descriptions or consolidate tools`);
 });
 
+test('a tool with a long form declares help, points to it, and answers it without validating or touching Live', async () => {
+  const withHelp = TOOL_SPECS.filter((s) => s.help);
+  assert.ok(withHelp.length >= 5, 'the long descriptions moved into help');
+  const calls: string[] = [];
+  const client = new Proxy({}, { get: (_t, prop) => () => { calls.push(String(prop)); throw new Error('help must not reach the bridge'); } });
+  const handler = new ToolHandler(client as any);
+  for (const spec of withHelp) {
+    assert.deepEqual(spec.inputSchema.properties.help, { type: 'boolean' }, `${spec.name} declares help`);
+    assert.match(spec.description, /help: true/, `${spec.name} tells the caller about help`);
+    assert.ok(spec.help!.length > spec.description.length / 2, `${spec.name}: help should carry the long form`);
+    const answer = await handler.handleToolCall(spec.name, { help: true });   // required arguments are missing on purpose
+    assert.ok(!answer.isError, spec.name);
+    assert.equal(answer.content[0].type, 'text');
+    assert.ok((answer.content[0] as { text: string }).text.includes(spec.help!), spec.name);
+  }
+  assert.deepEqual(calls, []);
+  const wrong = await handler.handleToolCall('device_action', { help: 'yes' });          // not true: the normal validation runs
+  assert.equal(wrong.isError, true);
+});
+
 test('eval_python is gated', () => {
   assert.equal(isToolEnabled('eval_python', {}), false);
   assert.equal(isToolEnabled('eval_python', { ABLETON_MCP_ALLOW_EVAL: '1' }), true);
@@ -147,6 +168,23 @@ test('launch and clip_action schemas and risk annotations', () => {
   assert.equal(validateArgs(action.inputSchema, { address: 'tracks/0/slots/0/clip', action: 'quantize', amount: 0.5 }), null);
 });
 
+test('launch can hold and release a fire button, and duplicate can name the slot to copy to', () => {
+  const launch = TOOL_SPEC_BY_NAME.launch;
+  assert.equal(validateArgs(launch.inputSchema, { address: 'tracks/0/slots/0', hold: true, hold_seconds: 2 }), null);
+  assert.equal(validateArgs(launch.inputSchema, { address: 'scenes/1', hold: true, hold_beats: 4 }), null);
+  assert.equal(validateArgs(launch.inputSchema, { address: 'tracks/0/slots/0', hold: false }), null);
+  assert.equal(validateArgs(launch.inputSchema, { address: 'tracks/0/slots/0', hold: 'yes' }), 'hold must be true or false');
+  assert.equal(validateArgs(launch.inputSchema, { address: 'tracks/0/slots/0', hold: true, hold_beats: '2' }), 'hold_beats must be a number');
+  assert.match(launch.description, /gate-mode clip plays only while held/);
+  assert.equal(launch.annotations.destructiveHint, false);
+  const duplicate = TOOL_SPEC_BY_NAME.duplicate;
+  assert.equal(validateArgs(duplicate.inputSchema, { address: 'tracks/0/slots/0', to: 'tracks/1/slots/2' }), null);
+  assert.equal(validateArgs(duplicate.inputSchema, { address: 'tracks/0/slots/0', to: 3 }), 'to must be a string');
+  assert.deepEqual(duplicate.inputSchema.required, ['address']);
+  assert.equal(duplicate.annotations.destructiveHint, false, 'an occupied destination is refused, so duplicate never replaces anything');
+  assert.match(duplicate.description, /empty slot with `to`/);
+});
+
 test('note tools: schemas, required arguments and risk annotations', () => {
   const get = TOOL_SPEC_BY_NAME.get_notes;
   const write = TOOL_SPEC_BY_NAME.write_notes;
@@ -192,16 +230,40 @@ test('routing tool: schema and annotations', () => {
   assert.equal(validateArgs(routing.inputSchema, { address: 'tracks/0', direction: 'input', action: 'set', type: 'Master', allow_feedback: true }), null);
 });
 
-test('automation tools take addresses: schemas, annotations and batchability', () => {
-  const draw = TOOL_SPEC_BY_NAME.draw_automation;
-  assert.deepEqual(draw.inputSchema.required, ['clip', 'parameter', 'points']);
-  assert.deepEqual(draw.inputSchema.properties.style.enum, ['breakpoints', 'steps']);
-  assert.equal(TOOL_SPEC_BY_NAME.get_automation.annotations.readOnlyHint, true);
-  assert.equal(TOOL_SPEC_BY_NAME.clear_automation.annotations.destructiveHint, true);
-  assert.deepEqual(TOOL_SPEC_BY_NAME.ramp_parameter.inputSchema.required, ['parameter', 'to']);
-  assert.equal(TOOL_SPEC_BY_NAME.cancel_ramps.inputSchema.required, undefined);
-  assert.match(validateArgs(draw.inputSchema, { clip: 'x', parameter: 'y', points: [{ time: 0 }] }) ?? '', /points\[0\]: missing required argument 'value'/);
-  assert.match(TOOL_SPEC_BY_NAME.batch.description, /draw_automation, get_automation, clear_automation/);
+test('automation: one writing tool with four actions, a read-only reader, per-action required arguments and batch rules', async () => {
+  const automation = TOOL_SPEC_BY_NAME.automation;
+  assert.deepEqual(automation.inputSchema.required, ['action']);
+  assert.deepEqual(automation.inputSchema.properties.action.enum, ['draw', 'clear', 'ramp', 'cancel']);
+  assert.deepEqual(automation.inputSchema.properties.style.enum, ['breakpoints', 'steps']);
+  assert.equal(automation.annotations.destructiveHint, true, 'draw and clear rewrite envelopes');
+  assert.equal(automation.bridge.command, 'automation');
+  for (const retired of ['draw_automation', 'clear_automation', 'ramp_parameter', 'cancel_ramps']) assert.equal(TOOL_SPEC_BY_NAME[retired], undefined, `${retired} is part of automation now`);
+  const get = TOOL_SPEC_BY_NAME.get_automation;
+  assert.equal(get.annotations.readOnlyHint, true, 'reading stays a read-only tool');
+  assert.equal(get.inputSchema.required, undefined, 'without a clip it gives the overview of the Set');
+  assert.equal(validateArgs(get.inputSchema, {}), null);
+  assert.equal(validateArgs(get.inputSchema, { address: 'tracks/2', max_items: 50 }), null);
+  const params = automation.bridge.params!;
+  assert.deepEqual(params({ action: 'draw', clip: 'c', parameter: 'p', points: [{ time: 0, value: 1 }] }).action, 'draw');
+  assert.throws(() => params({ action: 'draw', clip: 'c', parameter: 'p' }), /automation draw: missing required argument 'points'/);
+  assert.throws(() => params({ action: 'clear' }), /automation clear: missing required argument 'clip'/);
+  assert.throws(() => params({ action: 'ramp', parameter: 'p' }), /automation ramp: missing required argument 'to'/);
+  assert.throws(() => params({ action: 'ramp', parameter: 'p', to: 1, curve: 'step' }), /curve must be one of: linear, smooth, ease_in, ease_out/);
+  assert.doesNotThrow(() => params({ action: 'cancel' }));
+  assert.match(validateArgs(automation.inputSchema, { action: 'sweep' }) ?? '', /action must be one of: draw, clear, ramp, cancel/);
+  assert.match(validateArgs(automation.inputSchema, { action: 'draw', points: [{ time: 0 }] }) ?? '', /points\[0\]: missing required argument 'value'/);
+  assert.match(TOOL_SPEC_BY_NAME.batch.description, /routing, automation, get_automation/);
+  assert.match(TOOL_SPEC_BY_NAME.batch.description, /ramp and cancel actions of automation/);
+  const { runBatch } = await import('../../src/tools/batch.js');
+  const never: any = { sendCommand: async () => { throw new Error('nothing may be sent'); } };
+  for (const action of ['ramp', 'cancel']) {
+    await assert.rejects(runBatch({ ops: [{ tool: 'automation', args: { action, parameter: 'p', to: 1 } }] }, never, TOOL_SPEC_BY_NAME), new RegExp(`'automation' with action '${action}' cannot be used in a batch`));
+  }
+  const sent: any[] = [];
+  const recorder: any = { sendCommand: async (type: string, p: any) => { sent.push({ type, p }); return { results: [{}, {}] }; } };
+  await runBatch({ ops: [{ tool: 'automation', args: { action: 'clear', clip: 'tracks/0/slots/0/clip' } }, { tool: 'get_automation', args: {} }] }, recorder, TOOL_SPEC_BY_NAME);
+  assert.deepEqual(sent[0].p.ops.map((o: any) => o.command), ['automation', 'get_automation']);
+  await assert.rejects(runBatch({ ops: [{ tool: 'automation', args: { action: 'draw', clip: 'c' } }] }, never, TOOL_SPEC_BY_NAME), /automation draw: missing required argument 'parameter'/);
 });
 
 test('audio tools: convert, warp marker actions and audio_clip creation are declared', () => {
@@ -211,8 +273,17 @@ test('audio tools: convert, warp marker actions and audio_clip creation are decl
   assert.equal(convert.annotations.destructiveHint, false);
   assert.equal(validateArgs(convert.inputSchema, { address: 'tracks/0/slots/0/clip', action: 'audio_to_midi', type: 'melody' }), null);
   assert.ok(TOOL_SPEC_BY_NAME.create.inputSchema.properties.path);
-  assert.deepEqual(TOOL_SPEC_BY_NAME.analyze_audio_clip.inputSchema.required, ['address']);
-  assert.equal(TOOL_SPEC_BY_NAME.analyze_audio_clip.annotations.readOnlyHint, true);
+  const audio = TOOL_SPEC_BY_NAME.audio;
+  assert.equal(TOOL_SPEC_BY_NAME.analyze_audio_clip, undefined, 'analyze_audio_clip is the analyze action of audio now');
+  assert.deepEqual(audio.inputSchema.required, ['action']);
+  assert.deepEqual(audio.inputSchema.properties.action.enum, ['snapshot', 'analyze']);
+  assert.equal(audio.annotations.readOnlyHint, true, 'both actions only read');
+  assert.deepEqual(audio.requires, ['audio_snapshot']);
+  assert.equal(validateArgs(audio.inputSchema, { action: 'snapshot' }), null);
+  assert.equal(validateArgs(audio.inputSchema, { action: 'analyze', address: 'tracks/2/slots/0/clip', curve: true, max_points: 60 }), null);
+  assert.match(validateArgs(audio.inputSchema, { action: 'listen' }) ?? '', /action must be one of: snapshot, analyze/);
+  assert.equal(validateArgs(audio.inputSchema, { action: 'analyze', curve: 'yes' }), 'curve must be true or false');
+  assert.ok(TOOL_SPEC_BY_NAME.bounce.inputSchema.properties.curve, 'bounce can return the loudness over time too');
   assert.ok(TOOL_SPEC_BY_NAME.convert.run, 'convert waits for Live to finish, so it is a composed tool');
 });
 

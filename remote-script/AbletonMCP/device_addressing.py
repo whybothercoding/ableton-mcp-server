@@ -50,6 +50,8 @@ class DeviceAddressingMixin(object):
         if not rest:
             return "device", device, canonical
         head = rest[0]
+        if head == "view" and len(rest) == 1:
+            return "device_view", device.view, canonical + "/view"
         if head == "sample" and len(rest) == 1:
             sample = _safe_attr(device, "sample")
             if sample is None:

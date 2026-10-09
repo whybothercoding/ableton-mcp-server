@@ -16,6 +16,8 @@ from .registry import _COMMANDS, BridgeError, _error_code, command
 MAX_OPS = 100
 NOT_BATCHABLE = ("batch", "history", "eval", "transport", "launch", "ramp_parameter", "cancel_ramps", "get_script_info",
                  "get_health", "introspect_api", "measure")
+# actions of a command that are not one undoable edit (ramps run on after the call, so they cannot be part of a revertible step)
+NOT_BATCHABLE_ACTIONS = {"automation": ("ramp", "cancel")}
 _REFERENCE = re.compile(r"\$(\d+)((?:\.[A-Za-z_]\w*|\[\d+\])*)")
 _STEP = re.compile(r"\.([A-Za-z_]\w*)|\[(\d+)\]")
 
@@ -71,6 +73,10 @@ class BatchMixin(object):
                                   "INVALID_ARGUMENT")
             if op.get("params") is not None and not isinstance(op["params"], dict):
                 raise BridgeError("ops[{0}]: params must be an object".format(index), "INVALID_ARGUMENT")
+            action = (op.get("params") or {}).get("action")
+            if action in NOT_BATCHABLE_ACTIONS.get(op["command"], ()):
+                raise BridgeError("ops[{0}]: '{1}' with action '{2}' cannot run inside a batch (it is not one undoable step of edits)".format(
+                    index, op["command"], action), "INVALID_ARGUMENT")
         results, failed = [], []
         for index, op in enumerate(ops):
             name = op["command"]

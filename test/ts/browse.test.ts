@@ -103,6 +103,10 @@ test('list passes paging arguments through to the bridge, and errors are readabl
   assert.deepEqual(bridge.calls[1].params, {});
   await assert.rejects(runBrowse({ action: 'search' }, bridge), /search needs a query/);
   await assert.rejects(runBrowse({ action: 'search', query: 'x', roots: ['nowhere'] }, bridge), /Unknown roots nowhere/);
+  for (const root of ['user_folders', 'colors', 'legacy_libraries']) {
+    await assert.doesNotReject(runBrowse({ action: 'index', roots: [root] }, { sendCommand: async () => ({ done: true, items: [], token: 't', visited: 0, pending: 0 }) } as any), root);
+  }
+  await assert.rejects(runBrowse({ action: 'search', query: 'x', roots: ['nowhere'] }, bridge), /Roots: .*user_folders, colors, legacy_libraries/);
   await assert.rejects(runBrowse({ action: 'dance' }, bridge), /action must be one of: list, search, index/);
 });
 

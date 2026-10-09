@@ -28,6 +28,8 @@ export class ToolHandler {
 
       const spec = TOOL_SPEC_BY_NAME[toolName];
       if (spec) {
+        // `help: true` answers from the spec alone: no validation, no bridge call, nothing is done even when the other arguments are complete
+        if (spec.help && args.help === true) return { content: [{ type: 'text', text: `${toolName}\n\n${spec.help}` }] };
         const problem = validateArgs(spec.inputSchema, args);
         if (problem) {
           return { content: [{ type: 'text', text: `Invalid arguments for '${toolName}': ${problem}` }], isError: true };

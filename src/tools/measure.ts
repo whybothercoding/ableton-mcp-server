@@ -2,7 +2,7 @@
  * measure: sample the output meters while scenes or clips play (a state machine inside Live, restored when it ends).
  * bounce: record what a track or the main output plays into a scratch audio track and analyze that audio (loudness, true peak, spectrum).
  */
-import { analyzeAudioFile } from '../audio/analyzer.js';
+import { analyzeAudioFile, type AnalyzeOptions } from '../audio/analyzer.js';
 import { CompositionError } from './composition.js';
 import { runAnalyzeAudioClip } from './audio.js';
 import type { BridgeClient, ToolSpec } from './spec.js';
@@ -42,7 +42,7 @@ export async function runBounce(
   args: Record<string, any>,
   client: BridgeClient,
   _specs?: unknown,
-  analyze: (path: string) => Promise<unknown> = analyzeAudioFile,
+  analyze: (path: string, options?: AnalyzeOptions) => Promise<unknown> = analyzeAudioFile,
   pollMs = POLL_MS,
   wait: (ms: number) => Promise<unknown> = sleep
 ): Promise<unknown> {
@@ -113,7 +113,7 @@ export async function runBounce(
       await client.sendCommand('launch', { address: 'song', action: 'stop', quantized: false });
       if (state.startedPlayback) await client.sendCommand('transport', { action: 'stop' });
     }
-    analysis.clip = await runAnalyzeAudioClip({ address: `${slot}/clip` }, client, undefined, analyze);
+    analysis.clip = await runAnalyzeAudioClip({ address: `${slot}/clip`, curve: args.curve === true }, client, undefined, analyze);
   } finally {
     // Always leave the Set as it was: master fader back, scratch track gone (the recorded file stays in the project's Samples/Recorded).
     const cleanup = async (command: string, params: Record<string, any>) => {
@@ -186,6 +186,7 @@ export const MEASURE_SPECS: ToolSpec[] = [
         settle_beats: { type: 'number' },
         master_volume: { type: 'number' },
         keep_track: { type: 'boolean' },
+        curve: { type: 'boolean' },
         allow_while_playing: { type: 'boolean' },
         confirm_playback: { type: 'boolean' }
       },

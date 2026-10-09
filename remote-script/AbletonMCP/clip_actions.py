@@ -67,6 +67,17 @@ class ClipActionsMixin(object):
             return {"playing_slot_index": obj.playing_slot_index, "fired_slot_index": obj.fired_slot_index}
         return {"is_playing": bool(obj.is_playing), "is_triggered": bool(obj.is_triggered), "is_recording": bool(obj.is_recording)}
 
+    def _stop_slot(self, slot, canonical, quantized):
+        """Stop a clip slot. ClipSlot.stop always waits for the global launch quantization (the next bar), whatever the clip's own setting, and has
+        no argument to change that, so an immediate stop (`quantized: false`) goes through the track: a track plays one clip at a time, so
+        stopping the track unquantized is the same as stopping this clip when it is the one playing. A slot that is only waiting to launch is cancelled as usual."""
+        track_address, _, slot_index = canonical.partition("/slots/")
+        track = self._resolve(track_address)[1]
+        if not quantized and _safe_attr(track, "playing_slot_index", -1) == int(slot_index):
+            track.stop_all_clips(False)
+        else:
+            slot.stop()
+
     @command("launch", writes=True)
     def _cmd_launch(self, params):
         action = params.get("action", "fire")
@@ -90,6 +101,14 @@ class ClipActionsMixin(object):
         select = params.get("select", True)
         if not isinstance(select, bool):
             raise BridgeError("select must be true or false", "TYPE_ERROR")
+        hold = params.get("hold")
+        if hold is not None and not isinstance(hold, bool):
+            raise BridgeError("hold must be true or false", "TYPE_ERROR")
+        if hold is None and (params.get("hold_beats") is not None or params.get("hold_seconds") is not None):
+            raise BridgeError("hold_beats and hold_seconds belong with hold: true", "INVALID_ARGUMENT")
+        if hold is not None and (action != "fire" or legato is not None or record_length is not None or quantization is not None
+                                 or params.get("select") is not None):
+            raise BridgeError("hold presses or releases the fire button itself: it takes no action, legato, record_length, quantization or select", "INVALID_ARGUMENT")
 
         if kind == "clip" and "/arrangement/" in canonical:
             raise BridgeError("'{0}' is on the arrangement timeline: only Session clips launch (playback of the arrangement is transport play)".format(canonical),
@@ -97,10 +116,12 @@ class ClipActionsMixin(object):
         if kind == "clip":                       # a clip is launched through the slot that owns it
             canonical = canonical[: -len("/clip")]
             kind, obj = "slot", self._resolve(canonical)[1]
+        if hold is not None:
+            return self._launch_hold(kind, obj, canonical, params, hold)
         options = legato is not None or record_length is not None or launch_quantization is not None
         if kind == "slot":
             if action == "stop":
-                obj.stop()
+                self._stop_slot(obj, canonical, quantized)
             elif options:
                 obj.fire(float(record_length) if record_length is not None else _NO_RECORD_LENGTH,
                          launch_quantization if launch_quantization is not None else _NO_QUANTIZATION,

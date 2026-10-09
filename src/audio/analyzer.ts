@@ -18,7 +18,7 @@ interface FfprobeResult {
   }>;
 }
 
-function runProcess(command: string, args: string[], maxBytes = 64 * 1024 * 1024): Promise<{ stdout: Buffer; stderr: string }> {
+function runProcess(command: string, args: string[], maxBytes = 64 * 1024 * 1024, maxStderrBytes = 1024 * 1024): Promise<{ stdout: Buffer; stderr: string; stderrTruncated: boolean }> {
   return new Promise((resolve, reject) => {
     const child = spawn(command, args, { stdio: ['ignore', 'pipe', 'pipe'] });
     const stdout: Buffer[] = [];
@@ -47,10 +47,13 @@ function runProcess(command: string, args: string[], maxBytes = 64 * 1024 * 1024
       }
       stdout.push(chunk);
     });
+    let stderrTruncated = false;
     child.stderr.on('data', (chunk: Buffer) => {
-      if (stderrLength < 1024 * 1024) {
+      if (stderrLength < maxStderrBytes) {
         stderr.push(chunk);
         stderrLength += chunk.length;
+      } else {
+        stderrTruncated = true;
       }
     });
     child.on('error', (error) => fail(error));
@@ -62,7 +65,7 @@ function runProcess(command: string, args: string[], maxBytes = 64 * 1024 * 1024
         reject(new Error(`${command} failed${signal ? ` (${signal})` : ` with exit code ${code}`}: ${Buffer.concat(stderr).toString('utf8').trim()}`));
         return;
       }
-      resolve({ stdout: Buffer.concat(stdout), stderr: Buffer.concat(stderr).toString('utf8') });
+      resolve({ stdout: Buffer.concat(stdout), stderr: Buffer.concat(stderr).toString('utf8'), stderrTruncated });
     });
   });
 }
@@ -186,7 +189,40 @@ async function isAbletonCompressedAiff(filePath: string): Promise<boolean> {
   }
 }
 
-export async function analyzeAudioFile(filePath: string) {
+export interface AnalyzeOptions {
+  /** Also return the momentary and short-term loudness over time and the loudness range (EBU R128). */
+  curve?: boolean;
+  /** Most points in the curve (default 120). */
+  maxPoints?: number;
+}
+
+const FRAME_LEVEL = '(-?inf|-?\\d+(?:\\.\\d+)?)';
+const LOUDNESS_FRAME = new RegExp(`\\bt:\\s*(\\d+(?:\\.\\d+)?)\\s+TARGET:\\s*-?\\d+\\s*LUFS\\s+M:\\s*${FRAME_LEVEL}\\s+S:\\s*${FRAME_LEVEL}\\s+I:\\s*${FRAME_LEVEL}\\s*LUFS\\s+LRA:\\s*(\\d+(?:\\.\\d+)?)\\s*LU`, 'g');
+
+/** ffmpeg's ebur128 prints a line every 100 ms (framelog=info): t, momentary (M, 400 ms), short-term (S, 3 s), running integrated (I) and LRA. Values at or under -120 LUFS are its floor, not a measurement. */
+export function parseLoudnessCurve(stderr: string, maxPoints = 120) {
+  const level = (text: string): number | null => {
+    const value = /inf/i.test(text) ? Number.NEGATIVE_INFINITY : Number(text);
+    return value <= -120 ? null : value;
+  };
+  const frames = Array.from(stderr.matchAll(LOUDNESS_FRAME), (m) => ({ time: Number(m[1]), momentary: level(m[2]), shortTerm: level(m[3]), range: Number(m[5]) }));
+  if (!frames.length) return null;
+  const stride = Math.max(1, Math.ceil(frames.length / Math.max(2, maxPoints)));
+  const sampled = frames.filter((_, index) => index % stride === stride - 1 || index === frames.length - 1);
+  const maxOf = (pick: (frame: (typeof frames)[number]) => number | null) => {
+    const values = frames.map(pick).filter((v): v is number => v !== null);
+    return values.length ? Math.max(...values) : null;
+  };
+  return {
+    points: sampled.map((f) => ({ time_seconds: Math.round(f.time * 10) / 10, momentary_lufs: f.momentary, short_term_lufs: f.shortTerm })),
+    max_momentary_lufs: maxOf((f) => f.momentary),
+    max_short_term_lufs: maxOf((f) => f.shortTerm),
+    loudness_range_lu: frames[frames.length - 1].range,
+    note: 'short_term_lufs is null for the first 3 s (its window is not full yet) and momentary_lufs for silence; each point is the last 100 ms frame of its stretch, the maxima cover every frame.'
+  };
+}
+
+export async function analyzeAudioFile(filePath: string, options: AnalyzeOptions = {}) {
   if (!filePath || typeof filePath !== 'string') throw new Error('The Live clip did not provide a source audio file path');
   const resolvedPath = filePath.trim();
   const fileStat = await stat(resolvedPath).catch(() => null);
@@ -213,9 +249,11 @@ export async function analyzeAudioFile(filePath: string) {
   const audioStream = probeData.streams?.find((stream) => stream.codec_type === 'audio');
   if (!audioStream) throw new Error('The clip source contains no audio stream');
 
+  // framelog=verbose keeps the per-frame lines out of the output; the curve needs them (info), which makes stderr large: raise its limit and say so if it is hit
   const loudnessRun = await runProcess(ffmpeg, [
-    '-hide_banner', '-nostats', '-i', resolvedPath, '-filter_complex', 'ebur128=framelog=verbose:peak=true', '-f', 'null', '-'
-  ], 1024);
+    '-hide_banner', '-nostats', '-i', resolvedPath, '-filter_complex', `ebur128=framelog=${options.curve ? 'info' : 'verbose'}:peak=true`, '-f', 'null', '-'
+  ], 1024, options.curve ? 32 * 1024 * 1024 : undefined);
+  if (loudnessRun.stderrTruncated) throw new Error('The loudness log of this file is too long to read in full: analyze it without curve, or bounce a shorter stretch');
   const loudnessMatches = Array.from(loudnessRun.stderr.matchAll(/\bI:\s*(-?inf|-?\d+(?:\.\d+)?)\s*LUFS\b/gi));
   const loudnessValue = loudnessMatches.at(-1)?.[1];
   const truePeakValue = loudnessRun.stderr.match(/True peak:\s*Peak:\s*(-?inf|-?\d+(?:\.\d+)?)\s*dBFS/i)?.[1];
@@ -264,6 +302,7 @@ export async function analyzeAudioFile(filePath: string) {
     bit_depth: audioStream.bits_per_raw_sample ? Number(audioStream.bits_per_raw_sample) : (audioStream.bits_per_sample || null),
     integrated_loudness_lufs: loudnessValue && !/inf/i.test(loudnessValue) ? Number(loudnessValue) : null,
     true_peak_dbtp: truePeakDbtp,
+    ...(options.curve ? { loudness_over_time: parseLoudnessCurve(loudnessRun.stderr, options.maxPoints) } : {}),
     signal,
     analysis_notes: [`Signal statistics use the first ${ANALYSIS_SECONDS} seconds. Peak and RMS are measured at the source sample rate across all channels; frequency bands sum per-channel spectra after resampling to ${SAMPLE_RATE} Hz.`, 'Integrated loudness and true peak (dBTP, 4x oversampled) are measured over the full source file using the EBU R128 filter.']
   };
